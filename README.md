@@ -1,12 +1,12 @@
-# Synology MCP Server
+# 🏠 Synology MCP Server
 
 ![Synology MCP Server](assets/banner.png)
 
 A Model Context Protocol (MCP) server for Synology NAS devices. Enables AI assistants to manage files and downloads through secure authentication and session management.
 
-## Quick Start with Docker
+## 🚀 Quick Start with Docker
 
-### 1. Setup Environment
+### 1️⃣ Setup Environment
 ```bash
 # Clone repository
 git clone https://github.com/atom2ueki/mcp-server-synology.git
@@ -16,7 +16,7 @@ cd mcp-server-synology
 cp env.example .env
 ```
 
-### 2. Configure .env File
+### 2️⃣ Configure .env File
 ```bash
 # Required: Synology NAS connection
 SYNOLOGY_URL=http://192.168.1.100:5000
@@ -28,7 +28,7 @@ AUTO_LOGIN=true
 VERIFY_SSL=false
 ```
 
-### 3. Run with Docker
+### 3️⃣ Run with Docker
 ```bash
 # Build and run
 docker-compose up --build
@@ -37,7 +37,7 @@ docker-compose up --build
 docker-compose up -d --build
 ```
 
-### 4. Alternative: Docker Run
+### 4️⃣ Alternative: Docker Run
 ```bash
 # Build image
 docker build -t synology-mcp-server .
@@ -46,9 +46,9 @@ docker build -t synology-mcp-server .
 docker run --env-file .env synology-mcp-server
 ```
 
-## MCP Client Setup
+## 🔌 MCP Client Setup
 
-### Claude Desktop
+### 🤖 Claude Desktop
 
 Add to your Claude Desktop configuration file:
 
@@ -70,7 +70,7 @@ Add to your Claude Desktop configuration file:
 }
 ```
 
-### Continue (VS Code Extension)
+### 🔄 Continue (VS Code Extension)
 
 Add to your Continue configuration (`.continue/config.json`):
 
@@ -89,7 +89,7 @@ Add to your Continue configuration (`.continue/config.json`):
 }
 ```
 
-### Cursor
+### ↗️ Cursor
 
 Add to your Cursor MCP settings:
 
@@ -108,7 +108,7 @@ Add to your Cursor MCP settings:
 }
 ```
 
-### Codeium
+### 💻 Codeium
 
 For Codeium's MCP support:
 
@@ -127,7 +127,7 @@ For Codeium's MCP support:
 }
 ```
 
-### Alternative: Direct Python Execution
+### 🐍 Alternative: Direct Python Execution
 
 If you prefer not to use Docker, you can run the server directly:
 
@@ -149,7 +149,7 @@ If you prefer not to use Docker, you can run the server directly:
 }
 ```
 
-## Local Development Setup
+## 💻 Local Development Setup
 
 ```bash
 # Install dependencies
@@ -159,14 +159,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
-## Available MCP Tools
+## 🛠️ Available MCP Tools
 
-### Authentication
+### 🔐 Authentication
 - **`synology_status`** - Check authentication status and active sessions
 - **`synology_login`** - Authenticate with Synology NAS *(conditional)*
 - **`synology_logout`** - Logout from session *(conditional)*
 
-### File System Operations
+### 📁 File System Operations
 - **`list_shares`** - List all available NAS shares
 - **`list_directory`** - List directory contents with metadata
   - `path` (required): Directory path starting with `/`
@@ -193,7 +193,7 @@ python main.py
   - `destination_path` (required): Destination path
   - `overwrite` (optional): Overwrite existing files
 
-### Download Station Management
+### 📥 Download Station Management
 - **`ds_get_info`** - Get Download Station information
 - **`ds_list_tasks`** - List all download tasks with status
   - `offset` (optional): Pagination offset
@@ -210,7 +210,7 @@ python main.py
   - `force_complete` (optional): Force delete completed
 - **`ds_get_statistics`** - Get download/upload statistics
 
-## Configuration Options
+## ⚙️ Configuration Options
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -223,11 +223,11 @@ python main.py
 
 *Required for auto-login and default operations
 
-## Usage Examples
+## 📖 Usage Examples
 
-### File Operations
+### 📁 File Operations
 
-#### Creating Files and Directories
+#### ✅ Creating Files and Directories
 ![File Creation](assets/add.png)
 
 ```json
@@ -250,7 +250,7 @@ python main.py
 }
 ```
 
-#### Deleting Files and Directories
+#### 🗑️ Deleting Files and Directories
 ![File Deletion](assets/delete.png)
 
 ```json
@@ -266,9 +266,9 @@ python main.py
 }
 ```
 
-### Download Management
+### ⬇️ Download Management
 
-#### Creating a Download Task
+#### 🛠️ Creating a Download Task
 ![Download Sample](assets/download_sample.png)
 
 ```json
@@ -284,10 +284,10 @@ python main.py
 }
 ```
 
-#### Download Results
+#### 🦦 Download Results
 ![Download Result](assets/download_result.png)
 
-## Features
+## ✨ Features
 
 - ✅ **Secure Authentication** - RSA encrypted password transmission
 - ✅ **Session Management** - Persistent sessions across multiple NAS devices  
