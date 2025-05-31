@@ -226,6 +226,10 @@ python main.py
 ## Usage Examples
 
 ### File Operations
+
+#### Creating Files and Directories
+![File Creation](assets/add.png)
+
 ```json
 // List directory
 {
@@ -244,16 +248,15 @@ python main.py
   "content": "My important notes\nLine 2 of notes",
   "overwrite": false
 }
+```
 
-// Delete file
+#### Deleting Files and Directories
+![File Deletion](assets/delete.png)
+
+```json
+// Delete file or directory (auto-detects type)
 {
   "path": "/volume1/temp/old-file.txt"
-}
-
-// Delete directory recursively
-{
-  "path": "/volume1/temp/old-folder",
-  "recursive": true
 }
 
 // Move file
