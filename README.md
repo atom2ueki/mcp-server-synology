@@ -1,4 +1,4 @@
-# 🏠 Synology MCP Server
+# 💾 Synology MCP Server
 
 ![Synology MCP Server](assets/banner.png)
 
