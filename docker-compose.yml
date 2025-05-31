@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  synology-mcp:
+    build: .
+    container_name: synology-mcp-server
+    network_mode: host  # Allow access to local network (192.168.x.x)
+    environment:
+      # Override these in .env file or here
+      - SYNOLOGY_URL=${SYNOLOGY_URL:-http://192.168.1.10:5000}
+      - SYNOLOGY_USERNAME=${SYNOLOGY_USERNAME:-your_username}
+      - SYNOLOGY_PASSWORD=${SYNOLOGY_PASSWORD:-your_password}
+      - AUTO_LOGIN=${AUTO_LOGIN:-true}
+      - DEBUG=${DEBUG:-false}
+      - VERIFY_SSL=${VERIFY_SSL:-false}
+    volumes:
+      # Mount .env file if you want to use it
+      - ./.env:/app/.env:ro
+    stdin_open: true
+    tty: true
+    # For MCP, we typically don't need port mapping since it uses stdio
+    # ports:
+    #   - "8000:8000"
+    restart: unless-stopped 
