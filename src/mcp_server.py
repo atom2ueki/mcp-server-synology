@@ -291,8 +291,8 @@ class SynologyMCPServer:
                     }
                 ),
                 types.Tool(
-                    name="delete_file",
-                    description="Delete a file or directory on the Synology NAS",
+                    name="delete",
+                    description="Delete a file or directory on the Synology NAS (auto-detects type)",
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -303,35 +303,9 @@ class SynologyMCPServer:
                             "path": {
                                 "type": "string",
                                 "description": "Full path to the file/directory to delete (must start with /)"
-                            },
-                            "recursive": {
-                                "type": "boolean",
-                                "description": "Whether to delete directories recursively (default: false)"
                             }
                         },
                         "required": ["path"]
-                    }
-                ),
-                types.Tool(
-                    name="remove_directory",
-                    description="Remove a directory and optionally its contents on the Synology NAS",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "directory_path": {
-                                "type": "string",
-                                "description": "Full path to the directory to remove (must start with /)"
-                            },
-                            "recursive": {
-                                "type": "boolean",
-                                "description": "Whether to remove directory contents recursively (default: true)"
-                            }
-                        },
-                        "required": ["directory_path"]
                     }
                 ),
                 # Download Station Tools
@@ -547,10 +521,8 @@ class SynologyMCPServer:
                     return await self._handle_create_file(arguments)
                 elif name == "create_directory":
                     return await self._handle_create_directory(arguments)
-                elif name == "delete_file":
-                    return await self._handle_delete_file(arguments)
-                elif name == "remove_directory":
-                    return await self._handle_remove_directory(arguments)
+                elif name == "delete":
+                    return await self._handle_delete(arguments)
                 # Download Station handlers
                 elif name == "ds_get_info":
                     return await self._handle_ds_get_info(arguments)
@@ -827,32 +799,17 @@ class SynologyMCPServer:
             text=f"Create directory result: {json.dumps(result, indent=2)}"
         )]
     
-    async def _handle_delete_file(self, arguments: dict) -> list[types.TextContent]:
+    async def _handle_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting a file or directory on the Synology NAS."""
         base_url = self._get_base_url(arguments)
         path = arguments["path"]
-        recursive = arguments.get("recursive", False)
         
         filestation = self._get_filestation(base_url)
-        result = filestation.delete_file(path, recursive)
+        result = filestation.delete(path)
         
         return [types.TextContent(
             type="text",
-            text=f"Delete file result: {json.dumps(result, indent=2)}"
-        )]
-    
-    async def _handle_remove_directory(self, arguments: dict) -> list[types.TextContent]:
-        """Handle removing a directory and optionally its contents on the Synology NAS."""
-        base_url = self._get_base_url(arguments)
-        directory_path = arguments["directory_path"]
-        recursive = arguments.get("recursive", True)
-        
-        filestation = self._get_filestation(base_url)
-        result = filestation.remove_directory(directory_path, recursive)
-        
-        return [types.TextContent(
-            type="text",
-            text=f"Remove directory result: {json.dumps(result, indent=2)}"
+            text=f"Delete result: {json.dumps(result, indent=2)}"
         )]
     
     async def _handle_ds_get_info(self, arguments: dict) -> list[types.TextContent]:

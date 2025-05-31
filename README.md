@@ -179,9 +179,12 @@ python main.py
   - `path` (required): Full file path starting with `/`
   - `content` (optional): File content (default: empty string)
   - `overwrite` (optional): Overwrite existing files (default: false)
-- **`delete_file`** - Delete files or directories
+- **`create_directory`** - Create new directories
+  - `folder_path` (required): Parent directory path starting with `/`
+  - `name` (required): New directory name
+  - `force_parent` (optional): Create parent directories if needed (default: false)
+- **`delete`** - Delete files or directories (auto-detects type)
   - `path` (required): File/directory path starting with `/`
-  - `recursive` (optional): Delete directories recursively (default: false)
 - **`rename_file`** - Rename files or directories
   - `path` (required): Current file path
   - `new_name` (required): New filename

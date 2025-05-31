@@ -396,12 +396,11 @@ class SynologyFileStation:
             'message': f"Successfully created directory '{clean_name}' at '{formatted_folder_path}'"
         }
     
-    def delete_file(self, path: str, recursive: bool = False) -> Dict[str, Any]:
-        """Delete a file or directory.
+    def delete(self, path: str) -> Dict[str, Any]:
+        """Delete a file or directory (auto-detects type).
         
         Args:
             path: Full path to the file/directory to delete (must start with /)
-            recursive: Whether to delete directories recursively (default: False)
         
         Returns:
             Dict with operation result
@@ -410,7 +409,7 @@ class SynologyFileStation:
         
         # Validate path
         if not formatted_path or formatted_path == '/':
-            raise Exception("Invalid file path - cannot delete root")
+            raise Exception("Invalid path - cannot delete root")
         
         # Safety check for critical paths
         critical_paths = ['/volume1', '/homes', '/var', '/etc', '/usr', '/bin', '/sbin']
@@ -418,10 +417,17 @@ class SynologyFileStation:
             if formatted_path in critical_paths:
                 raise Exception(f"Cannot delete critical system path: {formatted_path}")
         
-        filename = os.path.basename(formatted_path)
+        # Auto-detect if this is a file or directory
+        try:
+            file_info = self.get_file_info(formatted_path)
+            recursive = file_info.get('type') == 'directory'
+        except:
+            recursive = False  # Default to file behavior if can't determine
+        
+        item_name = os.path.basename(formatted_path)
+        item_type = "directory" if recursive else "file"
         
         # Use the correct API format according to documentation
-        # The path parameter should be an array of paths as a string in JSON format
         path_array = json.dumps([formatted_path])
         
         # Start the delete task (async operation)
@@ -457,98 +463,17 @@ class SynologyFileStation:
                     return {
                         'success': True,
                         'path': formatted_path,
-                        'filename': filename,
+                        'item_name': item_name,
+                        'item_type': item_type,
                         'recursive': recursive,
                         'task_id': task_id,
-                        'message': f"Successfully deleted '{filename}'"
+                        'message': f"Successfully deleted {item_type} '{item_name}'"
                     }
                 
                 time.sleep(0.5)
                 wait_time += 0.5
             
             raise Exception(f"Delete operation timed out after {max_wait_time} seconds")
-            
-        except Exception as e:
-            # Try to stop the task if it's still running
-            try:
-                self._make_request(
-                    'SYNO.FileStation.Delete', '2', 'stop',
-                    taskid=task_id
-                )
-            except:
-                pass  # Ignore cleanup errors
-            raise e
-    
-    def remove_directory(self, directory_path: str, recursive: bool = True) -> Dict[str, Any]:
-        """Remove a directory and optionally its contents.
-        
-        Args:
-            directory_path: Full path to the directory to remove (must start with /)
-            recursive: Whether to remove directory contents recursively (default: True for directories)
-        
-        Returns:
-            Dict with operation result
-        """
-        formatted_path = self._format_path(directory_path)
-        
-        # Validate path
-        if not formatted_path or formatted_path == '/':
-            raise Exception("Invalid directory path - cannot delete root")
-        
-        # Safety check for critical paths
-        critical_paths = ['/volume1', '/homes', '/var', '/etc', '/usr', '/bin', '/sbin']
-        if any(formatted_path.startswith(critical_path) for critical_path in critical_paths):
-            if formatted_path in critical_paths:
-                raise Exception(f"Cannot delete critical system path: {formatted_path}")
-        
-        directory_name = os.path.basename(formatted_path)
-        
-        # Use the correct API format according to documentation
-        path_array = json.dumps([formatted_path])
-        
-        # Start the delete task (async operation)
-        start_data = self._make_request(
-            'SYNO.FileStation.Delete', '2', 'start',
-            path=path_array,
-            accurate_progress='true',
-            recursive=str(recursive).lower()
-        )
-        
-        task_id = start_data.get('taskid')
-        if not task_id:
-            raise Exception("Failed to start directory removal task")
-        
-        try:
-            # Wait for delete to complete
-            import time
-            max_wait_time = 120  # Maximum wait time for directories (2 minutes)
-            wait_time = 0
-            
-            while wait_time < max_wait_time:
-                status_data = self._make_request(
-                    'SYNO.FileStation.Delete', '2', 'status',
-                    taskid=task_id
-                )
-                
-                if status_data.get('finished'):
-                    # Check if there were any errors
-                    if 'error' in status_data:
-                        error_info = status_data['error']
-                        raise Exception(f"Directory removal failed: {error_info}")
-                    
-                    return {
-                        'success': True,
-                        'directory_path': formatted_path,
-                        'directory_name': directory_name,
-                        'recursive': recursive,
-                        'task_id': task_id,
-                        'message': f"Successfully removed directory '{directory_name}'{' and its contents' if recursive else ''}"
-                    }
-                
-                time.sleep(0.5)
-                wait_time += 0.5
-            
-            raise Exception(f"Directory removal operation timed out after {max_wait_time} seconds")
             
         except Exception as e:
             # Try to stop the task if it's still running
