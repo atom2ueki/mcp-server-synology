@@ -4,6 +4,8 @@ import requests
 from typing import Dict, List, Any, Optional
 from urllib.parse import quote
 import os
+import tempfile
+import json
 
 
 class SynologyFileStation:
@@ -25,6 +27,26 @@ class SynologyFileStation:
         }
         
         response = requests.get(self.api_url, params=request_params)
+        response.raise_for_status()
+        
+        data = response.json()
+        if not data.get('success'):
+            error_code = data.get('error', {}).get('code', 'unknown')
+            raise Exception(f"Synology API error: {error_code}")
+        
+        return data.get('data', {})
+    
+    def _make_upload_request(self, api: str, version: str, method: str, files: Dict[str, Any], **params) -> Dict[str, Any]:
+        """Make an upload request to Synology API."""
+        request_params = {
+            'api': api,
+            'version': version,
+            'method': method,
+            '_sid': self.session_id,
+            **params
+        }
+        
+        response = requests.post(self.api_url, params=request_params, files=files)
         response.raise_for_status()
         
         data = response.json()
@@ -245,6 +267,299 @@ class SynologyFileStation:
             'new_name': new_name,
             'message': f"Successfully renamed '{os.path.basename(formatted_path)}' to '{new_name}'"
         }
+    
+    def create_file(self, path: str, content: str = "", overwrite: bool = False) -> Dict[str, Any]:
+        """Create a new file with specified content.
+        
+        Args:
+            path: Full path where the file should be created (must start with /)
+            content: Content to write to the file (default: empty string)
+            overwrite: Whether to overwrite existing file (default: False)
+        
+        Returns:
+            Dict with operation result
+        """
+        formatted_path = self._format_path(path)
+        
+        # Validate path
+        if not formatted_path or formatted_path == '/':
+            raise Exception("Invalid file path")
+        
+        # Get directory and filename
+        directory = os.path.dirname(formatted_path)
+        filename = os.path.basename(formatted_path)
+        
+        if not filename:
+            raise Exception("Invalid filename")
+        
+        # Create temporary file with content
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as temp_file:
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+        
+        try:
+            # Use direct session approach like the working implementation
+            session = requests.session()
+            
+            with open(temp_file_path, 'rb') as payload:
+                # Build URL with parameters
+                url = f"{self.api_url}?api=SYNO.FileStation.Upload&version=2&method=upload&_sid={self.session_id}"
+                
+                # Create multipart data
+                files = {
+                    'file': (filename, payload, 'text/plain')
+                }
+                
+                data = {
+                    'path': directory,
+                    'create_parents': 'true',
+                    'overwrite': str(overwrite).lower()
+                }
+                
+                # Make the request
+                response = session.post(url, files=files, data=data)
+                response.raise_for_status()
+                
+                result = response.json()
+                
+                if not result.get('success'):
+                    error_code = result.get('error', {}).get('code', 'unknown')
+                    raise Exception(f"Upload failed with error: {error_code}")
+            
+            session.close()
+            
+            return {
+                'success': True,
+                'path': formatted_path,
+                'filename': filename,
+                'directory': directory,
+                'size': len(content.encode('utf-8')),
+                'message': f"Successfully created file '{filename}' at '{directory}'"
+            }
+            
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(temp_file_path)
+            except:
+                pass  # Ignore cleanup errors
+    
+    def create_directory(self, folder_path: str, name: str, force_parent: bool = False) -> Dict[str, Any]:
+        """Create a new directory.
+        
+        Args:
+            folder_path: Parent directory path where the new folder should be created (must start with /)
+            name: Name of the new directory to create
+            force_parent: Whether to create parent directories if they don't exist (default: False)
+        
+        Returns:
+            Dict with operation result
+        """
+        formatted_folder_path = self._format_path(folder_path)
+        
+        # Validate folder path
+        if not formatted_folder_path:
+            raise Exception("Invalid folder path")
+        
+        # Validate name
+        if not name or name.strip() == '':
+            raise Exception("Directory name cannot be empty")
+        
+        # Remove any path separators from name
+        clean_name = name.strip().replace('/', '').replace('\\', '')
+        
+        if not clean_name:
+            raise Exception("Invalid directory name")
+        
+        # Use the exact working pattern from the user's request
+        data = self._make_request(
+            'SYNO.FileStation.CreateFolder', '2', 'create',
+            folder_path=formatted_folder_path,
+            name=clean_name,
+            force_parent=force_parent
+        )
+        
+        folders = data.get('folders', [])
+        if not folders:
+            raise Exception("Failed to create directory - no folder data returned")
+        
+        created_folder = folders[0]
+        full_path = created_folder.get('path', f"{formatted_folder_path}/{clean_name}")
+        
+        return {
+            'success': True,
+            'folder_path': formatted_folder_path,
+            'name': clean_name,
+            'full_path': full_path,
+            'is_directory': created_folder.get('isdir', True),
+            'force_parent': force_parent,
+            'message': f"Successfully created directory '{clean_name}' at '{formatted_folder_path}'"
+        }
+    
+    def delete_file(self, path: str, recursive: bool = False) -> Dict[str, Any]:
+        """Delete a file or directory.
+        
+        Args:
+            path: Full path to the file/directory to delete (must start with /)
+            recursive: Whether to delete directories recursively (default: False)
+        
+        Returns:
+            Dict with operation result
+        """
+        formatted_path = self._format_path(path)
+        
+        # Validate path
+        if not formatted_path or formatted_path == '/':
+            raise Exception("Invalid file path - cannot delete root")
+        
+        # Safety check for critical paths
+        critical_paths = ['/volume1', '/homes', '/var', '/etc', '/usr', '/bin', '/sbin']
+        if any(formatted_path.startswith(critical_path) for critical_path in critical_paths):
+            if formatted_path in critical_paths:
+                raise Exception(f"Cannot delete critical system path: {formatted_path}")
+        
+        filename = os.path.basename(formatted_path)
+        
+        # Use the correct API format according to documentation
+        # The path parameter should be an array of paths as a string in JSON format
+        path_array = json.dumps([formatted_path])
+        
+        # Start the delete task (async operation)
+        start_data = self._make_request(
+            'SYNO.FileStation.Delete', '2', 'start',
+            path=path_array,
+            accurate_progress='true',
+            recursive=str(recursive).lower()
+        )
+        
+        task_id = start_data.get('taskid')
+        if not task_id:
+            raise Exception("Failed to start delete task")
+        
+        try:
+            # Wait for delete to complete
+            import time
+            max_wait_time = 120  # Maximum wait time (2 minutes)
+            wait_time = 0
+            
+            while wait_time < max_wait_time:
+                status_data = self._make_request(
+                    'SYNO.FileStation.Delete', '2', 'status',
+                    taskid=task_id
+                )
+                
+                if status_data.get('finished'):
+                    # Check if there were any errors
+                    if 'error' in status_data:
+                        error_info = status_data['error']
+                        raise Exception(f"Delete failed: {error_info}")
+                    
+                    return {
+                        'success': True,
+                        'path': formatted_path,
+                        'filename': filename,
+                        'recursive': recursive,
+                        'task_id': task_id,
+                        'message': f"Successfully deleted '{filename}'"
+                    }
+                
+                time.sleep(0.5)
+                wait_time += 0.5
+            
+            raise Exception(f"Delete operation timed out after {max_wait_time} seconds")
+            
+        except Exception as e:
+            # Try to stop the task if it's still running
+            try:
+                self._make_request(
+                    'SYNO.FileStation.Delete', '2', 'stop',
+                    taskid=task_id
+                )
+            except:
+                pass  # Ignore cleanup errors
+            raise e
+    
+    def remove_directory(self, directory_path: str, recursive: bool = True) -> Dict[str, Any]:
+        """Remove a directory and optionally its contents.
+        
+        Args:
+            directory_path: Full path to the directory to remove (must start with /)
+            recursive: Whether to remove directory contents recursively (default: True for directories)
+        
+        Returns:
+            Dict with operation result
+        """
+        formatted_path = self._format_path(directory_path)
+        
+        # Validate path
+        if not formatted_path or formatted_path == '/':
+            raise Exception("Invalid directory path - cannot delete root")
+        
+        # Safety check for critical paths
+        critical_paths = ['/volume1', '/homes', '/var', '/etc', '/usr', '/bin', '/sbin']
+        if any(formatted_path.startswith(critical_path) for critical_path in critical_paths):
+            if formatted_path in critical_paths:
+                raise Exception(f"Cannot delete critical system path: {formatted_path}")
+        
+        directory_name = os.path.basename(formatted_path)
+        
+        # Use the correct API format according to documentation
+        path_array = json.dumps([formatted_path])
+        
+        # Start the delete task (async operation)
+        start_data = self._make_request(
+            'SYNO.FileStation.Delete', '2', 'start',
+            path=path_array,
+            accurate_progress='true',
+            recursive=str(recursive).lower()
+        )
+        
+        task_id = start_data.get('taskid')
+        if not task_id:
+            raise Exception("Failed to start directory removal task")
+        
+        try:
+            # Wait for delete to complete
+            import time
+            max_wait_time = 120  # Maximum wait time for directories (2 minutes)
+            wait_time = 0
+            
+            while wait_time < max_wait_time:
+                status_data = self._make_request(
+                    'SYNO.FileStation.Delete', '2', 'status',
+                    taskid=task_id
+                )
+                
+                if status_data.get('finished'):
+                    # Check if there were any errors
+                    if 'error' in status_data:
+                        error_info = status_data['error']
+                        raise Exception(f"Directory removal failed: {error_info}")
+                    
+                    return {
+                        'success': True,
+                        'directory_path': formatted_path,
+                        'directory_name': directory_name,
+                        'recursive': recursive,
+                        'task_id': task_id,
+                        'message': f"Successfully removed directory '{directory_name}'{' and its contents' if recursive else ''}"
+                    }
+                
+                time.sleep(0.5)
+                wait_time += 0.5
+            
+            raise Exception(f"Directory removal operation timed out after {max_wait_time} seconds")
+            
+        except Exception as e:
+            # Try to stop the task if it's still running
+            try:
+                self._make_request(
+                    'SYNO.FileStation.Delete', '2', 'stop',
+                    taskid=task_id
+                )
+            except:
+                pass  # Ignore cleanup errors
+            raise e
     
     def move_file(self, source_path: str, destination_path: str, overwrite: bool = False) -> Dict[str, Any]:
         """Move a file or directory to a new location.

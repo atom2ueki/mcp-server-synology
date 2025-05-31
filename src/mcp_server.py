@@ -238,6 +238,102 @@ class SynologyMCPServer:
                         "required": ["source_path", "destination_path"]
                     }
                 ),
+                types.Tool(
+                    name="create_file",
+                    description="Create a new file with specified content on the Synology NAS",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "base_url": {
+                                "type": "string",
+                                "description": "Synology NAS base URL (optional if configured in .env)"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Full path where the file should be created (must start with /)"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to write to the file (default: empty string)"
+                            },
+                            "overwrite": {
+                                "type": "boolean",
+                                "description": "Whether to overwrite existing file (default: false)"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                ),
+                types.Tool(
+                    name="create_directory",
+                    description="Create a new directory on the Synology NAS",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "base_url": {
+                                "type": "string",
+                                "description": "Synology NAS base URL (optional if configured in .env)"
+                            },
+                            "folder_path": {
+                                "type": "string",
+                                "description": "Parent directory path where the new folder should be created (must start with /)"
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Name of the new directory to create"
+                            },
+                            "force_parent": {
+                                "type": "boolean",
+                                "description": "Whether to create parent directories if they don't exist (default: false)"
+                            }
+                        },
+                        "required": ["folder_path", "name"]
+                    }
+                ),
+                types.Tool(
+                    name="delete_file",
+                    description="Delete a file or directory on the Synology NAS",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "base_url": {
+                                "type": "string",
+                                "description": "Synology NAS base URL (optional if configured in .env)"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Full path to the file/directory to delete (must start with /)"
+                            },
+                            "recursive": {
+                                "type": "boolean",
+                                "description": "Whether to delete directories recursively (default: false)"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                ),
+                types.Tool(
+                    name="remove_directory",
+                    description="Remove a directory and optionally its contents on the Synology NAS",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "base_url": {
+                                "type": "string",
+                                "description": "Synology NAS base URL (optional if configured in .env)"
+                            },
+                            "directory_path": {
+                                "type": "string",
+                                "description": "Full path to the directory to remove (must start with /)"
+                            },
+                            "recursive": {
+                                "type": "boolean",
+                                "description": "Whether to remove directory contents recursively (default: true)"
+                            }
+                        },
+                        "required": ["directory_path"]
+                    }
+                ),
                 # Download Station Tools
                 types.Tool(
                     name="ds_get_info",
@@ -447,6 +543,14 @@ class SynologyMCPServer:
                     return await self._handle_rename_file(arguments)
                 elif name == "move_file":
                     return await self._handle_move_file(arguments)
+                elif name == "create_file":
+                    return await self._handle_create_file(arguments)
+                elif name == "create_directory":
+                    return await self._handle_create_directory(arguments)
+                elif name == "delete_file":
+                    return await self._handle_delete_file(arguments)
+                elif name == "remove_directory":
+                    return await self._handle_remove_directory(arguments)
                 # Download Station handlers
                 elif name == "ds_get_info":
                     return await self._handle_ds_get_info(arguments)
@@ -691,6 +795,64 @@ class SynologyMCPServer:
         return [types.TextContent(
             type="text",
             text=f"Move result: {json.dumps(result, indent=2)}"
+        )]
+    
+    async def _handle_create_file(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating a new file with specified content on the Synology NAS."""
+        base_url = self._get_base_url(arguments)
+        path = arguments["path"]
+        content = arguments.get("content", "")
+        overwrite = arguments.get("overwrite", False)
+        
+        filestation = self._get_filestation(base_url)
+        result = filestation.create_file(path, content, overwrite)
+        
+        return [types.TextContent(
+            type="text",
+            text=f"Create file result: {json.dumps(result, indent=2)}"
+        )]
+    
+    async def _handle_create_directory(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating a new directory on the Synology NAS."""
+        base_url = self._get_base_url(arguments)
+        folder_path = arguments["folder_path"]
+        name = arguments["name"]
+        force_parent = arguments.get("force_parent", False)
+        
+        filestation = self._get_filestation(base_url)
+        result = filestation.create_directory(folder_path, name, force_parent)
+        
+        return [types.TextContent(
+            type="text",
+            text=f"Create directory result: {json.dumps(result, indent=2)}"
+        )]
+    
+    async def _handle_delete_file(self, arguments: dict) -> list[types.TextContent]:
+        """Handle deleting a file or directory on the Synology NAS."""
+        base_url = self._get_base_url(arguments)
+        path = arguments["path"]
+        recursive = arguments.get("recursive", False)
+        
+        filestation = self._get_filestation(base_url)
+        result = filestation.delete_file(path, recursive)
+        
+        return [types.TextContent(
+            type="text",
+            text=f"Delete file result: {json.dumps(result, indent=2)}"
+        )]
+    
+    async def _handle_remove_directory(self, arguments: dict) -> list[types.TextContent]:
+        """Handle removing a directory and optionally its contents on the Synology NAS."""
+        base_url = self._get_base_url(arguments)
+        directory_path = arguments["directory_path"]
+        recursive = arguments.get("recursive", True)
+        
+        filestation = self._get_filestation(base_url)
+        result = filestation.remove_directory(directory_path, recursive)
+        
+        return [types.TextContent(
+            type="text",
+            text=f"Remove directory result: {json.dumps(result, indent=2)}"
         )]
     
     async def _handle_ds_get_info(self, arguments: dict) -> list[types.TextContent]:

@@ -46,6 +46,109 @@ docker build -t synology-mcp-server .
 docker run --env-file .env synology-mcp-server
 ```
 
+## MCP Client Setup
+
+### Claude Desktop
+
+Add to your Claude Desktop configuration file:
+
+**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "synology": {
+      "command": "docker-compose",
+      "args": [
+        "-f", "/path/to/your/mcp-server-synology/docker-compose.yml",
+        "run", "--rm", "synology-mcp"
+      ],
+      "cwd": "/path/to/your/mcp-server-synology"
+    }
+  }
+}
+```
+
+### Continue (VS Code Extension)
+
+Add to your Continue configuration (`.continue/config.json`):
+
+```json
+{
+  "mcpServers": {
+    "synology": {
+      "command": "docker-compose",
+      "args": [
+        "-f", "/path/to/your/mcp-server-synology/docker-compose.yml",
+        "run", "--rm", "synology-mcp"
+      ],
+      "cwd": "/path/to/your/mcp-server-synology"
+    }
+  }
+}
+```
+
+### Cursor
+
+Add to your Cursor MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "synology": {
+      "command": "docker-compose",
+      "args": [
+        "-f", "/path/to/your/mcp-server-synology/docker-compose.yml",
+        "run", "--rm", "synology-mcp"
+      ],
+      "cwd": "/path/to/your/mcp-server-synology"
+    }
+  }
+}
+```
+
+### Codeium
+
+For Codeium's MCP support:
+
+```json
+{
+  "mcpServers": {
+    "synology": {
+      "command": "docker-compose",
+      "args": [
+        "-f", "/path/to/your/mcp-server-synology/docker-compose.yml",
+        "run", "--rm", "synology-mcp"
+      ],
+      "cwd": "/path/to/your/mcp-server-synology"
+    }
+  }
+}
+```
+
+### Alternative: Direct Python Execution
+
+If you prefer not to use Docker, you can run the server directly:
+
+```json
+{
+  "mcpServers": {
+    "synology": {
+      "command": "python",
+      "args": ["main.py"],
+      "cwd": "/path/to/your/mcp-server-synology",
+      "env": {
+        "SYNOLOGY_URL": "http://192.168.1.100:5000",
+        "SYNOLOGY_USERNAME": "your_username",
+        "SYNOLOGY_PASSWORD": "your_password",
+        "AUTO_LOGIN": "true"
+      }
+    }
+  }
+}
+```
+
 ## Local Development Setup
 
 ```bash
@@ -72,6 +175,13 @@ python main.py
 - **`search_files`** - Search files matching pattern
   - `path` (required): Search directory
   - `pattern` (required): Search pattern (e.g., `*.pdf`)
+- **`create_file`** - Create new files with content
+  - `path` (required): Full file path starting with `/`
+  - `content` (optional): File content (default: empty string)
+  - `overwrite` (optional): Overwrite existing files (default: false)
+- **`delete_file`** - Delete files or directories
+  - `path` (required): File/directory path starting with `/`
+  - `recursive` (optional): Delete directories recursively (default: false)
 - **`rename_file`** - Rename files or directories
   - `path` (required): Current file path
   - `new_name` (required): New filename
@@ -125,6 +235,24 @@ python main.py
   "pattern": "*.pdf"
 }
 
+// Create new file
+{
+  "path": "/volume1/documents/notes.txt",
+  "content": "My important notes\nLine 2 of notes",
+  "overwrite": false
+}
+
+// Delete file
+{
+  "path": "/volume1/temp/old-file.txt"
+}
+
+// Delete directory recursively
+{
+  "path": "/volume1/temp/old-folder",
+  "recursive": true
+}
+
 // Move file
 {
   "source_path": "/volume1/temp/file.txt",
@@ -157,7 +285,9 @@ python main.py
 
 - ✅ **Secure Authentication** - RSA encrypted password transmission
 - ✅ **Session Management** - Persistent sessions across multiple NAS devices  
-- ✅ **File Operations** - List, search, rename, move files with detailed metadata
+- ✅ **Complete File Operations** - Create, delete, list, search, rename, move files with detailed metadata
+- ✅ **Directory Management** - Recursive directory operations with safety checks
 - ✅ **Download Station** - Complete torrent and download management
 - ✅ **Docker Support** - Easy containerized deployment
+- ✅ **Multi-Client Support** - Works with Claude, Continue, Cursor, Codeium and more
 - ✅ **Error Handling** - Comprehensive error reporting and recovery 
