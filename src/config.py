@@ -31,7 +31,7 @@ class SynologyConfig:
         
         # Optional settings
         self.default_session_timeout = int(os.getenv('SESSION_TIMEOUT', '3600'))  # 1 hour
-        self.auto_login = os.getenv('AUTO_LOGIN', 'false').lower() == 'true'
+        self.auto_login = os.getenv('AUTO_LOGIN', 'true').lower() == 'true'
         self.verify_ssl = os.getenv('VERIFY_SSL', 'false').lower() == 'true'  # Default false for self-signed certs
         
         # Debug settings

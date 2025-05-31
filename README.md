@@ -1,5 +1,7 @@
 # Synology MCP Server
 
+![Synology MCP Server](assets/banner.png)
+
 A Model Context Protocol (MCP) server for Synology NAS devices. Enables AI assistants to manage files and downloads through secure authentication and session management.
 
 ## Quick Start with Docker
@@ -102,7 +104,7 @@ python main.py
 | `SYNOLOGY_URL` | Yes* | - | NAS base URL (e.g., `http://192.168.1.100:5000`) |
 | `SYNOLOGY_USERNAME` | Yes* | - | Username for authentication |
 | `SYNOLOGY_PASSWORD` | Yes* | - | Password for authentication |
-| `AUTO_LOGIN` | No | `false` | Auto-login on server start |
+| `AUTO_LOGIN` | No | `true` | Auto-login on server start |
 | `VERIFY_SSL` | No | `true` | Verify SSL certificates |
 | `DEBUG` | No | `false` | Enable debug logging |
 
@@ -130,7 +132,11 @@ python main.py
 }
 ```
 
-### Download Management  
+### Download Management
+
+#### Creating a Download Task
+![Download Sample](assets/download_sample.png)
+
 ```json
 // Create download task
 {
@@ -143,6 +149,9 @@ python main.py
   "task_ids": ["dbid_123", "dbid_456"]
 }
 ```
+
+#### Download Results
+![Download Result](assets/download_result.png)
 
 ## Features
 

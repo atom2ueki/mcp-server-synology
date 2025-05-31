@@ -21,9 +21,10 @@ __pycache__/
 .git/
 .gitignore
 
-# Documentation
+# Documentation and assets
 README.md
 *.md
+assets/
 
 # Docker files (don't need them inside container)
 Dockerfile
