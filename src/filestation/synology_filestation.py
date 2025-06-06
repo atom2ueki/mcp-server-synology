@@ -6,6 +6,7 @@ from urllib.parse import quote
 import os
 import tempfile
 import json
+import unicodedata
 
 
 class SynologyFileStation:
@@ -16,7 +17,7 @@ class SynologyFileStation:
         self.session_id = session_id
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
     
-    def _make_request(self, api: str, version: str, method: str, **params) -> Dict[str, Any]:
+    def _make_request(self, api: str, version: str, method: str, use_post: bool = False, **params) -> Dict[str, Any]:
         """Make a request to Synology API."""
         request_params = {
             'api': api,
@@ -26,13 +27,36 @@ class SynologyFileStation:
             **params
         }
         
-        response = requests.get(self.api_url, params=request_params)
+        if use_post:
+            # For POST requests, ensure UTF-8 encoding for Unicode characters
+            response = requests.post(
+                self.api_url, 
+                data=request_params,
+                headers={'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8'}
+            )
+        else:
+            response = requests.get(self.api_url, params=request_params)
         response.raise_for_status()
         
         data = response.json()
         if not data.get('success'):
             error_code = data.get('error', {}).get('code', 'unknown')
-            raise Exception(f"Synology API error: {error_code}")
+            error_info = data.get('error', {})
+            
+            # Include detailed error information if available
+            error_message = f"Synology API error: {error_code}"
+            
+            # Check for detailed errors array as mentioned in documentation
+            if 'errors' in error_info and error_info['errors']:
+                detailed_errors = []
+                for err in error_info['errors']:
+                    err_detail = f"Code {err.get('code', 'unknown')}"
+                    if 'path' in err:
+                        err_detail += f" for path: {err['path']}"
+                    detailed_errors.append(err_detail)
+                error_message += f" - Details: {'; '.join(detailed_errors)}"
+            
+            raise Exception(error_message)
         
         return data.get('data', {})
     
@@ -62,6 +86,9 @@ class SynologyFileStation:
             path = '/' + path
         if path != '/' and path.endswith('/'):
             path = path.rstrip('/')
+            
+        # Normalize Unicode characters to NFC form (most common for filesystems)
+        path = unicodedata.normalize('NFC', path)
         return path
     
     def list_shares(self) -> List[Dict[str, Any]]:
@@ -248,11 +275,20 @@ class SynologyFileStation:
         if not new_name:
             raise Exception("Invalid new name")
         
-        # Use the rename API
+        # According to official Synology API docs, path and name must be JSON arrays even for single values
+        # The parameters should be formatted as: path=["/path"] and name=["name"]
+        # Let requests library handle URL encoding automatically
+        
+        # Create JSON arrays without manual URL encoding - let requests handle it
+        path_array = json.dumps([formatted_path])
+        name_array = json.dumps([new_name])
+        
+        # Use GET request as specified in official documentation        
         data = self._make_request(
             'SYNO.FileStation.Rename', '2', 'rename',
-            path=formatted_path,
-            name=new_name
+            use_post=False,  # Official docs specify GET
+            path=path_array,
+            name=name_array
         )
         
         # Get the parent directory path
