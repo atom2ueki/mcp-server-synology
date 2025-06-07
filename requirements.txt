@@ -2,6 +2,7 @@ pycryptodome
 requests
 mcp>=1.9.0
 python-dotenv
+websockets>=11.0.3
 
 # Testing dependencies
 pytest>=7.0.0

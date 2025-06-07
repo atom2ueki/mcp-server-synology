@@ -13,10 +13,10 @@ from mcp.server.models import InitializationOptions
 from mcp.server.lowlevel import NotificationOptions
 import mcp.server.stdio
 
-from .config import config
-from .auth import SynologyAuth
-from .filestation import SynologyFileStation
-from .downloadstation import SynologyDownloadStation
+from config import config
+from auth import SynologyAuth
+from filestation import SynologyFileStation
+from downloadstation import SynologyDownloadStation
 
 
 class SynologyMCPServer:
@@ -108,349 +108,7 @@ class SynologyMCPServer:
         @self.server.list_tools()
         async def handle_list_tools() -> list[types.Tool]:
             """List available Synology tools."""
-            tools = [
-                types.Tool(
-                    name="synology_status",
-                    description="Check authentication status for Synology NAS instances",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    }
-                ),
-                types.Tool(
-                    name="list_shares",
-                    description="List all available shares on the Synology NAS",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            }
-                        },
-                        "required": []
-                    }
-                ),
-                types.Tool(
-                    name="list_directory",
-                    description="List contents of a directory on the Synology NAS. Returns detailed information about files and folders including name, type, size, and timestamps.",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "path": {
-                                "type": "string",
-                                "description": "Directory path to list (must start with /)"
-                            }
-                        },
-                        "required": ["path"]
-                    }
-                ),
-                types.Tool(
-                    name="get_file_info",
-                    description="Get detailed information about a specific file or directory",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "path": {
-                                "type": "string",
-                                "description": "File or directory path (must start with /)"
-                            }
-                        },
-                        "required": ["path"]
-                    }
-                ),
-                types.Tool(
-                    name="search_files",
-                    description="Search for files and directories matching a pattern",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "path": {
-                                "type": "string",
-                                "description": "Directory path to search in (must start with /)"
-                            },
-                            "pattern": {
-                                "type": "string",
-                                "description": "Search pattern (supports wildcards like *.txt)"
-                            }
-                        },
-                        "required": ["path", "pattern"]
-                    }
-                ),
-                types.Tool(
-                    name="rename_file",
-                    description="Rename a file or directory on the Synology NAS",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "path": {
-                                "type": "string",
-                                "description": "Full path to the file/directory to rename (must start with /)"
-                            },
-                            "new_name": {
-                                "type": "string",
-                                "description": "New name for the file/directory (just the name, not full path)"
-                            }
-                        },
-                        "required": ["path", "new_name"]
-                    }
-                ),
-                types.Tool(
-                    name="move_file",
-                    description="Move a file or directory to a new location on the Synology NAS",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "source_path": {
-                                "type": "string",
-                                "description": "Full path to the file/directory to move (must start with /)"
-                            },
-                            "destination_path": {
-                                "type": "string",
-                                "description": "Destination path - can be a directory or full path with new name (must start with /)"
-                            },
-                            "overwrite": {
-                                "type": "boolean",
-                                "description": "Whether to overwrite existing files at destination (default: false)"
-                            }
-                        },
-                        "required": ["source_path", "destination_path"]
-                    }
-                ),
-                types.Tool(
-                    name="create_file",
-                    description="Create a new file with specified content on the Synology NAS",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "path": {
-                                "type": "string",
-                                "description": "Full path where the file should be created (must start with /)"
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "Content to write to the file (default: empty string)"
-                            },
-                            "overwrite": {
-                                "type": "boolean",
-                                "description": "Whether to overwrite existing file (default: false)"
-                            }
-                        },
-                        "required": ["path"]
-                    }
-                ),
-                types.Tool(
-                    name="create_directory",
-                    description="Create a new directory on the Synology NAS",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "folder_path": {
-                                "type": "string",
-                                "description": "Parent directory path where the new folder should be created (must start with /)"
-                            },
-                            "name": {
-                                "type": "string",
-                                "description": "Name of the new directory to create"
-                            },
-                            "force_parent": {
-                                "type": "boolean",
-                                "description": "Whether to create parent directories if they don't exist (default: false)"
-                            }
-                        },
-                        "required": ["folder_path", "name"]
-                    }
-                ),
-                types.Tool(
-                    name="delete",
-                    description="Delete a file or directory on the Synology NAS (auto-detects type)",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "path": {
-                                "type": "string",
-                                "description": "Full path to the file/directory to delete (must start with /)"
-                            }
-                        },
-                        "required": ["path"]
-                    }
-                ),
-                # Download Station Tools
-                types.Tool(
-                    name="ds_get_info",
-                    description="Get Download Station information and settings",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            }
-                        },
-                        "required": []
-                    }
-                ),
-                types.Tool(
-                    name="ds_list_tasks",
-                    description="List all download tasks in Download Station",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "offset": {
-                                "type": "integer",
-                                "description": "Starting offset for pagination (default: 0)"
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Maximum number of tasks to return (default: -1 for all)"
-                            }
-                        },
-                        "required": []
-                    }
-                ),
-                types.Tool(
-                    name="ds_create_task",
-                    description="Create a new download task from URL or magnet link",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "uri": {
-                                "type": "string",
-                                "description": "Download URL or magnet link"
-                            },
-                            "destination": {
-                                "type": "string",
-                                "description": "Destination folder path (optional)"
-                            },
-                            "username": {
-                                "type": "string",
-                                "description": "Username for protected downloads (optional)"
-                            },
-                            "password": {
-                                "type": "string",
-                                "description": "Password for protected downloads (optional)"
-                            }
-                        },
-                        "required": ["uri"]
-                    }
-                ),
-                types.Tool(
-                    name="ds_pause_tasks",
-                    description="Pause one or more download tasks",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "task_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "List of task IDs to pause"
-                            }
-                        },
-                        "required": ["task_ids"]
-                    }
-                ),
-                types.Tool(
-                    name="ds_resume_tasks",
-                    description="Resume one or more paused download tasks",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "task_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "List of task IDs to resume"
-                            }
-                        },
-                        "required": ["task_ids"]
-                    }
-                ),
-                types.Tool(
-                    name="ds_delete_tasks",
-                    description="Delete one or more download tasks",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            },
-                            "task_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "List of task IDs to delete"
-                            },
-                            "force_complete": {
-                                "type": "boolean",
-                                "description": "Force delete completed tasks (default: false)"
-                            }
-                        },
-                        "required": ["task_ids"]
-                    }
-                ),
-                types.Tool(
-                    name="ds_get_statistics",
-                    description="Get Download Station download/upload statistics",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "base_url": {
-                                "type": "string",
-                                "description": "Synology NAS base URL (optional if configured in .env)"
-                            }
-                        },
-                        "required": []
-                    }
-                )
-            ]
+            tools = self._get_tool_definitions()
             
             # Add login/logout tools only if not using auto-login or no credentials configured
             if not config.auto_login or not config.has_synology_credentials():
@@ -499,6 +157,7 @@ class SynologyMCPServer:
         async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             """Handle tool calls."""
             try:
+                print(f"🛠️ Executing tool: {name}", file=sys.stderr)
                 if name == "synology_login":
                     return await self._handle_login(arguments)
                 elif name == "synology_logout":
@@ -903,6 +562,408 @@ class SynologyMCPServer:
             type="text",
             text=json.dumps(statistics, indent=2)
         )]
+    
+    def _get_tool_definitions(self):
+        """Get tool definitions shared between MCP handler and bridge."""
+        return [
+            types.Tool(
+                name="synology_status",
+                description="Check authentication status for Synology NAS instances",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="list_shares",
+                description="List all available shares on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="list_directory",
+                description="List contents of a directory on the Synology NAS. Returns detailed information about files and folders including name, type, size, and timestamps.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory path to list (must start with /)"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            ),
+            types.Tool(
+                name="get_file_info",
+                description="Get detailed information about a specific file or directory",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "File or directory path (must start with /)"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            ),
+            types.Tool(
+                name="search_files",
+                description="Search for files and directories matching a pattern",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory path to search in (must start with /)"
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": "Search pattern (supports wildcards like *.txt)"
+                        }
+                    },
+                    "required": ["path", "pattern"]
+                }
+            ),
+            types.Tool(
+                name="rename_file",
+                description="Rename a file or directory on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Full path to the file/directory to rename (must start with /)"
+                        },
+                        "new_name": {
+                            "type": "string",
+                            "description": "New name for the file/directory (just the name, not full path)"
+                        }
+                    },
+                    "required": ["path", "new_name"]
+                }
+            ),
+            types.Tool(
+                name="move_file",
+                description="Move a file or directory to a new location on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "source_path": {
+                            "type": "string",
+                            "description": "Full path to the file/directory to move (must start with /)"
+                        },
+                        "destination_path": {
+                            "type": "string",
+                            "description": "Destination path - can be a directory or full path with new name (must start with /)"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Whether to overwrite existing files at destination (default: false)"
+                        }
+                    },
+                    "required": ["source_path", "destination_path"]
+                }
+            ),
+            types.Tool(
+                name="create_file",
+                description="Create a new file with specified content on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Full path where the file should be created (must start with /)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write to the file (default: empty string)"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Whether to overwrite existing file (default: false)"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            ),
+            types.Tool(
+                name="create_directory",
+                description="Create a new directory on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "folder_path": {
+                            "type": "string",
+                            "description": "Parent directory path where the new folder should be created (must start with /)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the new directory to create"
+                        },
+                        "force_parent": {
+                            "type": "boolean",
+                            "description": "Whether to create parent directories if they don't exist (default: false)"
+                        }
+                    },
+                    "required": ["folder_path", "name"]
+                }
+            ),
+            types.Tool(
+                name="delete",
+                description="Delete a file or directory on the Synology NAS (auto-detects type)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Full path to the file/directory to delete (must start with /)"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            ),
+            # Download Station Tools
+            types.Tool(
+                name="ds_get_info",
+                description="Get Download Station information and settings",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="ds_list_tasks",
+                description="List all download tasks in Download Station",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Starting offset for pagination (default: 0)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of tasks to return (default: -1 for all)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="ds_create_task",
+                description="Create a new download task from URL or magnet link",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "uri": {
+                            "type": "string",
+                            "description": "Download URL or magnet link"
+                        },
+                        "destination": {
+                            "type": "string",
+                            "description": "Destination folder path (optional)"
+                        },
+                        "username": {
+                            "type": "string",
+                            "description": "Username for protected downloads (optional)"
+                        },
+                        "password": {
+                            "type": "string",
+                            "description": "Password for protected downloads (optional)"
+                        }
+                    },
+                    "required": ["uri"]
+                }
+            ),
+            types.Tool(
+                name="ds_pause_tasks",
+                description="Pause one or more download tasks",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "task_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of task IDs to pause"
+                        }
+                    },
+                    "required": ["task_ids"]
+                }
+            ),
+            types.Tool(
+                name="ds_resume_tasks",
+                description="Resume one or more paused download tasks",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "task_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of task IDs to resume"
+                        }
+                    },
+                    "required": ["task_ids"]
+                }
+            ),
+            types.Tool(
+                name="ds_delete_tasks",
+                description="Delete one or more download tasks",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "task_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of task IDs to delete"
+                        },
+                        "force_complete": {
+                            "type": "boolean",
+                            "description": "Force delete completed tasks (default: false)"
+                        }
+                    },
+                    "required": ["task_ids"]
+                }
+            ),
+            types.Tool(
+                name="ds_get_statistics",
+                description="Get Download Station download/upload statistics",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            )
+        ]
+
+    async def get_tools_list(self):
+        """Get the list of available tools (for bridge use)."""
+        return self._get_tool_definitions()
+
+    async def call_tool_direct(self, name: str, arguments: dict):
+        """Call a tool directly (for bridge use)."""
+        # This replicates the logic from the handle_call_tool function
+        # but can be called directly from the bridge
+        try:
+            if name == "synology_login":
+                return await self._handle_login(arguments)
+            elif name == "synology_logout":
+                return await self._handle_logout(arguments)
+            elif name == "synology_status":
+                return await self._handle_status(arguments)
+            elif name == "list_shares":
+                return await self._handle_list_shares(arguments)
+            elif name == "list_directory":
+                return await self._handle_list_directory(arguments)
+            elif name == "get_file_info":
+                return await self._handle_get_file_info(arguments)
+            elif name == "search_files":
+                return await self._handle_search_files(arguments)
+            elif name == "rename_file":
+                return await self._handle_rename_file(arguments)
+            elif name == "move_file":
+                return await self._handle_move_file(arguments)
+            elif name == "create_file":
+                return await self._handle_create_file(arguments)
+            elif name == "create_directory":
+                return await self._handle_create_directory(arguments)
+            elif name == "delete":
+                return await self._handle_delete(arguments)
+            # Download Station handlers
+            elif name == "ds_get_info":
+                return await self._handle_ds_get_info(arguments)
+            elif name == "ds_list_tasks":
+                return await self._handle_ds_list_tasks(arguments)
+            elif name == "ds_create_task":
+                return await self._handle_ds_create_task(arguments)
+            elif name == "ds_pause_tasks":
+                return await self._handle_ds_pause_tasks(arguments)
+            elif name == "ds_resume_tasks":
+                return await self._handle_ds_resume_tasks(arguments)
+            elif name == "ds_delete_tasks":
+                return await self._handle_ds_delete_tasks(arguments)
+            elif name == "ds_get_statistics":
+                return await self._handle_ds_get_statistics(arguments)
+            else:
+                raise ValueError(f"Unknown tool: {name}")
+        except Exception as e:
+            return [types.TextContent(
+                type="text",
+                text=f"Error executing {name}: {str(e)}"
+            )]
     
     async def run(self):
         """Run the MCP server."""

@@ -20,9 +20,17 @@ COPY src/ ./src/
 COPY main.py .
 COPY .env* ./
 
+# Create logs directory
+RUN mkdir -p logs
+
 # Create non-root user for security
 RUN useradd -m -u 1000 mcpuser && chown -R mcpuser:mcpuser /app
 USER mcpuser
 
-# Expose stdio for MCP communication
+# Set environment variables for MCP
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Default command - supports both stdio (Claude/Cursor) and WebSocket (Xiaozhi) modes
+# Mode is controlled by ENABLE_XIAOZHI environment variable
 CMD ["python", "main.py"] 
