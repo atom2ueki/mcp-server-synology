@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.1.0] - 2025-06-07
+
+# 🚀 Synology MCP Server v1.1.0 - Xiaozhi WebSocket & Enhanced Docker Support
+
+**Release Date:** June 7, 2025
+
+🌟 **Major feature update bringing WebSocket support and enhanced multi-client capabilities!**
+
+## 🚀 What's New
+
+### 🤖 **Xiaozhi WebSocket Integration**
+- **WebSocket-based MCP support** for [Xiaozhi ESP32](https://github.com/78/xiaozhi-esp32)
+- **Dual client support** - Run both stdio (Claude/Cursor) and WebSocket (Xiaozhi) simultaneously
+- **Environment-based configuration** with `ENABLE_XIAOZHI` toggle
+- **Secure token authentication** for Xiaozhi connections
+- **Auto-reconnection** and error recovery for WebSocket connections
+
+### 🐳 **Enhanced Docker Support**
+- **Multi-protocol Docker containers** supporting both stdio and WebSocket connections
+- **Flexible deployment options** - Choose stdio-only or full WebSocket bridge mode
+- **Improved environment variable handling** in containerized deployments
+- **Better logging and debugging** for Docker-based setups
+
+### 🔧 **Infrastructure Improvements**
+- **Multiclient bridge architecture** for handling multiple connection types
+- **Requirements validation** with helpful error messages
+- **Enhanced startup diagnostics** and configuration display
+- **Improved error handling** and graceful shutdown
+
+## 📋 Configuration
+
+### Environment Variables
+- `ENABLE_XIAOZHI`: Enable Xiaozhi WebSocket bridge (true/false, default: false)
+- `XIAOZHI_TOKEN`: Your Xiaozhi authentication token (required if ENABLE_XIAOZHI=true)
+- `XIAOZHI_MCP_ENDPOINT`: Xiaozhi MCP endpoint (optional, defaults to wss://api.xiaozhi.me/mcp/)
+
+### Usage Modes
+- **Claude/Cursor Only**: `ENABLE_XIAOZHI=false` (default)
+- **Dual Support**: `ENABLE_XIAOZHI=true` (supports both Xiaozhi WebSocket and Claude/Cursor stdio)
+
+---
+
 ## [1.0.0] - 2025-05-31
 
 # 🎉 Synology MCP Server v1.0.0 - Initial Release
