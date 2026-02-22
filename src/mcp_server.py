@@ -17,6 +17,8 @@ from config import config
 from auth import SynologyAuth
 from filestation import SynologyFileStation
 from downloadstation import SynologyDownloadStation
+from health import SynologyHealth
+from nfs import SynologyNFS
 
 
 class SynologyMCPServer:
@@ -28,6 +30,8 @@ class SynologyMCPServer:
         self.sessions: Dict[str, str] = {}  # base_url -> session_id
         self.filestation_instances: Dict[str, SynologyFileStation] = {}
         self.downloadstation_instances: Dict[str, SynologyDownloadStation] = {}
+        self.health_instances: Dict[str, SynologyHealth] = {}
+        self.nfs_instances: Dict[str, SynologyNFS] = {}
         self._setup_handlers()
     
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
@@ -51,7 +55,29 @@ class SynologyMCPServer:
             self.downloadstation_instances[base_url] = SynologyDownloadStation(base_url, session_id)
         
         return self.downloadstation_instances[base_url]
-    
+
+    def _get_health(self, base_url: str) -> SynologyHealth:
+        """Get or create Health instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.health_instances:
+            session_id = self.sessions[base_url]
+            self.health_instances[base_url] = SynologyHealth(base_url, session_id)
+
+        return self.health_instances[base_url]
+
+    def _get_nfs(self, base_url: str) -> SynologyNFS:
+        """Get or create NFS instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.nfs_instances:
+            session_id = self.sessions[base_url]
+            self.nfs_instances[base_url] = SynologyNFS(base_url, session_id)
+
+        return self.nfs_instances[base_url]
+
     async def _auto_login_if_configured(self):
         """Automatically login if credentials are configured and auto_login is enabled."""
         # Debug output to see what config values we have
@@ -78,11 +104,10 @@ class SynologyMCPServer:
                     self.sessions[base_url] = session_id
                     print(f"✅ Auto-login successful for {base_url} (Session: {session_id[:8]}...)", file=sys.stderr)
                     
-                    # Clear any existing FileStation/DownloadStation instances to force recreation with new session
-                    if base_url in self.filestation_instances:
-                        del self.filestation_instances[base_url]
-                    if base_url in self.downloadstation_instances:
-                        del self.downloadstation_instances[base_url]
+                    # Clear any existing service instances to force recreation with new session
+                    for inst_dict in (self.filestation_instances, self.downloadstation_instances,
+                                      self.health_instances, self.nfs_instances):
+                        inst_dict.pop(base_url, None)
                 else:
                     error_msg = f"Auto-login failed for {base_url}: {result}"
                     print(f"❌ {error_msg}", file=sys.stderr)
@@ -201,6 +226,38 @@ class SynologyMCPServer:
                     return await self._handle_ds_get_statistics(arguments)
                 elif name == "ds_list_downloaded_files":
                     return await self._handle_ds_list_downloaded_files(arguments)
+                # Health monitoring handlers
+                elif name == "synology_system_info":
+                    return await self._handle_health_call(arguments, 'system_info')
+                elif name == "synology_utilization":
+                    return await self._handle_health_call(arguments, 'utilization')
+                elif name == "synology_disk_health":
+                    return await self._handle_health_call(arguments, 'disk_list')
+                elif name == "synology_disk_smart":
+                    return await self._handle_disk_smart(arguments)
+                elif name == "synology_volume_status":
+                    return await self._handle_health_call(arguments, 'volume_list')
+                elif name == "synology_storage_pool":
+                    return await self._handle_health_call(arguments, 'storage_pool_list')
+                elif name == "synology_network":
+                    return await self._handle_health_call(arguments, 'network_info')
+                elif name == "synology_ups":
+                    return await self._handle_health_call(arguments, 'ups_info')
+                elif name == "synology_services":
+                    return await self._handle_health_call(arguments, 'package_list')
+                elif name == "synology_system_log":
+                    return await self._handle_system_log(arguments)
+                elif name == "synology_health_summary":
+                    return await self._handle_health_call(arguments, 'health_summary')
+                # NFS management handlers
+                elif name == "synology_nfs_status":
+                    return await self._handle_nfs_call(arguments, 'nfs_status')
+                elif name == "synology_nfs_enable":
+                    return await self._handle_nfs_enable(arguments)
+                elif name == "synology_nfs_list_shares":
+                    return await self._handle_nfs_call(arguments, 'list_shares')
+                elif name == "synology_nfs_set_permission":
+                    return await self._handle_nfs_set_permission(arguments)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as e:
@@ -593,6 +650,67 @@ class SynologyMCPServer:
             text=json.dumps(files, indent=2)
         )]
     
+    # ------------------------------------------------------------------
+    # Health monitoring handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_health_call(self, arguments: dict, method_name: str) -> list[types.TextContent]:
+        """Generic handler for health monitoring calls."""
+        base_url = self._get_base_url(arguments)
+        health = self._get_health(base_url)
+        result = getattr(health, method_name)()
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_disk_smart(self, arguments: dict) -> list[types.TextContent]:
+        """Handle getting SMART info for a specific disk."""
+        base_url = self._get_base_url(arguments)
+        disk_id = arguments["disk_id"]
+        health = self._get_health(base_url)
+        result = health.disk_smart_info(disk_id)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
+        """Handle getting system log entries."""
+        base_url = self._get_base_url(arguments)
+        offset = arguments.get("offset", 0)
+        limit = arguments.get("limit", 50)
+        health = self._get_health(base_url)
+        result = health.system_log(offset=offset, limit=limit)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    # ------------------------------------------------------------------
+    # NFS management handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_nfs_call(self, arguments: dict, method_name: str) -> list[types.TextContent]:
+        """Generic handler for NFS calls."""
+        base_url = self._get_base_url(arguments)
+        nfs = self._get_nfs(base_url)
+        result = getattr(nfs, method_name)()
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_nfs_enable(self, arguments: dict) -> list[types.TextContent]:
+        """Handle enabling/disabling NFS service."""
+        base_url = self._get_base_url(arguments)
+        enable = arguments.get("enable", True)
+        nfs_v4 = arguments.get("nfs_v4", False)
+        nfs = self._get_nfs(base_url)
+        result = nfs.nfs_enable(enable=enable, nfs_v4=nfs_v4)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_nfs_set_permission(self, arguments: dict) -> list[types.TextContent]:
+        """Handle setting NFS permissions on a share."""
+        base_url = self._get_base_url(arguments)
+        nfs = self._get_nfs(base_url)
+        result = nfs.set_nfs_permission(
+            share_name=arguments["share_name"],
+            client_ip=arguments["client_ip"],
+            privilege=arguments.get("privilege", "readwrite"),
+            squash=arguments.get("squash", "root_squash"),
+            security=arguments.get("security", "sys"),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
     def _get_tool_definitions(self):
         """Get tool definitions shared between MCP handler and bridge."""
         return [
@@ -972,7 +1090,266 @@ class SynologyMCPServer:
                     },
                     "required": []
                 }
-            )
+            ),
+            # ============================================================
+            # Health Monitoring Tools
+            # ============================================================
+            types.Tool(
+                name="synology_system_info",
+                description="Get Synology NAS system information: model, serial, DSM version, uptime, temperature",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_utilization",
+                description="Get real-time CPU, memory, swap, and disk I/O utilization",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_disk_health",
+                description="List all physical disks with SMART health status, model, temperature, and capacity",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_disk_smart",
+                description="Get detailed S.M.A.R.T. attributes for a specific physical disk",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "disk_id": {
+                            "type": "string",
+                            "description": "Disk identifier (e.g. 'sda', 'sdb') from synology_disk_health output"
+                        }
+                    },
+                    "required": ["disk_id"]
+                }
+            ),
+            types.Tool(
+                name="synology_volume_status",
+                description="List all volumes/filesystems with status, total size, used space, and RAID info",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_storage_pool",
+                description="List RAID/storage pools with RAID level, status, and member disks",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_network",
+                description="Get network interface status and transfer rates",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_ups",
+                description="Get UPS (uninterruptible power supply) status, battery level, and power info",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_services",
+                description="List installed packages/services and their running status",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_system_log",
+                description="Get recent system log entries for diagnosing issues",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Starting offset (default: 0)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max entries to return (default: 50)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_health_summary",
+                description="Get a combined health overview: system info, CPU/memory utilization, disk health, volume status, storage pools, network, and UPS — all in one call",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            # ============================================================
+            # NFS Management Tools
+            # ============================================================
+            types.Tool(
+                name="synology_nfs_status",
+                description="Get NFS service status and configuration (enabled/disabled, NFSv4 settings)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_nfs_enable",
+                description="Enable or disable the NFS file service on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "enable": {
+                            "type": "boolean",
+                            "description": "True to enable NFS, false to disable (default: true)"
+                        },
+                        "nfs_v4": {
+                            "type": "boolean",
+                            "description": "Enable NFSv4 support (default: false)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_nfs_list_shares",
+                description="List all shared folders with their NFS access permissions",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_nfs_set_permission",
+                description="Set NFS client access permissions on a shared folder (IP/subnet, read/write, squash options)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "share_name": {
+                            "type": "string",
+                            "description": "Name of the shared folder (e.g. 'media', 'backups')"
+                        },
+                        "client_ip": {
+                            "type": "string",
+                            "description": "Client IP or subnet (e.g. '192.168.1.0/24', '10.0.0.5')"
+                        },
+                        "privilege": {
+                            "type": "string",
+                            "enum": ["readonly", "readwrite"],
+                            "description": "Access level (default: readwrite)"
+                        },
+                        "squash": {
+                            "type": "string",
+                            "enum": ["root_squash", "no_root_squash", "all_squash"],
+                            "description": "Squash option for root user mapping (default: root_squash)"
+                        },
+                        "security": {
+                            "type": "string",
+                            "enum": ["sys", "krb5", "krb5i", "krb5p"],
+                            "description": "Security mode (default: sys/AUTH_SYS)"
+                        }
+                    },
+                    "required": ["share_name", "client_ip"]
+                }
+            ),
         ]
 
     async def get_tools_list(self):
@@ -980,55 +1357,55 @@ class SynologyMCPServer:
         return self._get_tool_definitions()
 
     async def call_tool_direct(self, name: str, arguments: dict):
-        """Call a tool directly (for bridge use)."""
-        # This replicates the logic from the handle_call_tool function
-        # but can be called directly from the bridge
+        """Call a tool directly (for bridge use).
+        Delegates to the same handler used by handle_call_tool."""
         try:
-            if name == "synology_login":
-                return await self._handle_login(arguments)
-            elif name == "synology_logout":
-                return await self._handle_logout(arguments)
-            elif name == "synology_status":
-                return await self._handle_status(arguments)
-            elif name == "list_shares":
-                return await self._handle_list_shares(arguments)
-            elif name == "list_directory":
-                return await self._handle_list_directory(arguments)
-            elif name == "get_file_info":
-                return await self._handle_get_file_info(arguments)
-            elif name == "search_files":
-                return await self._handle_search_files(arguments)
-            elif name == "get_file_content":
-                return await self._handle_get_file_content(arguments)
-            elif name == "rename_file":
-                return await self._handle_rename_file(arguments)
-            elif name == "move_file":
-                return await self._handle_move_file(arguments)
-            elif name == "create_file":
-                return await self._handle_create_file(arguments)
-            elif name == "create_directory":
-                return await self._handle_create_directory(arguments)
-            elif name == "delete":
-                return await self._handle_delete(arguments)
-            # Download Station handlers
-            elif name == "ds_get_info":
-                return await self._handle_ds_get_info(arguments)
-            elif name == "ds_list_tasks":
-                return await self._handle_ds_list_tasks(arguments)
-            elif name == "ds_create_task":
-                return await self._handle_ds_create_task(arguments)
-            elif name == "ds_pause_tasks":
-                return await self._handle_ds_pause_tasks(arguments)
-            elif name == "ds_resume_tasks":
-                return await self._handle_ds_resume_tasks(arguments)
-            elif name == "ds_delete_tasks":
-                return await self._handle_ds_delete_tasks(arguments)
-            elif name == "ds_get_statistics":
-                return await self._handle_ds_get_statistics(arguments)
-            elif name == "ds_list_downloaded_files":
-                return await self._handle_ds_list_downloaded_files(arguments)
-            else:
+            # Build a dispatch table from the tool name to its handler
+            dispatch = {
+                "synology_login": lambda a: self._handle_login(a),
+                "synology_logout": lambda a: self._handle_logout(a),
+                "synology_status": lambda a: self._handle_status(a),
+                "list_shares": lambda a: self._handle_list_shares(a),
+                "list_directory": lambda a: self._handle_list_directory(a),
+                "get_file_info": lambda a: self._handle_get_file_info(a),
+                "search_files": lambda a: self._handle_search_files(a),
+                "get_file_content": lambda a: self._handle_get_file_content(a),
+                "rename_file": lambda a: self._handle_rename_file(a),
+                "move_file": lambda a: self._handle_move_file(a),
+                "create_file": lambda a: self._handle_create_file(a),
+                "create_directory": lambda a: self._handle_create_directory(a),
+                "delete": lambda a: self._handle_delete(a),
+                "ds_get_info": lambda a: self._handle_ds_get_info(a),
+                "ds_list_tasks": lambda a: self._handle_ds_list_tasks(a),
+                "ds_create_task": lambda a: self._handle_ds_create_task(a),
+                "ds_pause_tasks": lambda a: self._handle_ds_pause_tasks(a),
+                "ds_resume_tasks": lambda a: self._handle_ds_resume_tasks(a),
+                "ds_delete_tasks": lambda a: self._handle_ds_delete_tasks(a),
+                "ds_get_statistics": lambda a: self._handle_ds_get_statistics(a),
+                "ds_list_downloaded_files": lambda a: self._handle_ds_list_downloaded_files(a),
+                # Health monitoring
+                "synology_system_info": lambda a: self._handle_health_call(a, 'system_info'),
+                "synology_utilization": lambda a: self._handle_health_call(a, 'utilization'),
+                "synology_disk_health": lambda a: self._handle_health_call(a, 'disk_list'),
+                "synology_disk_smart": lambda a: self._handle_disk_smart(a),
+                "synology_volume_status": lambda a: self._handle_health_call(a, 'volume_list'),
+                "synology_storage_pool": lambda a: self._handle_health_call(a, 'storage_pool_list'),
+                "synology_network": lambda a: self._handle_health_call(a, 'network_info'),
+                "synology_ups": lambda a: self._handle_health_call(a, 'ups_info'),
+                "synology_services": lambda a: self._handle_health_call(a, 'package_list'),
+                "synology_system_log": lambda a: self._handle_system_log(a),
+                "synology_health_summary": lambda a: self._handle_health_call(a, 'health_summary'),
+                # NFS management
+                "synology_nfs_status": lambda a: self._handle_nfs_call(a, 'nfs_status'),
+                "synology_nfs_enable": lambda a: self._handle_nfs_enable(a),
+                "synology_nfs_list_shares": lambda a: self._handle_nfs_call(a, 'list_shares'),
+                "synology_nfs_set_permission": lambda a: self._handle_nfs_set_permission(a),
+            }
+
+            handler = dispatch.get(name)
+            if handler is None:
                 raise ValueError(f"Unknown tool: {name}")
+            return await handler(arguments)
         except Exception as e:
             return [types.TextContent(
                 type="text",
@@ -1116,10 +1493,9 @@ class SynologyMCPServer:
                 
                 # Always clear local data
                 del self.sessions[base_url]
-                if base_url in self.filestation_instances:
-                    del self.filestation_instances[base_url]
-                if base_url in self.downloadstation_instances:
-                    del self.downloadstation_instances[base_url]
+                for inst_dict in (self.filestation_instances, self.downloadstation_instances,
+                                  self.health_instances, self.nfs_instances):
+                    inst_dict.pop(base_url, None)
                     
             except Exception as e:
                 print(f"❌ Exception during cleanup for {base_url}: {e}", file=sys.stderr)
