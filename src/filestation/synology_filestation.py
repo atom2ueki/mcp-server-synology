@@ -11,12 +11,13 @@ import unicodedata
 
 class SynologyFileStation:
     """Handles Synology FileStation API operations."""
-    
-    def __init__(self, base_url: str, session_id: str):
+
+    def __init__(self, base_url: str, session_id: str, verify_ssl: bool = False):
         self.base_url = base_url.rstrip('/')
         self.session_id = session_id
+        self.verify_ssl = verify_ssl
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
-    
+
     def _make_request(self, api: str, version: str, method: str, use_post: bool = False, **params) -> Dict[str, Any]:
         """Make a request to Synology API."""
         request_params = {
@@ -26,16 +27,17 @@ class SynologyFileStation:
             '_sid': self.session_id,
             **params
         }
-        
+
         if use_post:
             # For POST requests, ensure UTF-8 encoding for Unicode characters
             response = requests.post(
-                self.api_url, 
+                self.api_url,
                 data=request_params,
-                headers={'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8'}
+                headers={'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8'},
+                verify=self.verify_ssl
             )
         else:
-            response = requests.get(self.api_url, params=request_params)
+            response = requests.get(self.api_url, params=request_params, verify=self.verify_ssl)
         response.raise_for_status()
         
         data = response.json()
@@ -70,7 +72,7 @@ class SynologyFileStation:
             **params
         }
         
-        response = requests.post(self.api_url, params=request_params, files=files)
+        response = requests.post(self.api_url, params=request_params, files=files, verify=self.verify_ssl)
         response.raise_for_status()
         
         data = response.json()
@@ -353,7 +355,7 @@ class SynologyFileStation:
                 }
                 
                 # Make the request
-                response = session.post(url, files=files, data=data)
+                response = session.post(url, files=files, data=data, verify=self.verify_ssl)
                 response.raise_for_status()
                 
                 result = response.json()
@@ -536,7 +538,7 @@ class SynologyFileStation:
                 'path': formatted_path,
                 '_sid': self.session_id
             },
-            verify=False,
+            verify=self.verify_ssl,
             stream=True
         )
         response.raise_for_status()

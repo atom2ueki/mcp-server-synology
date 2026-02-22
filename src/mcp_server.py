@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+import urllib3
 from typing import Any, Dict, Optional
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
@@ -20,6 +21,10 @@ from downloadstation import SynologyDownloadStation
 from health import SynologyHealth
 from nfs import SynologyNFS
 from usermanagement import SynologyUserManager
+
+# Suppress InsecureRequestWarning when verify_ssl is disabled (internal NAS devices)
+if not config.verify_ssl:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class SynologyMCPServer:
@@ -41,22 +46,24 @@ class SynologyMCPServer:
         """Get or create FileStation instance for a base URL."""
         if base_url not in self.sessions:
             raise Exception(f"No active session for {base_url}. Please login first.")
-        
+
         if base_url not in self.filestation_instances:
             session_id = self.sessions[base_url]
-            self.filestation_instances[base_url] = SynologyFileStation(base_url, session_id)
-        
+            self.filestation_instances[base_url] = SynologyFileStation(
+                base_url, session_id, verify_ssl=config.verify_ssl)
+
         return self.filestation_instances[base_url]
-    
+
     def _get_downloadstation(self, base_url: str) -> SynologyDownloadStation:
         """Get or create DownloadStation instance for a base URL."""
         if base_url not in self.sessions:
             raise Exception(f"No active session for {base_url}. Please login first.")
-        
+
         if base_url not in self.downloadstation_instances:
             session_id = self.sessions[base_url]
-            self.downloadstation_instances[base_url] = SynologyDownloadStation(base_url, session_id)
-        
+            self.downloadstation_instances[base_url] = SynologyDownloadStation(
+                base_url, session_id, verify_ssl=config.verify_ssl)
+
         return self.downloadstation_instances[base_url]
 
     def _get_health(self, base_url: str) -> SynologyHealth:
@@ -66,7 +73,8 @@ class SynologyMCPServer:
 
         if base_url not in self.health_instances:
             session_id = self.sessions[base_url]
-            self.health_instances[base_url] = SynologyHealth(base_url, session_id)
+            self.health_instances[base_url] = SynologyHealth(
+                base_url, session_id, verify_ssl=config.verify_ssl)
 
         return self.health_instances[base_url]
 
@@ -77,7 +85,8 @@ class SynologyMCPServer:
 
         if base_url not in self.nfs_instances:
             session_id = self.sessions[base_url]
-            self.nfs_instances[base_url] = SynologyNFS(base_url, session_id)
+            self.nfs_instances[base_url] = SynologyNFS(
+                base_url, session_id, verify_ssl=config.verify_ssl)
 
         return self.nfs_instances[base_url]
 
@@ -88,7 +97,8 @@ class SynologyMCPServer:
 
         if base_url not in self.usermgr_instances:
             session_id = self.sessions[base_url]
-            self.usermgr_instances[base_url] = SynologyUserManager(base_url, session_id)
+            self.usermgr_instances[base_url] = SynologyUserManager(
+                base_url, session_id, verify_ssl=config.verify_ssl)
 
         return self.usermgr_instances[base_url]
 
@@ -118,7 +128,8 @@ class SynologyMCPServer:
                 print(f"🔄 Auto-login: {label} ({base_url})...", file=sys.stderr)
 
                 if base_url not in self.auth_instances:
-                    self.auth_instances[base_url] = SynologyAuth(base_url)
+                    self.auth_instances[base_url] = SynologyAuth(
+                        base_url, verify_ssl=config.verify_ssl)
 
                 auth = self.auth_instances[base_url]
                 result = auth.login(nas_cfg['username'], nas_cfg['password'])
@@ -280,6 +291,8 @@ class SynologyMCPServer:
                     return await self._handle_nfs_call(arguments, 'list_shares')
                 elif name == "synology_nfs_set_permission":
                     return await self._handle_nfs_set_permission(arguments)
+                elif name == "synology_create_share":
+                    return await self._handle_create_share(arguments)
                 # User management handlers
                 elif name == "synology_list_users":
                     return await self._handle_usermgr_call(arguments, 'list_users')
@@ -346,7 +359,8 @@ class SynologyMCPServer:
         
         # Create or get auth instance
         if base_url not in self.auth_instances:
-            self.auth_instances[base_url] = SynologyAuth(base_url)
+            self.auth_instances[base_url] = SynologyAuth(
+                base_url, verify_ssl=config.verify_ssl)
         
         auth = self.auth_instances[base_url]
         
@@ -770,6 +784,19 @@ class SynologyMCPServer:
             privilege=arguments.get("privilege", "readwrite"),
             squash=arguments.get("squash", "root_squash"),
             security=arguments.get("security", "sys"),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_create_share(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating a new shared folder."""
+        base_url = self._get_base_url(arguments)
+        nfs = self._get_nfs(base_url)
+        result = nfs.create_share(
+            name=arguments["share_name"],
+            vol_path=arguments["vol_path"],
+            desc=arguments.get("description", ""),
+            enable_recycle_bin=arguments.get("enable_recycle_bin", True),
+            recycle_bin_admin_only=arguments.get("recycle_bin_admin_only", True),
         )
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -1621,6 +1648,44 @@ class SynologyMCPServer:
                         }
                     },
                     "required": ["share_name", "client_ip"]
+                }
+            ),
+            types.Tool(
+                name="synology_create_share",
+                description="Create a new shared folder on a Synology NAS volume",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "share_name": {
+                            "type": "string",
+                            "description": "Name of the shared folder to create (e.g. 'rag-corpus')"
+                        },
+                        "vol_path": {
+                            "type": "string",
+                            "description": "Volume path where the share will be created (e.g. '/volume1', '/volume2')"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional description for the shared folder"
+                        },
+                        "enable_recycle_bin": {
+                            "type": "boolean",
+                            "description": "Enable recycle bin for deleted files (default: true)"
+                        },
+                        "recycle_bin_admin_only": {
+                            "type": "boolean",
+                            "description": "Restrict recycle bin access to administrators only (default: true)"
+                        }
+                    },
+                    "required": ["share_name", "vol_path"]
                 }
             ),
             # ============================================================

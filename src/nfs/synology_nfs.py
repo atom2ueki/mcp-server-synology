@@ -1,5 +1,6 @@
 # src/nfs/synology_nfs.py - Synology NFS service and share management
 
+import json
 import requests
 from typing import Dict, Any, Optional, List
 
@@ -72,6 +73,29 @@ class SynologyNFS:
         """Get detailed info for a specific shared folder."""
         return self._api_call('SYNO.Core.Share', 'get',
                               extra_params={'name': name})
+
+    def create_share(self, name: str, vol_path: str,
+                     desc: str = "",
+                     enable_recycle_bin: bool = True,
+                     recycle_bin_admin_only: bool = True) -> Dict[str, Any]:
+        """Create a new shared folder on the NAS.
+
+        Args:
+            name: Share name (e.g. 'rag-corpus').
+            vol_path: Volume path (e.g. '/volume2').
+            desc: Optional description.
+            enable_recycle_bin: Enable recycle bin (default True).
+            recycle_bin_admin_only: Restrict recycle bin access to admins (default True).
+        """
+        params = {
+            'name': name,
+            'vol_path': vol_path,
+            'desc': desc,
+            'enable_recycle_bin': json.dumps(enable_recycle_bin),
+            'recycle_bin_admin_only': json.dumps(recycle_bin_admin_only),
+        }
+        return self._api_call('SYNO.Core.Share', 'create',
+                              extra_params=params, use_post=True)
 
     def set_nfs_permission(self, share_name: str, client_ip: str,
                            privilege: str = "readwrite",

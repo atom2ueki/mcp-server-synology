@@ -7,8 +7,9 @@ from typing import Dict, Any, Optional
 class SynologyAuth:
     """Handles Synology NAS authentication using simple API calls."""
     
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, verify_ssl: bool = False):
         self.base_url = base_url.rstrip('/')
+        self.verify_ssl = verify_ssl
         self.current_session_id: Optional[str] = None
         self.current_session_type: str = 'FileStation'
     
@@ -35,7 +36,7 @@ class SynologyAuth:
             }
             
             try:
-                response = requests.get(login_url, params=payload, verify=False)
+                response = requests.get(login_url, params=payload, verify=self.verify_ssl)
                 response.raise_for_status()
                 result = response.json()
                 
@@ -96,7 +97,7 @@ class SynologyAuth:
             }
             
             try:
-                response = requests.get(logout_url, params=payload, verify=False)
+                response = requests.get(logout_url, params=payload, verify=self.verify_ssl)
                 response.raise_for_status()
                 result = response.json()
                 

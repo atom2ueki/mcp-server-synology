@@ -9,9 +9,10 @@ import sys
 class SynologyDownloadStation:
     """Handles Synology Download Station API operations using DSM 7.0+ modern APIs."""
     
-    def __init__(self, base_url: str, session_id: str):
+    def __init__(self, base_url: str, session_id: str, verify_ssl: bool = False):
         self.base_url = base_url.rstrip('/')
         self.session_id = session_id
+        self.verify_ssl = verify_ssl
         
         # DSM 7.0+ modern API endpoints (the only ones that work)
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
@@ -48,9 +49,9 @@ class SynologyDownloadStation:
         try:
             # Use POST for create operations, GET for others
             if method == 'create':
-                response = requests.post(endpoint_url, data=request_params, verify=False)
+                response = requests.post(endpoint_url, data=request_params, verify=self.verify_ssl)
             else:
-                response = requests.get(endpoint_url, params=request_params, verify=False)
+                response = requests.get(endpoint_url, params=request_params, verify=self.verify_ssl)
             
             response.raise_for_status()
             data = response.json()
@@ -343,7 +344,7 @@ class SynologyDownloadStation:
                 '_sid': self.session_id
             }
             
-            response = requests.get(self.api_url, params=request_params, verify=False)
+            response = requests.get(self.api_url, params=request_params, verify=self.verify_ssl)
             response.raise_for_status()
             data = response.json()
             
@@ -447,7 +448,7 @@ class SynologyDownloadStation:
                 '_sid': self.session_id
             }
             
-            response = requests.get(self.api_url, params=request_params, verify=False)
+            response = requests.get(self.api_url, params=request_params, verify=self.verify_ssl)
             response.raise_for_status()
             data = response.json()
             
