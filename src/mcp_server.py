@@ -34,6 +34,7 @@ class SynologyMCPServer:
         self.health_instances: Dict[str, SynologyHealth] = {}
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
+        self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
         self._setup_handlers()
     
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
@@ -92,54 +93,61 @@ class SynologyMCPServer:
         return self.usermgr_instances[base_url]
 
     async def _auto_login_if_configured(self):
-        """Automatically login if credentials are configured and auto_login is enabled."""
-        # Debug output to see what config values we have
-        print(f"🔍 DEBUG: config.auto_login = {config.auto_login}", file=sys.stderr)
-        print(f"🔍 DEBUG: config.has_synology_credentials() = {config.has_synology_credentials()}", file=sys.stderr)
-        print(f"🔍 DEBUG: config = {config}", file=sys.stderr)
-        
-        if config.auto_login and config.has_synology_credentials():
+        """Automatically login to all configured NAS units."""
+        print(f"🔍 Config: {config}", file=sys.stderr)
+
+        if not config.auto_login:
+            print("⚠️  Auto-login disabled (AUTO_LOGIN=false)", file=sys.stderr)
+            return
+        if not config.has_synology_credentials():
+            print("⚠️  No Synology credentials configured", file=sys.stderr)
+            return
+
+        nas_names = config.get_nas_names()
+        if not nas_names:
+            # Legacy single-NAS from .env
+            nas_names = [None]
+
+        success_count = 0
+        for nas_name in nas_names:
             try:
-                synology_config = config.get_synology_config()
-                base_url = synology_config['base_url']
-                
-                print(f"Auto-login enabled, attempting to login to {base_url}", file=sys.stderr)
-                
-                # Create auth instance
+                nas_cfg = config.get_synology_config(nas_name)
+                base_url = nas_cfg['base_url']
+                label = nas_name or base_url
+
+                print(f"🔄 Auto-login: {label} ({base_url})...", file=sys.stderr)
+
                 if base_url not in self.auth_instances:
                     self.auth_instances[base_url] = SynologyAuth(base_url)
-                
+
                 auth = self.auth_instances[base_url]
-                result = auth.login(synology_config['username'], synology_config['password'])
-                
+                result = auth.login(nas_cfg['username'], nas_cfg['password'])
+
                 if result.get("success"):
                     session_id = result["data"]["sid"]
                     self.sessions[base_url] = session_id
-                    print(f"✅ Auto-login successful for {base_url} (Session: {session_id[:8]}...)", file=sys.stderr)
-                    
-                    # Clear any existing service instances to force recreation with new session
+                    # Store the name→url mapping for tool resolution
+                    self.nas_name_map[label] = base_url
+                    print(f"✅ {label}: session {session_id[:8]}...", file=sys.stderr)
+
                     for inst_dict in (self.filestation_instances, self.downloadstation_instances,
                                       self.health_instances, self.nfs_instances,
                                       self.usermgr_instances):
                         inst_dict.pop(base_url, None)
+                    success_count += 1
                 else:
-                    error_msg = f"Auto-login failed for {base_url}: {result}"
-                    print(f"❌ {error_msg}", file=sys.stderr)
-                    raise Exception(error_msg)
-                    
+                    error_code = result.get('error', {}).get('code', '?')
+                    print(f"⚠️  {label}: login failed (code {error_code})", file=sys.stderr)
+
             except Exception as e:
-                error_msg = f"Auto-login error: {e}"
-                print(f"❌ {error_msg}", file=sys.stderr)
+                print(f"⚠️  {nas_name or 'default'}: {e}", file=sys.stderr)
                 if config.debug:
                     import traceback
                     traceback.print_exc(file=sys.stderr)
-                raise Exception(f"Auto-login failed - stopping server. {error_msg}")
-        elif not config.auto_login:
-            print("⚠️  Auto-login disabled (AUTO_LOGIN=false)", file=sys.stderr)
-        elif not config.has_synology_credentials():
-            print("⚠️  No Synology credentials configured", file=sys.stderr)
-        else:
-            print("⚠️  Auto-login conditions not met", file=sys.stderr)
+
+        if success_count == 0:
+            raise Exception("Auto-login failed for all configured NAS units — stopping server.")
+        print(f"✅ Connected to {success_count}/{len(nas_names)} NAS unit(s)", file=sys.stderr)
     
     def _setup_handlers(self):
         """Setup MCP server handlers."""
@@ -304,14 +312,31 @@ class SynologyMCPServer:
                 )]
     
     def _get_base_url(self, arguments: dict) -> str:
-        """Get base URL from arguments or config."""
+        """Get base URL from arguments or config.
+
+        Accepts either:
+          - base_url: a full URL like http://10.0.0.51:5000
+          - nas_name: a key from secrets.json like 'nas1', 'nas2'
+        Falls back to the first connected NAS if neither is provided.
+        """
+        # Try nas_name first
+        nas_name = arguments.get("nas_name")
+        if nas_name:
+            base_url = self.nas_name_map.get(nas_name)
+            if base_url:
+                return base_url
+            raise Exception(f"NAS '{nas_name}' not found. Available: {list(self.nas_name_map.keys())}")
+
+        # Try explicit base_url
         base_url = arguments.get("base_url")
-        if not base_url:
-            if config.synology_url:
-                base_url = config.synology_url
-            else:
-                raise Exception("No base_url provided and SYNOLOGY_URL not configured in .env")
-        return base_url
+        if base_url:
+            return base_url
+
+        # Fall back to first connected session
+        if self.sessions:
+            return next(iter(self.sessions))
+
+        raise Exception("No nas_name or base_url provided and no active sessions.")
     
     async def _handle_login(self, arguments: dict) -> list[types.TextContent]:
         """Handle Synology login."""
@@ -412,25 +437,25 @@ class SynologyMCPServer:
     async def _handle_status(self, arguments: dict) -> list[types.TextContent]:
         """Handle status check."""
         status_info = []
-        
+
         # Show configuration status
-        if config.has_synology_credentials():
-            status_info.append(f"✓ Configuration: {config.synology_url} (user: {config.synology_username})")
-            status_info.append(f"✓ Auto-login: {'enabled' if config.auto_login else 'disabled'}")
+        nas_names = config.get_nas_names()
+        if nas_names:
+            status_info.append(f"✓ Configured NAS units: {', '.join(nas_names)}")
+        elif config.has_synology_credentials():
+            status_info.append(f"✓ Configuration: {config.synology_url}")
         else:
-            status_info.append("⚠ No Synology credentials configured in .env")
+            status_info.append("⚠ No Synology credentials configured")
+        status_info.append(f"✓ Auto-login: {'enabled' if config.auto_login else 'disabled'}")
         
-        # Show active sessions with detailed info
+        # Show active sessions with NAS names
         if self.sessions:
+            # Build reverse map: base_url -> nas_name
+            url_to_name = {v: k for k, v in self.nas_name_map.items()}
             status_info.append(f"\nActive sessions ({len(self.sessions)}):")
             for base_url, session_id in self.sessions.items():
-                auth = self.auth_instances.get(base_url)
-                if auth and auth.is_logged_in():
-                    session_info = auth.get_session_info()
-                    session_type = session_info.get('session_type', 'Unknown')
-                    status_info.append(f"• {base_url}: {session_type} session {session_id[:10]}...")
-                else:
-                    status_info.append(f"• {base_url}: Session {session_id[:10]}... (status unknown)")
+                name = url_to_name.get(base_url, '?')
+                status_info.append(f"• {name} ({base_url}): session {session_id[:10]}...")
                     
             # Show service instances
             if self.filestation_instances:
@@ -845,9 +870,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -859,9 +888,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -877,9 +910,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -895,9 +932,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -917,9 +958,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -935,9 +980,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -957,9 +1006,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "source_path": {
                             "type": "string",
@@ -983,9 +1036,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -1009,9 +1066,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "folder_path": {
                             "type": "string",
@@ -1035,9 +1096,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -1054,9 +1119,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1068,9 +1137,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "offset": {
                             "type": "integer",
@@ -1090,9 +1163,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "uri": {
                             "type": "string",
@@ -1120,9 +1197,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "task_ids": {
                             "type": "array",
@@ -1139,9 +1220,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "task_ids": {
                             "type": "array",
@@ -1158,9 +1243,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "task_ids": {
                             "type": "array",
@@ -1181,9 +1270,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1195,9 +1288,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "destination": {
                             "type": "string",
@@ -1216,9 +1313,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1230,9 +1331,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1244,9 +1349,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1258,9 +1367,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "disk_id": {
                             "type": "string",
@@ -1276,9 +1389,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1290,9 +1407,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1304,9 +1425,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1318,9 +1443,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1332,9 +1461,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1346,9 +1479,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "offset": {
                             "type": "integer",
@@ -1368,9 +1505,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1385,9 +1526,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1399,9 +1544,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "enable": {
                             "type": "boolean",
@@ -1421,9 +1570,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1435,9 +1588,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "share_name": {
                             "type": "string",
@@ -1475,9 +1632,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1489,9 +1650,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "name": {
                             "type": "string",
@@ -1507,9 +1672,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "name": {
                             "type": "string",
@@ -1545,9 +1714,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "name": {
                             "type": "string",
@@ -1584,9 +1757,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "name": {
                             "type": "string",
@@ -1602,9 +1779,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -1616,9 +1797,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "group": {
                             "type": "string",
@@ -1634,9 +1819,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "username": {
                             "type": "string",
@@ -1657,9 +1846,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "username": {
                             "type": "string",
@@ -1680,9 +1873,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "name": {
                             "type": "string",
@@ -1698,9 +1895,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "name": {
                             "type": "string",
