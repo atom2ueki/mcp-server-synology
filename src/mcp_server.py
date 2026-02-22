@@ -19,6 +19,7 @@ from filestation import SynologyFileStation
 from downloadstation import SynologyDownloadStation
 from health import SynologyHealth
 from nfs import SynologyNFS
+from usermanagement import SynologyUserManager
 
 
 class SynologyMCPServer:
@@ -32,6 +33,7 @@ class SynologyMCPServer:
         self.downloadstation_instances: Dict[str, SynologyDownloadStation] = {}
         self.health_instances: Dict[str, SynologyHealth] = {}
         self.nfs_instances: Dict[str, SynologyNFS] = {}
+        self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self._setup_handlers()
     
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
@@ -78,6 +80,17 @@ class SynologyMCPServer:
 
         return self.nfs_instances[base_url]
 
+    def _get_usermgr(self, base_url: str) -> SynologyUserManager:
+        """Get or create UserManager instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.usermgr_instances:
+            session_id = self.sessions[base_url]
+            self.usermgr_instances[base_url] = SynologyUserManager(base_url, session_id)
+
+        return self.usermgr_instances[base_url]
+
     async def _auto_login_if_configured(self):
         """Automatically login if credentials are configured and auto_login is enabled."""
         # Debug output to see what config values we have
@@ -106,7 +119,8 @@ class SynologyMCPServer:
                     
                     # Clear any existing service instances to force recreation with new session
                     for inst_dict in (self.filestation_instances, self.downloadstation_instances,
-                                      self.health_instances, self.nfs_instances):
+                                      self.health_instances, self.nfs_instances,
+                                      self.usermgr_instances):
                         inst_dict.pop(base_url, None)
                 else:
                     error_msg = f"Auto-login failed for {base_url}: {result}"
@@ -258,6 +272,29 @@ class SynologyMCPServer:
                     return await self._handle_nfs_call(arguments, 'list_shares')
                 elif name == "synology_nfs_set_permission":
                     return await self._handle_nfs_set_permission(arguments)
+                # User management handlers
+                elif name == "synology_list_users":
+                    return await self._handle_usermgr_call(arguments, 'list_users')
+                elif name == "synology_get_user":
+                    return await self._handle_usermgr_get_user(arguments)
+                elif name == "synology_create_user":
+                    return await self._handle_usermgr_create_user(arguments)
+                elif name == "synology_set_user":
+                    return await self._handle_usermgr_set_user(arguments)
+                elif name == "synology_delete_user":
+                    return await self._handle_usermgr_delete_user(arguments)
+                elif name == "synology_list_groups":
+                    return await self._handle_usermgr_call(arguments, 'list_groups')
+                elif name == "synology_list_group_members":
+                    return await self._handle_usermgr_list_group_members(arguments)
+                elif name == "synology_add_user_to_group":
+                    return await self._handle_usermgr_add_to_group(arguments)
+                elif name == "synology_remove_user_from_group":
+                    return await self._handle_usermgr_remove_from_group(arguments)
+                elif name == "synology_get_user_permissions":
+                    return await self._handle_usermgr_get_permissions(arguments)
+                elif name == "synology_set_user_permissions":
+                    return await self._handle_usermgr_set_permissions(arguments)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as e:
@@ -709,6 +746,85 @@ class SynologyMCPServer:
             squash=arguments.get("squash", "root_squash"),
             security=arguments.get("security", "sys"),
         )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    # ------------------------------------------------------------------
+    # User management handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_usermgr_call(self, arguments: dict, method_name: str) -> list[types.TextContent]:
+        """Generic handler for simple user management calls."""
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = getattr(usermgr, method_name)()
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_get_user(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.get_user(arguments["name"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_create_user(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.create_user(
+            name=arguments["name"],
+            password=arguments["password"],
+            description=arguments.get("description", ""),
+            email=arguments.get("email", ""),
+            cannot_chg_passwd=arguments.get("cannot_chg_passwd", False),
+            passwd_never_expire=arguments.get("passwd_never_expire", True),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_set_user(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.set_user(
+            name=arguments["name"],
+            new_name=arguments.get("new_name"),
+            password=arguments.get("password"),
+            description=arguments.get("description"),
+            email=arguments.get("email"),
+            expired=arguments.get("expired"),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_delete_user(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.delete_user(arguments["name"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_list_group_members(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.list_group_members(arguments["group"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_add_to_group(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.add_user_to_group(arguments["username"], arguments["groups"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_remove_from_group(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.remove_user_from_group(arguments["username"], arguments["groups"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_get_permissions(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.get_user_permissions(arguments["name"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_set_permissions(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.set_user_permissions(arguments["name"], arguments["permissions"])
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     def _get_tool_definitions(self):
@@ -1350,6 +1466,272 @@ class SynologyMCPServer:
                     "required": ["share_name", "client_ip"]
                 }
             ),
+            # ============================================================
+            # User Management Tools
+            # ============================================================
+            types.Tool(
+                name="synology_list_users",
+                description="List all local users on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_get_user",
+                description="Get detailed information about a specific user",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username to look up"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            ),
+            types.Tool(
+                name="synology_create_user",
+                description="Create a new local user on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username for the new account"
+                        },
+                        "password": {
+                            "type": "string",
+                            "description": "Password for the new account"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "User description (optional)"
+                        },
+                        "email": {
+                            "type": "string",
+                            "description": "User email address (optional)"
+                        },
+                        "cannot_chg_passwd": {
+                            "type": "boolean",
+                            "description": "Prevent user from changing password (default: false)"
+                        },
+                        "passwd_never_expire": {
+                            "type": "boolean",
+                            "description": "Password never expires (default: true)"
+                        }
+                    },
+                    "required": ["name", "password"]
+                }
+            ),
+            types.Tool(
+                name="synology_set_user",
+                description="Modify an existing user (rename, change password, enable/disable)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Target username to modify"
+                        },
+                        "new_name": {
+                            "type": "string",
+                            "description": "Rename the user (optional)"
+                        },
+                        "password": {
+                            "type": "string",
+                            "description": "New password (optional)"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "New description (optional)"
+                        },
+                        "email": {
+                            "type": "string",
+                            "description": "New email (optional)"
+                        },
+                        "expired": {
+                            "type": "string",
+                            "enum": ["normal", "now"],
+                            "description": "'normal' = active, 'now' = disabled"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            ),
+            types.Tool(
+                name="synology_delete_user",
+                description="Delete a local user from the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username to delete"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            ),
+            types.Tool(
+                name="synology_list_groups",
+                description="List all local groups on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_list_group_members",
+                description="List members of a specific group",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "group": {
+                            "type": "string",
+                            "description": "Group name to list members of"
+                        }
+                    },
+                    "required": ["group"]
+                }
+            ),
+            types.Tool(
+                name="synology_add_user_to_group",
+                description="Add a user to one or more groups",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "username": {
+                            "type": "string",
+                            "description": "Username to add to groups"
+                        },
+                        "groups": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of group names to join"
+                        }
+                    },
+                    "required": ["username", "groups"]
+                }
+            ),
+            types.Tool(
+                name="synology_remove_user_from_group",
+                description="Remove a user from one or more groups",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "username": {
+                            "type": "string",
+                            "description": "Username to remove from groups"
+                        },
+                        "groups": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of group names to leave"
+                        }
+                    },
+                    "required": ["username", "groups"]
+                }
+            ),
+            types.Tool(
+                name="synology_get_user_permissions",
+                description="Get shared folder permissions for a user",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username to check permissions for"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            ),
+            types.Tool(
+                name="synology_set_user_permissions",
+                description="Set shared folder permissions for a user (read/write/deny per folder)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (optional if configured in .env)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username to set permissions for"
+                        },
+                        "permissions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Shared folder name"
+                                    },
+                                    "is_writable": {
+                                        "type": "boolean",
+                                        "description": "Grant write access"
+                                    },
+                                    "is_deny": {
+                                        "type": "boolean",
+                                        "description": "Deny access entirely"
+                                    }
+                                },
+                                "required": ["name"]
+                            },
+                            "description": "List of folder permission objects"
+                        }
+                    },
+                    "required": ["name", "permissions"]
+                }
+            ),
         ]
 
     async def get_tools_list(self):
@@ -1400,6 +1782,18 @@ class SynologyMCPServer:
                 "synology_nfs_enable": lambda a: self._handle_nfs_enable(a),
                 "synology_nfs_list_shares": lambda a: self._handle_nfs_call(a, 'list_shares'),
                 "synology_nfs_set_permission": lambda a: self._handle_nfs_set_permission(a),
+                # User management
+                "synology_list_users": lambda a: self._handle_usermgr_call(a, 'list_users'),
+                "synology_get_user": lambda a: self._handle_usermgr_get_user(a),
+                "synology_create_user": lambda a: self._handle_usermgr_create_user(a),
+                "synology_set_user": lambda a: self._handle_usermgr_set_user(a),
+                "synology_delete_user": lambda a: self._handle_usermgr_delete_user(a),
+                "synology_list_groups": lambda a: self._handle_usermgr_call(a, 'list_groups'),
+                "synology_list_group_members": lambda a: self._handle_usermgr_list_group_members(a),
+                "synology_add_user_to_group": lambda a: self._handle_usermgr_add_to_group(a),
+                "synology_remove_user_from_group": lambda a: self._handle_usermgr_remove_from_group(a),
+                "synology_get_user_permissions": lambda a: self._handle_usermgr_get_permissions(a),
+                "synology_set_user_permissions": lambda a: self._handle_usermgr_set_permissions(a),
             }
 
             handler = dispatch.get(name)
@@ -1494,7 +1888,8 @@ class SynologyMCPServer:
                 # Always clear local data
                 del self.sessions[base_url]
                 for inst_dict in (self.filestation_instances, self.downloadstation_instances,
-                                  self.health_instances, self.nfs_instances):
+                                  self.health_instances, self.nfs_instances,
+                                  self.usermgr_instances):
                     inst_dict.pop(base_url, None)
                     
             except Exception as e:
