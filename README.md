@@ -233,6 +233,7 @@ docker-compose up
 
 ### 🔐 Authentication
 - **`synology_status`** - Check authentication status and active sessions
+- **`synology_list_nas`** - List all configured NAS units from settings.json
 - **`synology_login`** - Authenticate with Synology NAS *(conditional)*
 - **`synology_logout`** - Logout from session *(conditional)*
 
@@ -280,7 +281,37 @@ docker-compose up
   - `force_complete` (optional): Force delete completed
 - **`ds_get_statistics`** - Get download/upload statistics
 
+### 🏥 Health Monitoring
+- **`synology_system_info`** - Get system model, serial, DSM version, uptime, temperature
+- **`synology_utilization`** - Get real-time CPU, memory, swap, and disk I/O utilization
+- **`synology_disk_health`** - List all physical disks with SMART status, model, temp, size
+- **`synology_disk_smart`** - Get detailed SMART attributes for a specific disk
+- **`synology_volume_status`** - List all volumes with status, size, usage, filesystem type
+- **`synology_storage_pool`** - List RAID/storage pools with level, status, member disks
+- **`synology_network`** - Get network interface status and transfer rates
+- **`synology_ups`** - Get UPS status, battery level, power readings
+- **`synology_services`** - List installed packages and their running status
+- **`synology_system_log`** - Get recent system log entries
+- **`synology_health_summary`** - Aggregate system info, utilization, disk health, and volume status
+
+### 📦 NFS Management
+- **`synology_nfs_status`** - Get NFS service status and configuration
+- **`synology_nfs_enable`** - Enable or disable the NFS service
+- **`synology_nfs_list_shares`** - List all shared folders with their NFS permissions
+- **`synology_nfs_set_permission`** - Set NFS client access permissions on a shared folder
+
 ## ⚙️ Configuration Options
+
+> **⚠️ Security Warning: Use a Dedicated Account**
+>
+> For this MCP server, create a dedicated Synology user account with appropriate permissions. This account should:
+> - **NOT have 2FA enabled** - The MCP server cannot handle 2FA prompts and will fail authentication
+> - Have minimal required permissions only (not admin!)
+> - Be used exclusively for MCP server automation
+>
+> Using your primary account with 2FA is dangerous - if auto-login fails, you may be locked out of your NAS!
+
+### Using settings.json (Recommended)
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -288,13 +319,90 @@ docker-compose up
 | `SYNOLOGY_USERNAME` | Yes* | - | Username for authentication |
 | `SYNOLOGY_PASSWORD` | Yes* | - | Password for authentication |
 | `AUTO_LOGIN` | No | `true` | Auto-login on server start |
-| `VERIFY_SSL` | No | `true` | Verify SSL certificates |
+| `VERIFY_SSL` | No | `false` | Verify SSL certificates |
 | `DEBUG` | No | `false` | Enable debug logging |
 | `ENABLE_XIAOZHI` | No | `false` | Enable Xiaozhi WebSocket bridge |
 | `XIAOZHI_TOKEN` | Xiaozhi only | - | Authentication token for Xiaozhi |
 | `XIAOZHI_MCP_ENDPOINT` | No | `wss://api.xiaozhi.me/mcp/` | Xiaozhi WebSocket endpoint |
 
 *Required for auto-login and default operations
+
+### Using settings.json (Multi-NAS Support)
+
+For managing multiple Synology NAS devices, use the XDG standard config directory (`~/.config/synology-mcp/settings.json`):
+
+```bash
+mkdir -p ~/.config/synology-mcp
+touch ~/.config/synology-mcp/settings.json
+chmod 600 ~/.config/synology-mcp/settings.json  # Important: secure permissions!
+```
+
+**Note:** This follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) - `~/.config/` is the standard location for user configuration files on Linux/macOS. You can customize the location by setting the `XDG_CONFIG_HOME` environment variable.
+
+**With Docker:**
+The docker-compose.yml automatically mounts your `~/.config/synology-mcp` directory into the container at `/home/mcpuser/.config/synology-mcp`, so multi-NAS works out of the box with Docker as well.
+
+**settings.json format:**
+```json
+{
+  "synology": {
+    "nas1": {
+      "host": "192.168.1.100",
+      "port": 5000,
+      "username": "admin",
+      "password": "your_password",
+      "note": "Primary NAS at home"
+    },
+    "nas2": {
+      "host": "192.168.1.200",
+      "port": 5001,
+      "username": "admin",
+      "password": "your_password",
+      "note": "Backup NAS"
+    }
+  },
+  "xiaozhi": {
+    "enabled": false,
+    "token": "your_xiaozhi_token",
+    "endpoint": "wss://api.xiaozhi.me/mcp/"
+  },
+  "server": {
+    "auto_login": true,
+    "verify_ssl": false,
+    "session_timeout": 3600,
+    "debug": false,
+    "log_level": "INFO"
+  }
+}
+```
+
+**Configuration fields:**
+| Field | Required | Description |
+|-------|----------|-------------|
+| `host` | Yes | NAS hostname or IP address |
+| `port` | No | API port (default: 5000 for HTTP, 5001 for HTTPS) |
+| `username` | Yes | NAS username |
+| `password` | Yes | NAS password |
+| `note` | No | Optional description for your reference |
+
+**Notes:**
+- The server will use port 5001 (HTTPS) if port is 5001, otherwise defaults to HTTP (5000)
+- File permissions: `chmod 600 ~/.config/synology-mcp/settings.json` is required for security
+- The server will refuse to load settings if permissions are too open
+- Both .env and settings.json can be used together (settings.json takes priority)
+
+### ⚠️ Security Recommendations
+
+**SSL Certificate Verification (VERIFY_SSL):**
+- Default is `false` to support self-signed certificates on internal NAS devices
+- **If your NAS has a valid SSL certificate (e.g., from Let's Encrypt or a corporate CA), set `VERIFY_SSL=true`**
+- Setting `VERIFY_SSL=false` disables certificate verification and makes your connection vulnerable to man-in-the-middle (MITM) attacks
+- Never disable SSL verification on untrusted networks
+
+**Auto-Login (AUTO_LOGIN):**
+- Default is `true` for convenience with settings.json
+- Credentials are stored securely in `~/.config/synology-mcp/settings.json` with 0600 permissions
+- If you prefer manual login, set `AUTO_LOGIN=false` and use the `synology_login` tool
 
 ## 📖 Usage Examples
 

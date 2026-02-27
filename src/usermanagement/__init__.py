@@ -1,3 +1,3 @@
 from .synology_users import SynologyUserManager
 
-__all__ = ['SynologyUserManager']
+__all__ = ["SynologyUserManager"]
