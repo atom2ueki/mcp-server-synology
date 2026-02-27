@@ -1,27 +1,19 @@
 services:
   # Synology MCP Server with optional Xiaozhi support
-  # Set ENABLE_XIAOZHI=true in .env to enable both Xiaozhi and Claude/Cursor
-  # Set ENABLE_XIAOZHI=false (or omit) for Claude/Cursor only
+  # Configure via ~/.config/synology-mcp/settings.json
   synology-mcp:
     build: .
     container_name: synology-mcp-server
     command: ["python", "main.py"]
     network_mode: host  # Allow access to local network (192.168.x.x)
     environment:
-      - ENABLE_XIAOZHI=${ENABLE_XIAOZHI:-false}
-      - XIAOZHI_TOKEN=${XIAOZHI_TOKEN}
-      - XIAOZHI_MCP_ENDPOINT=${XIAOZHI_MCP_ENDPOINT:-wss://api.xiaozhi.me/mcp/}
-      - SYNOLOGY_URL=${SYNOLOGY_URL:-http://192.168.1.10:5000}
-      - SYNOLOGY_USERNAME=${SYNOLOGY_USERNAME:-your_username}
-      - SYNOLOGY_PASSWORD=${SYNOLOGY_PASSWORD:-your_password}
-      - AUTO_LOGIN=${AUTO_LOGIN:-true}
-      - DEBUG=${DEBUG:-false}
-      - VERIFY_SSL=${VERIFY_SSL:-false}
-    env_file:
-      - .env
+      - XDG_CONFIG_HOME=/home/mcpuser/.config
     volumes:
       - ./logs:/app/logs
-      - ./.env:/app/.env:ro
+      # Mount XDG config directory for settings.json
+      # On macOS: ~/.config/synology-mcp -> /home/mcpuser/.config/synology-mcp
+      # On Linux: ~/.config/synology-mcp -> /home/mcpuser/.config/synology-mcp
+      - ${XDG_CONFIG_HOME:-$HOME/.config}/synology-mcp:/home/mcpuser/.config/synology-mcp:ro
     stdin_open: true
     tty: true
     restart: unless-stopped

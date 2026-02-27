@@ -1,1 +1,1 @@
-"""Tests package for Synology MCP Server.""" 
+"""Tests package for Synology MCP Server."""

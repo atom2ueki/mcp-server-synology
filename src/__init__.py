@@ -1,1 +1,1 @@
-# MCP Synology Server Package 
+# MCP Synology Server Package

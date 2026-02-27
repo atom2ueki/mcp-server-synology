@@ -10,113 +10,120 @@ This server enables secure authentication and session management with Synology N
 Usage:
     python main.py
 
-Environment Variables:
-    ENABLE_XIAOZHI: Enable Xiaozhi WebSocket bridge (true/false, default: false)
-    XIAOZHI_TOKEN: Your Xiaozhi authentication token (required if ENABLE_XIAOZHI=true)
-    XIAOZHI_MCP_ENDPOINT: Xiaozhi MCP endpoint (optional, defaults to wss://api.xiaozhi.me/mcp/)
+Configuration:
+    All settings are loaded from ~/.config/synology-mcp/settings.json
 
-When ENABLE_XIAOZHI=false: Only Claude/Cursor support via stdio
-When ENABLE_XIAOZHI=true: Both Xiaozhi (WebSocket) and Claude/Cursor (stdio) support
+    For Xiaozhi support, set in settings.json:
+    {
+      "xiaozhi": {
+        "enabled": true,
+        "token": "your_token",
+        "endpoint": "wss://api.xiaozhi.me/mcp/"
+      }
+    }
 """
 
 import asyncio
+import logging
 import os
 import sys
-import traceback
+
 from dotenv import load_dotenv
 
-# Load environment variables
+# Legacy .env support (deprecated - use settings.json instead)
 load_dotenv()
 
 # Add src directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 
 def check_requirements():
     """Check if all requirements are met."""
+    from config import config
+
     errors = []
-    
-    enable_xiaozhi = os.getenv('ENABLE_XIAOZHI', 'false').lower() == 'true'
-    
-    if enable_xiaozhi:
+
+    if config.xiaozhi_enabled:
         # Check for token
-        token = os.getenv('XIAOZHI_TOKEN')
-        if not token:
-            errors.append("XIAOZHI_TOKEN environment variable is required when ENABLE_XIAOZHI=true")
-        
+        if not config.xiaozhi_token:
+            errors.append("Xiaozhi token is required when xiaozhi.enabled=true in settings.json")
+
         # Check for websockets package
-        try:
-            import websockets
-        except ImportError:
-            errors.append("websockets package is not installed. Run: pip install websockets>=11.0.3")
-    
+        import importlib.util
+
+        if importlib.util.find_spec("websockets") is None:
+            errors.append(
+                "websockets package is not installed. Run: pip install websockets>=11.0.3"
+            )
+
     return errors
 
 
+def setup_logging(level: str = "INFO"):
+    """Setup logging configuration."""
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
 if __name__ == "__main__":
-    enable_xiaozhi = os.getenv('ENABLE_XIAOZHI', 'false').lower() == 'true'
-    
+    from config import config
+
+    # Setup logging
+    setup_logging(config.log_level)
+    logger = logging.getLogger("synology-mcp")
+
+    enable_xiaozhi = config.xiaozhi_enabled
+
     if enable_xiaozhi:
-        print("🚀 Synology MCP Server with Xiaozhi Bridge", file=sys.stderr)
-        print("=" * 50, file=sys.stderr)
-        print("🌟 Supports BOTH Xiaozhi and Claude/Cursor simultaneously!", file=sys.stderr)
-        print("=" * 50, file=sys.stderr)
+        logger.info("Starting Synology MCP Server with Xiaozhi Bridge")
+        logger.info("Supports BOTH Xiaozhi and Claude/Cursor simultaneously")
     else:
-        print("🚀 Synology MCP Server", file=sys.stderr)
-        print("=" * 30, file=sys.stderr)
-        print("📌 Claude/Cursor only mode (ENABLE_XIAOZHI=false)", file=sys.stderr)
-        print("=" * 30, file=sys.stderr)
-    
+        logger.info("Starting Synology MCP Server")
+        logger.info("Claude/Cursor only mode")
+
     # Check requirements
     errors = check_requirements()
     if errors:
-        print("❌ Requirements check failed:", file=sys.stderr)
+        logger.error("Requirements check failed:")
         for error in errors:
-            print(f"   • {error}", file=sys.stderr)
-        print("\nPlease fix the above issues and try again.", file=sys.stderr)
+            logger.error(f"  - {error}")
         sys.exit(1)
-    
-    print("✅ Requirements check passed", file=sys.stderr)
-    
+
+    logger.info("Requirements check passed")
+
     try:
         if enable_xiaozhi:
             # Show Xiaozhi configuration
-            endpoint = os.getenv('XIAOZHI_MCP_ENDPOINT', 'wss://api.xiaozhi.me/mcp/')
-            token = os.getenv('XIAOZHI_TOKEN')
+            endpoint = config.xiaozhi_endpoint
+            token = config.xiaozhi_token
             token_preview = f"{token[:8]}..." if token and len(token) > 8 else "***"
-            
-            print(f"📡 Xiaozhi Endpoint: {endpoint}", file=sys.stderr)
-            print(f"🔑 Token: {token_preview}", file=sys.stderr)
-            print("", file=sys.stderr)
-            print("🔗 Client Support:", file=sys.stderr)
-            print("   • Xiaozhi: WebSocket connection", file=sys.stderr)
-            print("   • Claude/Cursor: stdio connection", file=sys.stderr)
-            print("", file=sys.stderr)
-            
-            print("Starting multi-client bridge... Press Ctrl+C to stop", file=sys.stderr)
-            print("=" * 50, file=sys.stderr)
-            
+
+            logger.info(f"Xiaozhi Endpoint: {endpoint}")
+            logger.info(f"Xiaozhi Token: {token_preview}")
+            logger.info("Client Support: Xiaozhi (WebSocket), Claude/Cursor (stdio)")
+
+            logger.info("Starting multi-client bridge... Press Ctrl+C to stop")
+
             # Import and run multiclient bridge
             from multiclient_bridge import main as bridge_main
+
             asyncio.run(bridge_main())
         else:
-            print("", file=sys.stderr)
-            print("🔗 Client Support:", file=sys.stderr)
-            print("   • Claude/Cursor: stdio connection", file=sys.stderr)
-            print("", file=sys.stderr)
-            
-            print("Starting MCP server... Press Ctrl+C to stop", file=sys.stderr)
-            print("=" * 30, file=sys.stderr)
-            
+            logger.info("Client Support: Claude/Cursor (stdio)")
+            logger.info("Starting MCP server... Press Ctrl+C to stop")
+
             # Import and run standard MCP server
             from mcp_server import main as server_main
+
             asyncio.run(server_main())
-            
+
     except KeyboardInterrupt:
-        print("\n👋 Server stopped by user", file=sys.stderr)
+        logger.info("Server stopped by user")
         sys.exit(0)
     except Exception as e:
-        print(f"\n❌ Server error: {e}", file=sys.stderr)
-        print("Full traceback:", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+        logger.error(f"Server error: {e}")
+        logger.debug("Full traceback:", exc_info=True)
         sys.exit(1)
