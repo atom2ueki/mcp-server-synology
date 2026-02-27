@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+import urllib3
 from typing import Any, Dict, Optional
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
@@ -17,6 +18,13 @@ from config import config
 from auth import SynologyAuth
 from filestation import SynologyFileStation
 from downloadstation import SynologyDownloadStation
+from health import SynologyHealth
+from nfs import SynologyNFS
+from usermanagement import SynologyUserManager
+
+# Suppress InsecureRequestWarning when verify_ssl is disabled (internal NAS devices)
+if not config.verify_ssl:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class SynologyMCPServer:
@@ -28,79 +36,129 @@ class SynologyMCPServer:
         self.sessions: Dict[str, str] = {}  # base_url -> session_id
         self.filestation_instances: Dict[str, SynologyFileStation] = {}
         self.downloadstation_instances: Dict[str, SynologyDownloadStation] = {}
+        self.health_instances: Dict[str, SynologyHealth] = {}
+        self.nfs_instances: Dict[str, SynologyNFS] = {}
+        self.usermgr_instances: Dict[str, SynologyUserManager] = {}
+        self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
         self._setup_handlers()
     
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
         if base_url not in self.sessions:
             raise Exception(f"No active session for {base_url}. Please login first.")
-        
+
         if base_url not in self.filestation_instances:
             session_id = self.sessions[base_url]
-            self.filestation_instances[base_url] = SynologyFileStation(base_url, session_id)
-        
+            self.filestation_instances[base_url] = SynologyFileStation(
+                base_url, session_id, verify_ssl=config.verify_ssl)
+
         return self.filestation_instances[base_url]
-    
+
     def _get_downloadstation(self, base_url: str) -> SynologyDownloadStation:
         """Get or create DownloadStation instance for a base URL."""
         if base_url not in self.sessions:
             raise Exception(f"No active session for {base_url}. Please login first.")
-        
+
         if base_url not in self.downloadstation_instances:
             session_id = self.sessions[base_url]
-            self.downloadstation_instances[base_url] = SynologyDownloadStation(base_url, session_id)
-        
+            self.downloadstation_instances[base_url] = SynologyDownloadStation(
+                base_url, session_id, verify_ssl=config.verify_ssl)
+
         return self.downloadstation_instances[base_url]
-    
+
+    def _get_health(self, base_url: str) -> SynologyHealth:
+        """Get or create Health instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.health_instances:
+            session_id = self.sessions[base_url]
+            self.health_instances[base_url] = SynologyHealth(
+                base_url, session_id, verify_ssl=config.verify_ssl)
+
+        return self.health_instances[base_url]
+
+    def _get_nfs(self, base_url: str) -> SynologyNFS:
+        """Get or create NFS instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.nfs_instances:
+            session_id = self.sessions[base_url]
+            self.nfs_instances[base_url] = SynologyNFS(
+                base_url, session_id, verify_ssl=config.verify_ssl)
+
+        return self.nfs_instances[base_url]
+
+    def _get_usermgr(self, base_url: str) -> SynologyUserManager:
+        """Get or create UserManager instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.usermgr_instances:
+            session_id = self.sessions[base_url]
+            self.usermgr_instances[base_url] = SynologyUserManager(
+                base_url, session_id, verify_ssl=config.verify_ssl)
+
+        return self.usermgr_instances[base_url]
+
     async def _auto_login_if_configured(self):
-        """Automatically login if credentials are configured and auto_login is enabled."""
-        # Debug output to see what config values we have
-        print(f"🔍 DEBUG: config.auto_login = {config.auto_login}", file=sys.stderr)
-        print(f"🔍 DEBUG: config.has_synology_credentials() = {config.has_synology_credentials()}", file=sys.stderr)
-        print(f"🔍 DEBUG: config = {config}", file=sys.stderr)
-        
-        if config.auto_login and config.has_synology_credentials():
+        """Automatically login to all configured NAS units."""
+        print(f"🔍 Config: {config}", file=sys.stderr)
+
+        if not config.auto_login:
+            print("⚠️  Auto-login disabled (AUTO_LOGIN=false)", file=sys.stderr)
+            return
+        if not config.has_synology_credentials():
+            print("⚠️  No Synology credentials configured", file=sys.stderr)
+            return
+
+        nas_names = config.get_nas_names()
+        if not nas_names:
+            # Legacy single-NAS from .env
+            nas_names = [None]
+
+        success_count = 0
+        for nas_name in nas_names:
             try:
-                synology_config = config.get_synology_config()
-                base_url = synology_config['base_url']
-                
-                print(f"Auto-login enabled, attempting to login to {base_url}", file=sys.stderr)
-                
-                # Create auth instance
+                nas_cfg = config.get_synology_config(nas_name)
+                base_url = nas_cfg['base_url']
+                label = nas_name or base_url
+
+                print(f"🔄 Auto-login: {label} ({base_url})...", file=sys.stderr)
+
                 if base_url not in self.auth_instances:
-                    self.auth_instances[base_url] = SynologyAuth(base_url)
-                
+                    self.auth_instances[base_url] = SynologyAuth(
+                        base_url, verify_ssl=config.verify_ssl)
+
                 auth = self.auth_instances[base_url]
-                result = auth.login(synology_config['username'], synology_config['password'])
-                
+                result = auth.login(nas_cfg['username'], nas_cfg['password'])
+
                 if result.get("success"):
                     session_id = result["data"]["sid"]
                     self.sessions[base_url] = session_id
-                    print(f"✅ Auto-login successful for {base_url} (Session: {session_id[:8]}...)", file=sys.stderr)
-                    
-                    # Clear any existing FileStation/DownloadStation instances to force recreation with new session
-                    if base_url in self.filestation_instances:
-                        del self.filestation_instances[base_url]
-                    if base_url in self.downloadstation_instances:
-                        del self.downloadstation_instances[base_url]
+                    # Store the name→url mapping for tool resolution
+                    self.nas_name_map[label] = base_url
+                    print(f"✅ {label}: session {session_id[:8]}...", file=sys.stderr)
+
+                    for inst_dict in (self.filestation_instances, self.downloadstation_instances,
+                                      self.health_instances, self.nfs_instances,
+                                      self.usermgr_instances):
+                        inst_dict.pop(base_url, None)
+                    success_count += 1
                 else:
-                    error_msg = f"Auto-login failed for {base_url}: {result}"
-                    print(f"❌ {error_msg}", file=sys.stderr)
-                    raise Exception(error_msg)
-                    
+                    error_code = result.get('error', {}).get('code', '?')
+                    print(f"⚠️  {label}: login failed (code {error_code})", file=sys.stderr)
+
             except Exception as e:
-                error_msg = f"Auto-login error: {e}"
-                print(f"❌ {error_msg}", file=sys.stderr)
+                print(f"⚠️  {nas_name or 'default'}: {e}", file=sys.stderr)
                 if config.debug:
                     import traceback
                     traceback.print_exc(file=sys.stderr)
-                raise Exception(f"Auto-login failed - stopping server. {error_msg}")
-        elif not config.auto_login:
-            print("⚠️  Auto-login disabled (AUTO_LOGIN=false)", file=sys.stderr)
-        elif not config.has_synology_credentials():
-            print("⚠️  No Synology credentials configured", file=sys.stderr)
-        else:
-            print("⚠️  Auto-login conditions not met", file=sys.stderr)
+
+        if success_count == 0:
+            raise Exception("Auto-login failed for all configured NAS units — stopping server.")
+        print(f"✅ Connected to {success_count}/{len(nas_names)} NAS unit(s)", file=sys.stderr)
     
     def _setup_handlers(self):
         """Setup MCP server handlers."""
@@ -201,6 +259,63 @@ class SynologyMCPServer:
                     return await self._handle_ds_get_statistics(arguments)
                 elif name == "ds_list_downloaded_files":
                     return await self._handle_ds_list_downloaded_files(arguments)
+                # Health monitoring handlers
+                elif name == "synology_system_info":
+                    return await self._handle_health_call(arguments, 'system_info')
+                elif name == "synology_utilization":
+                    return await self._handle_health_call(arguments, 'utilization')
+                elif name == "synology_disk_health":
+                    return await self._handle_health_call(arguments, 'disk_list')
+                elif name == "synology_disk_smart":
+                    return await self._handle_disk_smart(arguments)
+                elif name == "synology_volume_status":
+                    return await self._handle_health_call(arguments, 'volume_list')
+                elif name == "synology_storage_pool":
+                    return await self._handle_health_call(arguments, 'storage_pool_list')
+                elif name == "synology_network":
+                    return await self._handle_health_call(arguments, 'network_info')
+                elif name == "synology_ups":
+                    return await self._handle_health_call(arguments, 'ups_info')
+                elif name == "synology_services":
+                    return await self._handle_health_call(arguments, 'package_list')
+                elif name == "synology_system_log":
+                    return await self._handle_system_log(arguments)
+                elif name == "synology_health_summary":
+                    return await self._handle_health_call(arguments, 'health_summary')
+                # NFS management handlers
+                elif name == "synology_nfs_status":
+                    return await self._handle_nfs_call(arguments, 'nfs_status')
+                elif name == "synology_nfs_enable":
+                    return await self._handle_nfs_enable(arguments)
+                elif name == "synology_nfs_list_shares":
+                    return await self._handle_nfs_call(arguments, 'list_shares')
+                elif name == "synology_nfs_set_permission":
+                    return await self._handle_nfs_set_permission(arguments)
+                elif name == "synology_create_share":
+                    return await self._handle_create_share(arguments)
+                # User management handlers
+                elif name == "synology_list_users":
+                    return await self._handle_usermgr_call(arguments, 'list_users')
+                elif name == "synology_get_user":
+                    return await self._handle_usermgr_get_user(arguments)
+                elif name == "synology_create_user":
+                    return await self._handle_usermgr_create_user(arguments)
+                elif name == "synology_set_user":
+                    return await self._handle_usermgr_set_user(arguments)
+                elif name == "synology_delete_user":
+                    return await self._handle_usermgr_delete_user(arguments)
+                elif name == "synology_list_groups":
+                    return await self._handle_usermgr_call(arguments, 'list_groups')
+                elif name == "synology_list_group_members":
+                    return await self._handle_usermgr_list_group_members(arguments)
+                elif name == "synology_add_user_to_group":
+                    return await self._handle_usermgr_add_to_group(arguments)
+                elif name == "synology_remove_user_from_group":
+                    return await self._handle_usermgr_remove_from_group(arguments)
+                elif name == "synology_get_user_permissions":
+                    return await self._handle_usermgr_get_permissions(arguments)
+                elif name == "synology_set_user_permissions":
+                    return await self._handle_usermgr_set_permissions(arguments)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as e:
@@ -210,14 +325,31 @@ class SynologyMCPServer:
                 )]
     
     def _get_base_url(self, arguments: dict) -> str:
-        """Get base URL from arguments or config."""
+        """Get base URL from arguments or config.
+
+        Accepts either:
+          - base_url: a full URL like http://10.0.0.51:5000
+          - nas_name: a key from secrets.json like 'nas1', 'nas2'
+        Falls back to the first connected NAS if neither is provided.
+        """
+        # Try nas_name first
+        nas_name = arguments.get("nas_name")
+        if nas_name:
+            base_url = self.nas_name_map.get(nas_name)
+            if base_url:
+                return base_url
+            raise Exception(f"NAS '{nas_name}' not found. Available: {list(self.nas_name_map.keys())}")
+
+        # Try explicit base_url
         base_url = arguments.get("base_url")
-        if not base_url:
-            if config.synology_url:
-                base_url = config.synology_url
-            else:
-                raise Exception("No base_url provided and SYNOLOGY_URL not configured in .env")
-        return base_url
+        if base_url:
+            return base_url
+
+        # Fall back to first connected session
+        if self.sessions:
+            return next(iter(self.sessions))
+
+        raise Exception("No nas_name or base_url provided and no active sessions.")
     
     async def _handle_login(self, arguments: dict) -> list[types.TextContent]:
         """Handle Synology login."""
@@ -227,7 +359,8 @@ class SynologyMCPServer:
         
         # Create or get auth instance
         if base_url not in self.auth_instances:
-            self.auth_instances[base_url] = SynologyAuth(base_url)
+            self.auth_instances[base_url] = SynologyAuth(
+                base_url, verify_ssl=config.verify_ssl)
         
         auth = self.auth_instances[base_url]
         
@@ -318,25 +451,25 @@ class SynologyMCPServer:
     async def _handle_status(self, arguments: dict) -> list[types.TextContent]:
         """Handle status check."""
         status_info = []
-        
+
         # Show configuration status
-        if config.has_synology_credentials():
-            status_info.append(f"✓ Configuration: {config.synology_url} (user: {config.synology_username})")
-            status_info.append(f"✓ Auto-login: {'enabled' if config.auto_login else 'disabled'}")
+        nas_names = config.get_nas_names()
+        if nas_names:
+            status_info.append(f"✓ Configured NAS units: {', '.join(nas_names)}")
+        elif config.has_synology_credentials():
+            status_info.append(f"✓ Configuration: {config.synology_url}")
         else:
-            status_info.append("⚠ No Synology credentials configured in .env")
+            status_info.append("⚠ No Synology credentials configured")
+        status_info.append(f"✓ Auto-login: {'enabled' if config.auto_login else 'disabled'}")
         
-        # Show active sessions with detailed info
+        # Show active sessions with NAS names
         if self.sessions:
+            # Build reverse map: base_url -> nas_name
+            url_to_name = {v: k for k, v in self.nas_name_map.items()}
             status_info.append(f"\nActive sessions ({len(self.sessions)}):")
             for base_url, session_id in self.sessions.items():
-                auth = self.auth_instances.get(base_url)
-                if auth and auth.is_logged_in():
-                    session_info = auth.get_session_info()
-                    session_type = session_info.get('session_type', 'Unknown')
-                    status_info.append(f"• {base_url}: {session_type} session {session_id[:10]}...")
-                else:
-                    status_info.append(f"• {base_url}: Session {session_id[:10]}... (status unknown)")
+                name = url_to_name.get(base_url, '?')
+                status_info.append(f"• {name} ({base_url}): session {session_id[:10]}...")
                     
             # Show service instances
             if self.filestation_instances:
@@ -593,6 +726,159 @@ class SynologyMCPServer:
             text=json.dumps(files, indent=2)
         )]
     
+    # ------------------------------------------------------------------
+    # Health monitoring handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_health_call(self, arguments: dict, method_name: str) -> list[types.TextContent]:
+        """Generic handler for health monitoring calls."""
+        base_url = self._get_base_url(arguments)
+        health = self._get_health(base_url)
+        result = getattr(health, method_name)()
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_disk_smart(self, arguments: dict) -> list[types.TextContent]:
+        """Handle getting SMART info for a specific disk."""
+        base_url = self._get_base_url(arguments)
+        disk_id = arguments["disk_id"]
+        health = self._get_health(base_url)
+        result = health.disk_smart_info(disk_id)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
+        """Handle getting system log entries."""
+        base_url = self._get_base_url(arguments)
+        offset = arguments.get("offset", 0)
+        limit = arguments.get("limit", 50)
+        health = self._get_health(base_url)
+        result = health.system_log(offset=offset, limit=limit)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    # ------------------------------------------------------------------
+    # NFS management handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_nfs_call(self, arguments: dict, method_name: str) -> list[types.TextContent]:
+        """Generic handler for NFS calls."""
+        base_url = self._get_base_url(arguments)
+        nfs = self._get_nfs(base_url)
+        result = getattr(nfs, method_name)()
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_nfs_enable(self, arguments: dict) -> list[types.TextContent]:
+        """Handle enabling/disabling NFS service."""
+        base_url = self._get_base_url(arguments)
+        enable = arguments.get("enable", True)
+        nfs_v4 = arguments.get("nfs_v4", False)
+        nfs = self._get_nfs(base_url)
+        result = nfs.nfs_enable(enable=enable, nfs_v4=nfs_v4)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_nfs_set_permission(self, arguments: dict) -> list[types.TextContent]:
+        """Handle setting NFS permissions on a share."""
+        base_url = self._get_base_url(arguments)
+        nfs = self._get_nfs(base_url)
+        result = nfs.set_nfs_permission(
+            share_name=arguments["share_name"],
+            client_ip=arguments["client_ip"],
+            privilege=arguments.get("privilege", "readwrite"),
+            squash=arguments.get("squash", "root_squash"),
+            security=arguments.get("security", "sys"),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_create_share(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating a new shared folder."""
+        base_url = self._get_base_url(arguments)
+        nfs = self._get_nfs(base_url)
+        result = nfs.create_share(
+            name=arguments["share_name"],
+            vol_path=arguments["vol_path"],
+            desc=arguments.get("description", ""),
+            enable_recycle_bin=arguments.get("enable_recycle_bin", True),
+            recycle_bin_admin_only=arguments.get("recycle_bin_admin_only", True),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    # ------------------------------------------------------------------
+    # User management handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_usermgr_call(self, arguments: dict, method_name: str) -> list[types.TextContent]:
+        """Generic handler for simple user management calls."""
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = getattr(usermgr, method_name)()
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_get_user(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.get_user(arguments["name"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_create_user(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.create_user(
+            name=arguments["name"],
+            password=arguments["password"],
+            description=arguments.get("description", ""),
+            email=arguments.get("email", ""),
+            cannot_chg_passwd=arguments.get("cannot_chg_passwd", False),
+            passwd_never_expire=arguments.get("passwd_never_expire", True),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_set_user(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.set_user(
+            name=arguments["name"],
+            new_name=arguments.get("new_name"),
+            password=arguments.get("password"),
+            description=arguments.get("description"),
+            email=arguments.get("email"),
+            expired=arguments.get("expired"),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_delete_user(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.delete_user(arguments["name"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_list_group_members(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.list_group_members(arguments["group"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_add_to_group(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.add_user_to_group(arguments["username"], arguments["groups"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_remove_from_group(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.remove_user_from_group(arguments["username"], arguments["groups"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_get_permissions(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.get_user_permissions(arguments["name"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_usermgr_set_permissions(self, arguments: dict) -> list[types.TextContent]:
+        base_url = self._get_base_url(arguments)
+        usermgr = self._get_usermgr(base_url)
+        result = usermgr.set_user_permissions(arguments["name"], arguments["permissions"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
     def _get_tool_definitions(self):
         """Get tool definitions shared between MCP handler and bridge."""
         return [
@@ -611,9 +897,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -625,9 +915,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -643,9 +937,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -661,9 +959,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -683,9 +985,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -701,9 +1007,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -723,9 +1033,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "source_path": {
                             "type": "string",
@@ -749,9 +1063,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -775,9 +1093,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "folder_path": {
                             "type": "string",
@@ -801,9 +1123,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "path": {
                             "type": "string",
@@ -820,9 +1146,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -834,9 +1164,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "offset": {
                             "type": "integer",
@@ -856,9 +1190,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "uri": {
                             "type": "string",
@@ -886,9 +1224,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "task_ids": {
                             "type": "array",
@@ -905,9 +1247,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "task_ids": {
                             "type": "array",
@@ -924,9 +1270,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "task_ids": {
                             "type": "array",
@@ -947,9 +1297,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         }
                     },
                     "required": []
@@ -961,9 +1315,13 @@ class SynologyMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
                         "base_url": {
                             "type": "string",
-                            "description": "Synology NAS base URL (optional if configured in .env)"
+                            "description": "Synology NAS base URL (alternative to nas_name)"
                         },
                         "destination": {
                             "type": "string",
@@ -972,7 +1330,674 @@ class SynologyMCPServer:
                     },
                     "required": []
                 }
-            )
+            ),
+            # ============================================================
+            # Health Monitoring Tools
+            # ============================================================
+            types.Tool(
+                name="synology_system_info",
+                description="Get Synology NAS system information: model, serial, DSM version, uptime, temperature",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_utilization",
+                description="Get real-time CPU, memory, swap, and disk I/O utilization",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_disk_health",
+                description="List all physical disks with SMART health status, model, temperature, and capacity",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_disk_smart",
+                description="Get detailed S.M.A.R.T. attributes for a specific physical disk",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "disk_id": {
+                            "type": "string",
+                            "description": "Disk identifier (e.g. 'sda', 'sdb') from synology_disk_health output"
+                        }
+                    },
+                    "required": ["disk_id"]
+                }
+            ),
+            types.Tool(
+                name="synology_volume_status",
+                description="List all volumes/filesystems with status, total size, used space, and RAID info",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_storage_pool",
+                description="List RAID/storage pools with RAID level, status, and member disks",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_network",
+                description="Get network interface status and transfer rates",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_ups",
+                description="Get UPS (uninterruptible power supply) status, battery level, and power info",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_services",
+                description="List installed packages/services and their running status",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_system_log",
+                description="Get recent system log entries for diagnosing issues",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Starting offset (default: 0)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max entries to return (default: 50)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_health_summary",
+                description="Get a combined health overview: system info, CPU/memory utilization, disk health, volume status, storage pools, network, and UPS — all in one call",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            # ============================================================
+            # NFS Management Tools
+            # ============================================================
+            types.Tool(
+                name="synology_nfs_status",
+                description="Get NFS service status and configuration (enabled/disabled, NFSv4 settings)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_nfs_enable",
+                description="Enable or disable the NFS file service on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "enable": {
+                            "type": "boolean",
+                            "description": "True to enable NFS, false to disable (default: true)"
+                        },
+                        "nfs_v4": {
+                            "type": "boolean",
+                            "description": "Enable NFSv4 support (default: false)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_nfs_list_shares",
+                description="List all shared folders with their NFS access permissions",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_nfs_set_permission",
+                description="Set NFS client access permissions on a shared folder (IP/subnet, read/write, squash options)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "share_name": {
+                            "type": "string",
+                            "description": "Name of the shared folder (e.g. 'media', 'backups')"
+                        },
+                        "client_ip": {
+                            "type": "string",
+                            "description": "Client IP or subnet (e.g. '192.168.1.0/24', '10.0.0.5')"
+                        },
+                        "privilege": {
+                            "type": "string",
+                            "enum": ["readonly", "readwrite"],
+                            "description": "Access level (default: readwrite)"
+                        },
+                        "squash": {
+                            "type": "string",
+                            "enum": ["root_squash", "no_root_squash", "all_squash"],
+                            "description": "Squash option for root user mapping (default: root_squash)"
+                        },
+                        "security": {
+                            "type": "string",
+                            "enum": ["sys", "krb5", "krb5i", "krb5p"],
+                            "description": "Security mode (default: sys/AUTH_SYS)"
+                        }
+                    },
+                    "required": ["share_name", "client_ip"]
+                }
+            ),
+            types.Tool(
+                name="synology_create_share",
+                description="Create a new shared folder on a Synology NAS volume",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "share_name": {
+                            "type": "string",
+                            "description": "Name of the shared folder to create (e.g. 'rag-corpus')"
+                        },
+                        "vol_path": {
+                            "type": "string",
+                            "description": "Volume path where the share will be created (e.g. '/volume1', '/volume2')"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional description for the shared folder"
+                        },
+                        "enable_recycle_bin": {
+                            "type": "boolean",
+                            "description": "Enable recycle bin for deleted files (default: true)"
+                        },
+                        "recycle_bin_admin_only": {
+                            "type": "boolean",
+                            "description": "Restrict recycle bin access to administrators only (default: true)"
+                        }
+                    },
+                    "required": ["share_name", "vol_path"]
+                }
+            ),
+            # ============================================================
+            # User Management Tools
+            # ============================================================
+            types.Tool(
+                name="synology_list_users",
+                description="List all local users on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_get_user",
+                description="Get detailed information about a specific user",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username to look up"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            ),
+            types.Tool(
+                name="synology_create_user",
+                description="Create a new local user on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username for the new account"
+                        },
+                        "password": {
+                            "type": "string",
+                            "description": "Password for the new account"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "User description (optional)"
+                        },
+                        "email": {
+                            "type": "string",
+                            "description": "User email address (optional)"
+                        },
+                        "cannot_chg_passwd": {
+                            "type": "boolean",
+                            "description": "Prevent user from changing password (default: false)"
+                        },
+                        "passwd_never_expire": {
+                            "type": "boolean",
+                            "description": "Password never expires (default: true)"
+                        }
+                    },
+                    "required": ["name", "password"]
+                }
+            ),
+            types.Tool(
+                name="synology_set_user",
+                description="Modify an existing user (rename, change password, enable/disable)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Target username to modify"
+                        },
+                        "new_name": {
+                            "type": "string",
+                            "description": "Rename the user (optional)"
+                        },
+                        "password": {
+                            "type": "string",
+                            "description": "New password (optional)"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "New description (optional)"
+                        },
+                        "email": {
+                            "type": "string",
+                            "description": "New email (optional)"
+                        },
+                        "expired": {
+                            "type": "string",
+                            "enum": ["normal", "now"],
+                            "description": "'normal' = active, 'now' = disabled"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            ),
+            types.Tool(
+                name="synology_delete_user",
+                description="Delete a local user from the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username to delete"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            ),
+            types.Tool(
+                name="synology_list_groups",
+                description="List all local groups on the Synology NAS",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="synology_list_group_members",
+                description="List members of a specific group",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "group": {
+                            "type": "string",
+                            "description": "Group name to list members of"
+                        }
+                    },
+                    "required": ["group"]
+                }
+            ),
+            types.Tool(
+                name="synology_add_user_to_group",
+                description="Add a user to one or more groups",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "username": {
+                            "type": "string",
+                            "description": "Username to add to groups"
+                        },
+                        "groups": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of group names to join"
+                        }
+                    },
+                    "required": ["username", "groups"]
+                }
+            ),
+            types.Tool(
+                name="synology_remove_user_from_group",
+                description="Remove a user from one or more groups",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "username": {
+                            "type": "string",
+                            "description": "Username to remove from groups"
+                        },
+                        "groups": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of group names to leave"
+                        }
+                    },
+                    "required": ["username", "groups"]
+                }
+            ),
+            types.Tool(
+                name="synology_get_user_permissions",
+                description="Get shared folder permissions for a user",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username to check permissions for"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            ),
+            types.Tool(
+                name="synology_set_user_permissions",
+                description="Set shared folder permissions for a user (read/write/deny per folder)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "nas_name": {
+                            "type": "string",
+                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')"
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Synology NAS base URL (alternative to nas_name)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Username to set permissions for"
+                        },
+                        "permissions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Shared folder name"
+                                    },
+                                    "is_writable": {
+                                        "type": "boolean",
+                                        "description": "Grant write access"
+                                    },
+                                    "is_deny": {
+                                        "type": "boolean",
+                                        "description": "Deny access entirely"
+                                    }
+                                },
+                                "required": ["name"]
+                            },
+                            "description": "List of folder permission objects"
+                        }
+                    },
+                    "required": ["name", "permissions"]
+                }
+            ),
         ]
 
     async def get_tools_list(self):
@@ -980,55 +2005,67 @@ class SynologyMCPServer:
         return self._get_tool_definitions()
 
     async def call_tool_direct(self, name: str, arguments: dict):
-        """Call a tool directly (for bridge use)."""
-        # This replicates the logic from the handle_call_tool function
-        # but can be called directly from the bridge
+        """Call a tool directly (for bridge use).
+        Delegates to the same handler used by handle_call_tool."""
         try:
-            if name == "synology_login":
-                return await self._handle_login(arguments)
-            elif name == "synology_logout":
-                return await self._handle_logout(arguments)
-            elif name == "synology_status":
-                return await self._handle_status(arguments)
-            elif name == "list_shares":
-                return await self._handle_list_shares(arguments)
-            elif name == "list_directory":
-                return await self._handle_list_directory(arguments)
-            elif name == "get_file_info":
-                return await self._handle_get_file_info(arguments)
-            elif name == "search_files":
-                return await self._handle_search_files(arguments)
-            elif name == "get_file_content":
-                return await self._handle_get_file_content(arguments)
-            elif name == "rename_file":
-                return await self._handle_rename_file(arguments)
-            elif name == "move_file":
-                return await self._handle_move_file(arguments)
-            elif name == "create_file":
-                return await self._handle_create_file(arguments)
-            elif name == "create_directory":
-                return await self._handle_create_directory(arguments)
-            elif name == "delete":
-                return await self._handle_delete(arguments)
-            # Download Station handlers
-            elif name == "ds_get_info":
-                return await self._handle_ds_get_info(arguments)
-            elif name == "ds_list_tasks":
-                return await self._handle_ds_list_tasks(arguments)
-            elif name == "ds_create_task":
-                return await self._handle_ds_create_task(arguments)
-            elif name == "ds_pause_tasks":
-                return await self._handle_ds_pause_tasks(arguments)
-            elif name == "ds_resume_tasks":
-                return await self._handle_ds_resume_tasks(arguments)
-            elif name == "ds_delete_tasks":
-                return await self._handle_ds_delete_tasks(arguments)
-            elif name == "ds_get_statistics":
-                return await self._handle_ds_get_statistics(arguments)
-            elif name == "ds_list_downloaded_files":
-                return await self._handle_ds_list_downloaded_files(arguments)
-            else:
+            # Build a dispatch table from the tool name to its handler
+            dispatch = {
+                "synology_login": lambda a: self._handle_login(a),
+                "synology_logout": lambda a: self._handle_logout(a),
+                "synology_status": lambda a: self._handle_status(a),
+                "list_shares": lambda a: self._handle_list_shares(a),
+                "list_directory": lambda a: self._handle_list_directory(a),
+                "get_file_info": lambda a: self._handle_get_file_info(a),
+                "search_files": lambda a: self._handle_search_files(a),
+                "get_file_content": lambda a: self._handle_get_file_content(a),
+                "rename_file": lambda a: self._handle_rename_file(a),
+                "move_file": lambda a: self._handle_move_file(a),
+                "create_file": lambda a: self._handle_create_file(a),
+                "create_directory": lambda a: self._handle_create_directory(a),
+                "delete": lambda a: self._handle_delete(a),
+                "ds_get_info": lambda a: self._handle_ds_get_info(a),
+                "ds_list_tasks": lambda a: self._handle_ds_list_tasks(a),
+                "ds_create_task": lambda a: self._handle_ds_create_task(a),
+                "ds_pause_tasks": lambda a: self._handle_ds_pause_tasks(a),
+                "ds_resume_tasks": lambda a: self._handle_ds_resume_tasks(a),
+                "ds_delete_tasks": lambda a: self._handle_ds_delete_tasks(a),
+                "ds_get_statistics": lambda a: self._handle_ds_get_statistics(a),
+                "ds_list_downloaded_files": lambda a: self._handle_ds_list_downloaded_files(a),
+                # Health monitoring
+                "synology_system_info": lambda a: self._handle_health_call(a, 'system_info'),
+                "synology_utilization": lambda a: self._handle_health_call(a, 'utilization'),
+                "synology_disk_health": lambda a: self._handle_health_call(a, 'disk_list'),
+                "synology_disk_smart": lambda a: self._handle_disk_smart(a),
+                "synology_volume_status": lambda a: self._handle_health_call(a, 'volume_list'),
+                "synology_storage_pool": lambda a: self._handle_health_call(a, 'storage_pool_list'),
+                "synology_network": lambda a: self._handle_health_call(a, 'network_info'),
+                "synology_ups": lambda a: self._handle_health_call(a, 'ups_info'),
+                "synology_services": lambda a: self._handle_health_call(a, 'package_list'),
+                "synology_system_log": lambda a: self._handle_system_log(a),
+                "synology_health_summary": lambda a: self._handle_health_call(a, 'health_summary'),
+                # NFS management
+                "synology_nfs_status": lambda a: self._handle_nfs_call(a, 'nfs_status'),
+                "synology_nfs_enable": lambda a: self._handle_nfs_enable(a),
+                "synology_nfs_list_shares": lambda a: self._handle_nfs_call(a, 'list_shares'),
+                "synology_nfs_set_permission": lambda a: self._handle_nfs_set_permission(a),
+                # User management
+                "synology_list_users": lambda a: self._handle_usermgr_call(a, 'list_users'),
+                "synology_get_user": lambda a: self._handle_usermgr_get_user(a),
+                "synology_create_user": lambda a: self._handle_usermgr_create_user(a),
+                "synology_set_user": lambda a: self._handle_usermgr_set_user(a),
+                "synology_delete_user": lambda a: self._handle_usermgr_delete_user(a),
+                "synology_list_groups": lambda a: self._handle_usermgr_call(a, 'list_groups'),
+                "synology_list_group_members": lambda a: self._handle_usermgr_list_group_members(a),
+                "synology_add_user_to_group": lambda a: self._handle_usermgr_add_to_group(a),
+                "synology_remove_user_from_group": lambda a: self._handle_usermgr_remove_from_group(a),
+                "synology_get_user_permissions": lambda a: self._handle_usermgr_get_permissions(a),
+                "synology_set_user_permissions": lambda a: self._handle_usermgr_set_permissions(a),
+            }
+
+            handler = dispatch.get(name)
+            if handler is None:
                 raise ValueError(f"Unknown tool: {name}")
+            return await handler(arguments)
         except Exception as e:
             return [types.TextContent(
                 type="text",
@@ -1116,10 +2153,10 @@ class SynologyMCPServer:
                 
                 # Always clear local data
                 del self.sessions[base_url]
-                if base_url in self.filestation_instances:
-                    del self.filestation_instances[base_url]
-                if base_url in self.downloadstation_instances:
-                    del self.downloadstation_instances[base_url]
+                for inst_dict in (self.filestation_instances, self.downloadstation_instances,
+                                  self.health_instances, self.nfs_instances,
+                                  self.usermgr_instances):
+                    inst_dict.pop(base_url, None)
                     
             except Exception as e:
                 print(f"❌ Exception during cleanup for {base_url}: {e}", file=sys.stderr)
