@@ -101,7 +101,11 @@ def session_info(synology_auth):
 @pytest.fixture
 def download_station(session_info):
     """Get working Download Station client."""
-    ds = SynologyDownloadStation(session_info["base_url"], session_info["session_id"])
+    ds = SynologyDownloadStation(
+        session_info["base_url"],
+        session_info["session_id"],
+        syno_token=session_info.get("syno_token"),
+    )
 
     # Quick connectivity test
     try:

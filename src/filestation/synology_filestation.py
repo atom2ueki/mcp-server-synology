@@ -401,9 +401,16 @@ class SynologyFileStation:
                         "overwrite": str(overwrite).lower(),
                     }
 
-                    # Make the request
+                    # Make the request — thread X-SYNO-TOKEN for DSM 7.3.2+ CSRF;
+                    # let requests set Content-Type with the multipart boundary.
+                    upload_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
                     response = session.post(
-                        url, files=files, data=data, verify=self.verify_ssl, timeout=15
+                        url,
+                        files=files,
+                        data=data,
+                        headers=upload_headers,
+                        verify=self.verify_ssl,
+                        timeout=15,
                     )
                     response.raise_for_status()
 
@@ -597,6 +604,7 @@ class SynologyFileStation:
         self._check_critical_path(formatted_path)
 
         # Use the download API to get file content
+        download_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
         response = requests.get(
             f"{self.base_url}/webapi/entry.cgi",
             params={
@@ -606,6 +614,7 @@ class SynologyFileStation:
                 "path": formatted_path,
                 "_sid": self.session_id,
             },
+            headers=download_headers,
             verify=self.verify_ssl,
             stream=True,
             timeout=15,

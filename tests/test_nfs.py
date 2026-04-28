@@ -12,7 +12,11 @@ class TestSynologyNFS:
         """Test getting NFS service status."""
         from nfs.synology_nfs import SynologyNFS
 
-        nfs = SynologyNFS(session_info["base_url"], session_info["session_id"])
+        nfs = SynologyNFS(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = nfs.nfs_status()
 
@@ -28,7 +32,11 @@ class TestSynologyNFS:
         """Test listing shared folders with NFS privileges."""
         from nfs.synology_nfs import SynologyNFS
 
-        nfs = SynologyNFS(session_info["base_url"], session_info["session_id"])
+        nfs = SynologyNFS(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = nfs.list_shares()
 
@@ -45,7 +53,11 @@ class TestSynologyNFS:
         """Test getting specific share details."""
         from nfs.synology_nfs import SynologyNFS
 
-        nfs = SynologyNFS(session_info["base_url"], session_info["session_id"])
+        nfs = SynologyNFS(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         # First get list of shares
         shares_result = nfs.list_shares()
@@ -70,7 +82,11 @@ class TestSynologyNFS:
         """Test getting and setting NFS permissions (read-only test)."""
         from nfs.synology_nfs import SynologyNFS
 
-        nfs = SynologyNFS(session_info["base_url"], session_info["session_id"])
+        nfs = SynologyNFS(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         # First, list shares to find one to test
         shares_result = nfs.list_shares()

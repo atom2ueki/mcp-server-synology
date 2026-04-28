@@ -414,8 +414,13 @@ class SynologyDownloadStation:
                 "_sid": self.session_id,
             }
 
+            headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
             response = requests.get(
-                self.api_url, params=request_params, verify=self.verify_ssl, timeout=15
+                self.api_url,
+                params=request_params,
+                headers=headers,
+                verify=self.verify_ssl,
+                timeout=15,
             )
             response.raise_for_status()
             data = response.json()
@@ -521,8 +526,13 @@ class SynologyDownloadStation:
                 "_sid": self.session_id,
             }
 
+            headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
             response = requests.get(
-                self.api_url, params=request_params, verify=self.verify_ssl, timeout=15
+                self.api_url,
+                params=request_params,
+                headers=headers,
+                verify=self.verify_ssl,
+                timeout=15,
             )
             response.raise_for_status()
             data = response.json()
