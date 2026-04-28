@@ -76,6 +76,8 @@ class SynologyNFS:
         desc: str = "",
         enable_recycle_bin: bool = True,
         recycle_bin_admin_only: bool = True,
+        enable_share_cow: bool = False,
+        enable_share_compress: bool = False,
     ) -> Dict[str, Any]:
         """Create a new shared folder on the NAS.
 
@@ -85,13 +87,28 @@ class SynologyNFS:
             desc: Optional description.
             enable_recycle_bin: Enable recycle bin (default True).
             recycle_bin_admin_only: Restrict recycle bin access to admins (default True).
+            enable_share_cow: Enable copy-on-write (default False).
+            enable_share_compress: Enable share compression (default False).
         """
-        params = {
+        # DSM 7.3.2 rejects flat params on SYNO.Core.Share.create with code 403.
+        # The web UI sends a JSON-encoded `shareinfo` envelope plus a top-level
+        # `name` (also JSON-encoded — DSM expects the quoted form here). The
+        # X-SYNO-TOKEN header is added by SynologyAPIClient when a token is set.
+        # Verified against DSM 7.3.2-86009 Update 3 by capturing the live web UI
+        # request — no Synology Noise/__cIpHeRtExT encryption is involved.
+        shareinfo = {
             "name": name,
             "vol_path": vol_path,
             "desc": desc,
-            "enable_recycle_bin": json.dumps(enable_recycle_bin),
-            "recycle_bin_admin_only": json.dumps(recycle_bin_admin_only),
+            "enable_recycle_bin": enable_recycle_bin,
+            "recycle_bin_admin_only": recycle_bin_admin_only,
+            "enable_share_cow": enable_share_cow,
+            "enable_share_compress": enable_share_compress,
+            "name_org": "",
+        }
+        params = {
+            "name": json.dumps(name),
+            "shareinfo": json.dumps(shareinfo),
         }
         return self._api_call("SYNO.Core.Share", "create", extra_params=params, use_post=True)
 
