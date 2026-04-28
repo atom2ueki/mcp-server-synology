@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unicodedata
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -12,11 +12,30 @@ import requests
 class SynologyFileStation:
     """Handles Synology FileStation API operations."""
 
-    def __init__(self, base_url: str, session_id: str, verify_ssl: bool = False):
+    def __init__(
+        self,
+        base_url: str,
+        session_id: str,
+        verify_ssl: bool = False,
+        syno_token: Optional[str] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
+        self.syno_token = syno_token
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
+
+    def _csrf_headers(self, *, post: bool) -> Dict[str, str]:
+        """Build request headers, including X-SYNO-TOKEN for DSM 7.3.2+ CSRF.
+
+        Always sets the UTF-8 charset on POSTs (preserves prior Unicode behavior).
+        """
+        headers: Dict[str, str] = {}
+        if post:
+            headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8"
+        if self.syno_token:
+            headers["X-SYNO-TOKEN"] = self.syno_token
+        return headers
 
     def _make_request(
         self, api: str, version: str, method: str, use_post: bool = False, **params
@@ -31,17 +50,20 @@ class SynologyFileStation:
         }
 
         if use_post:
-            # For POST requests, ensure UTF-8 encoding for Unicode characters
             response = requests.post(
                 self.api_url,
                 data=request_params,
-                headers={"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
+                headers=self._csrf_headers(post=True),
                 verify=self.verify_ssl,
                 timeout=15,
             )
         else:
             response = requests.get(
-                self.api_url, params=request_params, verify=self.verify_ssl, timeout=15
+                self.api_url,
+                params=request_params,
+                headers=self._csrf_headers(post=False) or None,
+                verify=self.verify_ssl,
+                timeout=15,
             )
         response.raise_for_status()
 
@@ -79,8 +101,16 @@ class SynologyFileStation:
             **params,
         }
 
+        # Multipart upload — let requests set Content-Type with the boundary;
+        # we only thread the X-SYNO-TOKEN header (no charset override here).
+        upload_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
         response = requests.post(
-            self.api_url, params=request_params, files=files, verify=self.verify_ssl, timeout=15
+            self.api_url,
+            params=request_params,
+            files=files,
+            headers=upload_headers,
+            verify=self.verify_ssl,
+            timeout=15,
         )
         response.raise_for_status()
 

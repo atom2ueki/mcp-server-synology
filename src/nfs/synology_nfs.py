@@ -9,11 +9,18 @@ from utils.synology_api import SynologyAPIClient
 class SynologyNFS:
     """Manage NFS service and share-level NFS permissions on Synology DSM."""
 
-    def __init__(self, base_url: str, session_id: str, verify_ssl: bool = False):
+    def __init__(
+        self,
+        base_url: str,
+        session_id: str,
+        verify_ssl: bool = False,
+        syno_token: Optional[str] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
-        self._api = SynologyAPIClient(base_url, session_id, verify_ssl)
+        self.syno_token = syno_token
+        self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)
 
     def _api_call(
         self,
