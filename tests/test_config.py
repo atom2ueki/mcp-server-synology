@@ -31,7 +31,7 @@ class TestSynologyConfig:
                 "SYNOLOGY_PASSWORD": "testpass",
             },
         ):
-            with patch("config.SECRETS_FILE", Path("/nonexistent/secrets.json")):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
 
@@ -46,7 +46,7 @@ class TestSynologyConfig:
         reload_config()
 
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", Path("/nonexistent/secrets.json")):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
 
@@ -73,11 +73,12 @@ class TestSynologyConfig:
 
         secrets_file = tmp_path / "secrets.json"
         secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
 
         reload_config()
 
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", secrets_file):
+            with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
                 cfg = SynologyConfig()
@@ -97,11 +98,12 @@ class TestSynologyConfig:
 
         secrets_file = tmp_path / "secrets.json"
         secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
 
         reload_config()
 
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", secrets_file):
+            with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
                 cfg = SynologyConfig()
@@ -126,11 +128,12 @@ class TestSynologyConfig:
 
         secrets_file = tmp_path / "secrets.json"
         secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
 
         reload_config()
 
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", secrets_file):
+            with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
                 cfg = SynologyConfig()
@@ -143,16 +146,21 @@ class TestSynologyConfig:
         """Test validation fails with no credentials."""
         reload_config()
 
+        # patch.dict clear=True wipes os.environ but SynologyConfig calls
+        # load_dotenv(".env") at construction time, which re-injects whatever
+        # is in the developer's local .env. Patch os.path.exists so the loader
+        # treats the project as having no .env.
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", Path("/nonexistent/secrets.json")):
-                with patch.object(Path, "exists", return_value=False):
-                    from config import SynologyConfig
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch("config.os.path.exists", return_value=False):
+                    with patch.object(Path, "exists", return_value=False):
+                        from config import SynologyConfig
 
-                    cfg = SynologyConfig()
+                        cfg = SynologyConfig()
 
-                    errors = cfg.validate_config()
-                    assert len(errors) > 0
-                    assert "No Synology credentials" in errors[0]
+                        errors = cfg.validate_config()
+                        assert len(errors) > 0
+                        assert "No Synology credentials" in errors[0]
 
     def test_validate_config_timeout_too_low(self):
         """Test validation fails with low timeout."""
@@ -168,7 +176,7 @@ class TestSynologyConfig:
             },
             clear=False,
         ):
-            with patch("config.SECRETS_FILE", Path("/nonexistent/secrets.json")):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
 
@@ -190,11 +198,12 @@ class TestSynologyConfig:
 
         secrets_file = tmp_path / "secrets.json"
         secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
 
         reload_config()
 
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", secrets_file):
+            with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
                 cfg = SynologyConfig()
@@ -213,7 +222,7 @@ class TestSynologyConfig:
         reload_config()
 
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", secrets_file):
+            with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
                 cfg = SynologyConfig()
@@ -236,11 +245,12 @@ class TestSynologyConfig:
 
         secrets_file = tmp_path / "secrets.json"
         secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
 
         reload_config()
 
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", secrets_file):
+            with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
                 cfg = SynologyConfig()
@@ -256,8 +266,10 @@ class TestSynologyConfig:
 class TestFilePermissions:
     """Test file permission checking."""
 
-    def test_permission_warning_for_open_permissions(self, tmp_path, capsys):
-        """Test that warning is printed for overly open permissions."""
+    def test_permission_warning_for_open_permissions(self, tmp_path, caplog):
+        """Test that warning is logged for overly open permissions."""
+        import logging
+
         # Create a file with open permissions
         secrets_file = tmp_path / "secrets.json"
         secrets_file.write_text("{}")
@@ -268,15 +280,14 @@ class TestFilePermissions:
         reload_config()
 
         with patch.dict(os.environ, {}, clear=True):
-            with patch("config.SECRETS_FILE", secrets_file):
+            with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
-                _cfg = SynologyConfig()
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    _cfg = SynologyConfig()
 
-                # Should have printed a warning about permissions
-                captured = capsys.readouterr()
-                # Check for permission warning in stderr
-                assert "permission" in captured.err.lower() or "Warning" in captured.err
+                # Permission warning is emitted via logger.warning, not stderr
+                assert any("permission" in rec.message.lower() for rec in caplog.records)
 
 
 def test_config_str_representation():
@@ -291,7 +302,7 @@ def test_config_str_representation():
             "SYNOLOGY_PASSWORD": "pass",
         },
     ):
-        with patch("config.SECRETS_FILE", Path("/nonexistent/secrets.json")):
+        with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
             with patch.object(Path, "exists", return_value=False):
                 from config import SynologyConfig
 

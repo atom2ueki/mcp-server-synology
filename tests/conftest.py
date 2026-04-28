@@ -67,6 +67,8 @@ def session_info(synology_auth):
     session_data = {
         "base_url": config.synology_url,
         "session_id": result["data"]["sid"],
+        # Present when DSM honors enable_syno_token=yes (DSM 7.3.2+); None otherwise.
+        "syno_token": result["data"].get("synotoken"),
         "auth": synology_auth,
     }
 
@@ -99,7 +101,11 @@ def session_info(synology_auth):
 @pytest.fixture
 def download_station(session_info):
     """Get working Download Station client."""
-    ds = SynologyDownloadStation(session_info["base_url"], session_info["session_id"])
+    ds = SynologyDownloadStation(
+        session_info["base_url"],
+        session_info["session_id"],
+        syno_token=session_info.get("syno_token"),
+    )
 
     # Quick connectivity test
     try:

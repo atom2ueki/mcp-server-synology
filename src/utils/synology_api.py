@@ -12,10 +12,17 @@ class SynologyAPIClient:
     and error handling across all Synology services.
     """
 
-    def __init__(self, base_url: str, session_id: str, verify_ssl: bool = False):
+    def __init__(
+        self,
+        base_url: str,
+        session_id: str,
+        verify_ssl: bool = False,
+        syno_token: Optional[str] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
+        self.syno_token = syno_token
         self._api_url = f"{self.base_url}/webapi/entry.cgi"
 
     def request(
@@ -47,12 +54,26 @@ class SynologyAPIClient:
         if extra_params:
             params.update(extra_params)
 
+        # DSM 7.3.2+ enforces CSRF on mutating endpoints via X-SYNO-TOKEN.
+        # Harmless to send on reads and on older DSM (header is ignored there).
+        headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
+
         try:
             if use_post:
-                resp = requests.post(self._api_url, data=params, timeout=15, verify=self.verify_ssl)
+                resp = requests.post(
+                    self._api_url,
+                    data=params,
+                    headers=headers,
+                    timeout=15,
+                    verify=self.verify_ssl,
+                )
             else:
                 resp = requests.get(
-                    self._api_url, params=params, timeout=15, verify=self.verify_ssl
+                    self._api_url,
+                    params=params,
+                    headers=headers,
+                    timeout=15,
+                    verify=self.verify_ssl,
                 )
             resp.raise_for_status()
             return resp.json()

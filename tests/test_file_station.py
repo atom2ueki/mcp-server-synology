@@ -12,7 +12,11 @@ class TestSynologyFileStation:
         """Get authenticated FileStation client."""
         from filestation.synology_filestation import SynologyFileStation
 
-        fs = SynologyFileStation(session_info["base_url"], session_info["session_id"])
+        fs = SynologyFileStation(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         print("✅ FileStation client ready")
         return fs
@@ -53,11 +57,11 @@ class TestSynologyFileStation:
                 if item_type == "file" and size > 0:
                     # Format file size
                     if size > 1024 * 1024 * 1024:
-                        size_str = f"({size/(1024*1024*1024):.1f} GB)"
+                        size_str = f"({size / (1024 * 1024 * 1024):.1f} GB)"
                     elif size > 1024 * 1024:
-                        size_str = f"({size/(1024*1024):.1f} MB)"
+                        size_str = f"({size / (1024 * 1024):.1f} MB)"
                     elif size > 1024:
-                        size_str = f"({size/1024:.1f} KB)"
+                        size_str = f"({size / 1024:.1f} KB)"
                     else:
                         size_str = f"({size} B)"
                 else:
@@ -178,9 +182,9 @@ class TestSynologyFileStation:
 
         for input_path, expected in test_cases:
             result = file_station._format_path(input_path)
-            assert (
-                result == expected
-            ), f"Path '{input_path}' should format to '{expected}', got '{result}'"
+            assert result == expected, (
+                f"Path '{input_path}' should format to '{expected}', got '{result}'"
+            )
             print(f"✅ '{input_path}' → '{result}'")
 
         print("✅ Path formatting tests passed")
@@ -225,7 +229,11 @@ def test_filestation_connectivity(session_info):
     from filestation.synology_filestation import SynologyFileStation
 
     try:
-        fs = SynologyFileStation(session_info["base_url"], session_info["session_id"])
+        fs = SynologyFileStation(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         # Try a simple operation
         shares = fs.list_shares()

@@ -12,14 +12,23 @@ class SynologyAuth:
         self.base_url = base_url.rstrip("/")
         self.verify_ssl = verify_ssl
         self.current_session_id: Optional[str] = None
-        self.current_session_type: str = "FileStation"
+        # Mirrors what login_with_session uses by default; overwritten on every login.
+        self.current_session_type: str = "webui"
+        self.current_syno_token: Optional[str] = None
 
     def login(self, username: str, password: str) -> Dict[str, Any]:
-        """Authenticate with Synology NAS and return session info."""
-        return self.login_with_session(username, password, "FileStation")
+        """Authenticate with Synology NAS and return session info.
+
+        Defaults to `session=webui` — the same scope the DSM web UI uses.
+        Per live testing on DSM 7.3.2, session type doesn't actually
+        affect which APIs are reachable (account permissions do); we
+        pick `webui` for semantic alignment with the official client.
+        Use `login_with_session(...)` to pick a different session type.
+        """
+        return self.login_with_session(username, password, "webui")
 
     def login_with_session(
-        self, username: str, password: str, session_type: str = "FileStation"
+        self, username: str, password: str, session_type: str = "webui"
     ) -> Dict[str, Any]:
         """Authenticate with Synology NAS using specific session type."""
         login_url = f"{self.base_url}/webapi/auth.cgi"
@@ -36,6 +45,11 @@ class SynologyAuth:
                 "passwd": password,
                 "session": session_type,
                 "format": "sid",
+                # DSM 7.3.2+ enforces CSRF on mutating endpoints; service
+                # modules send the returned token as X-SYNO-TOKEN. Older DSM
+                # ignores the flag (synotoken absent → header-less requests,
+                # which still work pre-7.3.2).
+                "enable_syno_token": "yes",
             }
 
             try:
@@ -47,6 +61,7 @@ class SynologyAuth:
                     # Store session info for automatic logout
                     self.current_session_id = result["data"]["sid"]
                     self.current_session_type = session_type
+                    self.current_syno_token = result["data"].get("synotoken")
                     return result
                 else:
                     error_code = result.get("error", {}).get("code", "unknown")
@@ -110,7 +125,8 @@ class SynologyAuth:
                     # Clear current session if we logged out our own session
                     if logout_session_id == self.current_session_id:
                         self.current_session_id = None
-                        self.current_session_type = "FileStation"
+                        self.current_session_type = "webui"
+                        self.current_syno_token = None
                     return result
                 else:
                     last_error = result
@@ -153,5 +169,6 @@ class SynologyAuth:
         return {
             "session_id": self.current_session_id,
             "session_type": self.current_session_type,
+            "syno_token": self.current_syno_token,
             "logged_in": self.is_logged_in(),
         }

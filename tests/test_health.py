@@ -11,7 +11,11 @@ class TestSynologyHealth:
         """Test getting system information."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.system_info()
 
@@ -27,7 +31,11 @@ class TestSynologyHealth:
         """Test getting system utilization."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.utilization()
 
@@ -41,7 +49,11 @@ class TestSynologyHealth:
         """Test listing physical disks."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.disk_list()
 
@@ -58,7 +70,11 @@ class TestSynologyHealth:
         """Test listing volumes."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.volume_list()
 
@@ -75,7 +91,11 @@ class TestSynologyHealth:
         """Test listing storage pools."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.storage_pool_list()
 
@@ -90,7 +110,11 @@ class TestSynologyHealth:
         """Test getting network information."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.network_info()
 
@@ -104,7 +128,11 @@ class TestSynologyHealth:
         """Test getting UPS information."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.ups_info()
 
@@ -116,7 +144,11 @@ class TestSynologyHealth:
         """Test listing installed packages."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.package_list()
 
@@ -131,7 +163,11 @@ class TestSynologyHealth:
         """Test getting system logs."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.system_log(offset=0, limit=10)
 
@@ -145,7 +181,11 @@ class TestSynologyHealth:
         """Test getting comprehensive health summary."""
         from health.synology_health import SynologyHealth
 
-        health = SynologyHealth(session_info["base_url"], session_info["session_id"])
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = health.health_summary()
 

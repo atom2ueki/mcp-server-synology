@@ -1,5 +1,7 @@
 """NFS management module tests."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -12,7 +14,11 @@ class TestSynologyNFS:
         """Test getting NFS service status."""
         from nfs.synology_nfs import SynologyNFS
 
-        nfs = SynologyNFS(session_info["base_url"], session_info["session_id"])
+        nfs = SynologyNFS(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = nfs.nfs_status()
 
@@ -28,7 +34,11 @@ class TestSynologyNFS:
         """Test listing shared folders with NFS privileges."""
         from nfs.synology_nfs import SynologyNFS
 
-        nfs = SynologyNFS(session_info["base_url"], session_info["session_id"])
+        nfs = SynologyNFS(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         result = nfs.list_shares()
 
@@ -45,7 +55,11 @@ class TestSynologyNFS:
         """Test getting specific share details."""
         from nfs.synology_nfs import SynologyNFS
 
-        nfs = SynologyNFS(session_info["base_url"], session_info["session_id"])
+        nfs = SynologyNFS(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         # First get list of shares
         shares_result = nfs.list_shares()
@@ -70,7 +84,11 @@ class TestSynologyNFS:
         """Test getting and setting NFS permissions (read-only test)."""
         from nfs.synology_nfs import SynologyNFS
 
-        nfs = SynologyNFS(session_info["base_url"], session_info["session_id"])
+        nfs = SynologyNFS(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
 
         # First, list shares to find one to test
         shares_result = nfs.list_shares()
@@ -138,3 +156,65 @@ def test_nfs_set_nfs_permission_parameter_validation():
     assert isinstance(result, dict)
 
     print("✅ Parameter validation tests passed")
+
+
+def test_create_share_wire_format_matches_dsm_7_3_2():
+    """Regression test for issue #8.
+
+    DSM 7.3.2's SYNO.Core.Share.create rejects flat params with code 403.
+    The web UI sends a JSON-encoded `shareinfo` envelope plus a top-level
+    `name`, with the X-SYNO-TOKEN header for CSRF. This test pins that
+    wire format so a future refactor can't silently regress it.
+    """
+    import json
+
+    from nfs.synology_nfs import SynologyNFS
+
+    nfs = SynologyNFS(
+        "https://nas.example.com:5001",
+        "sid_xyz",
+        verify_ssl=False,
+        syno_token="tok_abc",
+    )
+
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"data": {"name": "rag"}, "success": True}
+    fake_response.raise_for_status = MagicMock()
+
+    with patch("utils.synology_api.requests.post", return_value=fake_response) as post:
+        nfs.create_share(name="rag", vol_path="/volume1", desc="hi")
+
+    assert post.called, "create_share must POST"
+    sent = post.call_args
+    sent_data = sent.kwargs["data"]
+    sent_headers = sent.kwargs["headers"]
+
+    # CSRF header is mandatory on DSM 7.3.2 mutating endpoints. Use a
+    # presence check so this test isn't brittle if the client later adds
+    # other legitimate headers (Content-Type, User-Agent, etc.).
+    assert sent_headers is not None
+    assert sent_headers.get("X-SYNO-TOKEN") == "tok_abc"
+
+    # API routing
+    assert sent_data["api"] == "SYNO.Core.Share"
+    assert sent_data["method"] == "create"
+    assert sent_data["version"] == "1"
+    assert sent_data["_sid"] == "sid_xyz"
+
+    # Top-level name is JSON-encoded (DSM expects a quoted string here)
+    assert sent_data["name"] == '"rag"'
+
+    # shareinfo is a JSON-encoded blob with the exact keys DSM 7.3.2 requires
+    shareinfo = json.loads(sent_data["shareinfo"])
+    assert shareinfo == {
+        "name": "rag",
+        "vol_path": "/volume1",
+        "desc": "hi",
+        "enable_recycle_bin": True,
+        "recycle_bin_admin_only": True,
+        "enable_share_cow": False,
+        "enable_share_compress": False,
+        "name_org": "",
+    }
+
+    print("✅ create_share wire format matches DSM 7.3.2 requirement")

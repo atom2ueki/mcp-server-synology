@@ -27,8 +27,7 @@ from usermanagement import SynologyUserManager
 if not config.verify_ssl:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     logger.warning(
-        "SSL verification is disabled. "
-        "Set VERIFY_SSL=true if your NAS has a valid SSL certificate."
+        "SSL verification is disabled. Set VERIFY_SSL=true if your NAS has a valid SSL certificate."
     )
 
 
@@ -39,6 +38,7 @@ class SynologyMCPServer:
         self.server = Server(config.server_name)
         self.auth_instances: Dict[str, SynologyAuth] = {}
         self.sessions: Dict[str, str] = {}  # base_url -> session_id
+        self.syno_tokens: Dict[str, str] = {}  # base_url -> SynoToken (CSRF, DSM 7.3.2+)
         self.filestation_instances: Dict[str, SynologyFileStation] = {}
         self.downloadstation_instances: Dict[str, SynologyDownloadStation] = {}
         self.health_instances: Dict[str, SynologyHealth] = {}
@@ -55,7 +55,10 @@ class SynologyMCPServer:
         if base_url not in self.filestation_instances:
             session_id = self.sessions[base_url]
             self.filestation_instances[base_url] = SynologyFileStation(
-                base_url, session_id, verify_ssl=config.verify_ssl
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl,
+                syno_token=self.syno_tokens.get(base_url),
             )
 
         return self.filestation_instances[base_url]
@@ -68,7 +71,10 @@ class SynologyMCPServer:
         if base_url not in self.downloadstation_instances:
             session_id = self.sessions[base_url]
             self.downloadstation_instances[base_url] = SynologyDownloadStation(
-                base_url, session_id, verify_ssl=config.verify_ssl
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl,
+                syno_token=self.syno_tokens.get(base_url),
             )
 
         return self.downloadstation_instances[base_url]
@@ -81,7 +87,10 @@ class SynologyMCPServer:
         if base_url not in self.health_instances:
             session_id = self.sessions[base_url]
             self.health_instances[base_url] = SynologyHealth(
-                base_url, session_id, verify_ssl=config.verify_ssl
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl,
+                syno_token=self.syno_tokens.get(base_url),
             )
 
         return self.health_instances[base_url]
@@ -94,7 +103,10 @@ class SynologyMCPServer:
         if base_url not in self.nfs_instances:
             session_id = self.sessions[base_url]
             self.nfs_instances[base_url] = SynologyNFS(
-                base_url, session_id, verify_ssl=config.verify_ssl
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl,
+                syno_token=self.syno_tokens.get(base_url),
             )
 
         return self.nfs_instances[base_url]
@@ -107,7 +119,10 @@ class SynologyMCPServer:
         if base_url not in self.usermgr_instances:
             session_id = self.sessions[base_url]
             self.usermgr_instances[base_url] = SynologyUserManager(
-                base_url, session_id, verify_ssl=config.verify_ssl
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl,
+                syno_token=self.syno_tokens.get(base_url),
             )
 
         return self.usermgr_instances[base_url]
@@ -148,6 +163,11 @@ class SynologyMCPServer:
                 if result.get("success"):
                     session_id = result["data"]["sid"]
                     self.sessions[base_url] = session_id
+                    syno_token = result["data"].get("synotoken")
+                    if syno_token:
+                        self.syno_tokens[base_url] = syno_token
+                    else:
+                        self.syno_tokens.pop(base_url, None)
                     # Store the name->url mapping for tool resolution
                     self.nas_name_map[label] = base_url
                     logger.info(f"{label}: session {session_id[:8]}...")
@@ -168,7 +188,6 @@ class SynologyMCPServer:
             except Exception as e:
                 logger.warning(f"{nas_name or 'default'}: {e}")
                 if config.debug:
-
                     logger.debug("Traceback:", exc_info=True)
 
         if success_count == 0:
@@ -415,12 +434,21 @@ class SynologyMCPServer:
         if result.get("success"):
             session_id = result["data"]["sid"]
             self.sessions[base_url] = session_id
+            syno_token = result["data"].get("synotoken")
+            if syno_token:
+                self.syno_tokens[base_url] = syno_token
+            else:
+                self.syno_tokens.pop(base_url, None)
 
-            # Clear any existing FileStation/DownloadStation instances to force recreation with new session
-            if base_url in self.filestation_instances:
-                del self.filestation_instances[base_url]
-            if base_url in self.downloadstation_instances:
-                del self.downloadstation_instances[base_url]
+            # Drop cached service instances so they pick up the new session/token
+            for inst_dict in (
+                self.filestation_instances,
+                self.downloadstation_instances,
+                self.health_instances,
+                self.nfs_instances,
+                self.usermgr_instances,
+            ):
+                inst_dict.pop(base_url, None)
 
             return [
                 types.TextContent(
@@ -454,6 +482,7 @@ class SynologyMCPServer:
         if result.get("success"):
             # Remove session and FileStation/DownloadStation instances on successful logout
             del self.sessions[base_url]
+            self.syno_tokens.pop(base_url, None)
             if base_url in self.filestation_instances:
                 del self.filestation_instances[base_url]
             if base_url in self.downloadstation_instances:
@@ -475,6 +504,7 @@ class SynologyMCPServer:
             if error_code in ["105", "106", "no_session"]:
                 # Still clean up local session data
                 del self.sessions[base_url]
+                self.syno_tokens.pop(base_url, None)
                 if base_url in self.filestation_instances:
                     del self.filestation_instances[base_url]
                 if base_url in self.downloadstation_instances:
@@ -2148,7 +2178,6 @@ class SynologyMCPServer:
         except Exception as e:
             logger.error(f"Server runtime error: {e}")
             if config.debug:
-
                 logger.debug("Traceback:", exc_info=True)
             raise
         finally:
@@ -2193,6 +2222,7 @@ class SynologyMCPServer:
 
                 # Always clear local data
                 del self.sessions[base_url]
+                self.syno_tokens.pop(base_url, None)
                 for inst_dict in (
                     self.filestation_instances,
                     self.downloadstation_instances,

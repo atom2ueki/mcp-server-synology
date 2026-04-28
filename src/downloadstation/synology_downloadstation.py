@@ -12,10 +12,17 @@ logger = logging.getLogger(__name__)
 class SynologyDownloadStation:
     """Handles Synology Download Station API operations using DSM 7.0+ modern APIs."""
 
-    def __init__(self, base_url: str, session_id: str, verify_ssl: bool = False):
+    def __init__(
+        self,
+        base_url: str,
+        session_id: str,
+        verify_ssl: bool = False,
+        syno_token: Optional[str] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
+        self.syno_token = syno_token
 
         # DSM 7.0+ modern API endpoints (the only ones that work)
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
@@ -81,15 +88,27 @@ class SynologyDownloadStation:
         else:
             endpoint_url = self.api_url
 
+        # DSM 7.3.2+ enforces CSRF on mutating endpoints via X-SYNO-TOKEN.
+        # Harmless on reads and on older DSM (header is ignored there).
+        headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
+
         try:
             # Use POST for create operations, GET for others
             if method == "create":
                 response = requests.post(
-                    endpoint_url, data=request_params, verify=self.verify_ssl, timeout=15
+                    endpoint_url,
+                    data=request_params,
+                    headers=headers,
+                    verify=self.verify_ssl,
+                    timeout=15,
                 )
             else:
                 response = requests.get(
-                    endpoint_url, params=request_params, verify=self.verify_ssl, timeout=15
+                    endpoint_url,
+                    params=request_params,
+                    headers=headers,
+                    verify=self.verify_ssl,
+                    timeout=15,
                 )
 
             response.raise_for_status()
@@ -157,11 +176,18 @@ class SynologyDownloadStation:
         """List download tasks using modern Download Station API."""
         params: Dict[str, Any] = {"offset": offset, "limit": limit if limit > 0 else 100}
 
-        # Use additional parameters for detailed task info
+        # Use additional parameters for detailed task info.
+        # DSM 7.3.2 silently drops the comma-string form; expects a JSON array.
         if additional:
-            params["additional"] = additional
+            # If caller passed a comma-string, normalize to JSON array.
+            if additional.startswith("["):
+                params["additional"] = additional
+            else:
+                params["additional"] = json.dumps(
+                    [s.strip() for s in additional.split(",") if s.strip()]
+                )
         else:
-            params["additional"] = "detail,transfer"
+            params["additional"] = json.dumps(["detail", "transfer"])
 
         try:
             data = self._make_request(self.task_api, self.task_version, "list", **params)
@@ -395,8 +421,13 @@ class SynologyDownloadStation:
                 "_sid": self.session_id,
             }
 
+            headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
             response = requests.get(
-                self.api_url, params=request_params, verify=self.verify_ssl, timeout=15
+                self.api_url,
+                params=request_params,
+                headers=headers,
+                verify=self.verify_ssl,
+                timeout=15,
             )
             response.raise_for_status()
             data = response.json()
@@ -488,14 +519,12 @@ class SynologyDownloadStation:
             return False
 
     def list_downloaded_files(self, destination: Optional[str] = None) -> Dict[str, Any]:
-
         if not destination:
             destination = self.get_default_destination()
 
         logger.info(f"Listing downloaded files in: {destination}")
 
         try:
-
             request_params = {
                 "api": "SYNO.FileStation.List",
                 "version": "2",
@@ -504,8 +533,13 @@ class SynologyDownloadStation:
                 "_sid": self.session_id,
             }
 
+            headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
             response = requests.get(
-                self.api_url, params=request_params, verify=self.verify_ssl, timeout=15
+                self.api_url,
+                params=request_params,
+                headers=headers,
+                verify=self.verify_ssl,
+                timeout=15,
             )
             response.raise_for_status()
             data = response.json()
