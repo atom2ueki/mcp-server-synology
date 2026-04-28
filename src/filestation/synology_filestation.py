@@ -154,7 +154,10 @@ class SynologyFileStation:
         params: Dict[str, Any] = {"folder_path": formatted_path}
 
         if additional_info:
-            params["additional"] = "time,size,owner,perm"
+            # DSM 7.3.2 silently drops the comma-string form; expects a JSON array.
+            # Verified live: comma-string → no `additional` field in response;
+            # JSON array → returns time/size/owner/perm as documented.
+            params["additional"] = json.dumps(["time", "size", "owner", "perm"])
 
         data = self._make_request("SYNO.FileStation.List", "2", "list", **params)
         files = data.get("files", [])
@@ -208,7 +211,8 @@ class SynologyFileStation:
             "2",
             "getinfo",
             path=formatted_path,
-            additional="time,size,owner,perm",
+            # DSM 7.3.2 requires JSON array; comma-string is silently ignored.
+            additional=json.dumps(["time", "size", "owner", "perm"]),
         )
 
         files = data.get("files", [])

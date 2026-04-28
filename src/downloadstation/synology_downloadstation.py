@@ -176,11 +176,18 @@ class SynologyDownloadStation:
         """List download tasks using modern Download Station API."""
         params: Dict[str, Any] = {"offset": offset, "limit": limit if limit > 0 else 100}
 
-        # Use additional parameters for detailed task info
+        # Use additional parameters for detailed task info.
+        # DSM 7.3.2 silently drops the comma-string form; expects a JSON array.
         if additional:
-            params["additional"] = additional
+            # If caller passed a comma-string, normalize to JSON array.
+            if additional.startswith("["):
+                params["additional"] = additional
+            else:
+                params["additional"] = json.dumps(
+                    [s.strip() for s in additional.split(",") if s.strip()]
+                )
         else:
-            params["additional"] = "detail,transfer"
+            params["additional"] = json.dumps(["detail", "transfer"])
 
         try:
             data = self._make_request(self.task_api, self.task_version, "list", **params)
