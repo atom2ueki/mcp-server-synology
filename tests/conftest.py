@@ -67,6 +67,8 @@ def session_info(synology_auth):
     session_data = {
         "base_url": config.synology_url,
         "session_id": result["data"]["sid"],
+        # Present when DSM honors enable_syno_token=yes (DSM 7.3.2+); None otherwise.
+        "syno_token": result["data"].get("synotoken"),
         "auth": synology_auth,
     }
 
