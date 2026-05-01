@@ -25,9 +25,19 @@ jobs:
       id-token: write
       actions: read
     steps:
+      - name: Resolve PR head SHA on issue_comment
+        id: pr-ref
+        if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}" --jq .head.sha)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ steps.pr-ref.outputs.sha || github.ref }}
           fetch-depth: 1
 
       - name: Run Claude Code
