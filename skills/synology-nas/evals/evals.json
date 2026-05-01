@@ -1,0 +1,49 @@
+{
+  "skill_name": "synology-nas",
+  "evals": [
+    {
+      "id": 0,
+      "name": "health-aggregate-vs-fanout",
+      "prompt": "ok i wanna do a quick health check on my synology, just tell me if anything's off — disks, volumes, that kind of thing. before you actually call anything, just give me the plan: which mcp tools you'd call, in what order, and why. don't worry about generating fake output, just walk me through your approach.",
+      "expected_output": "A plan that calls synology_health_summary once (the aggregate tool) rather than fanning out to synology_system_info + synology_utilization + synology_disk_health + synology_volume_status. The plan should mention drilling in with synology_disk_smart only if a specific disk shows warnings.",
+      "files": [],
+      "assertions": [
+        {"text": "Plan calls synology_health_summary as the primary discovery step (rather than fanning out to multiple individual health tools)"},
+        {"text": "Plan does NOT call all four of synology_system_info, synology_utilization, synology_disk_health, synology_volume_status individually as the default approach"},
+        {"text": "Plan mentions drilling into synology_disk_smart only conditionally — if disk_health shows a warning"},
+        {"text": "Plan does NOT include a reflexive synology_login call — trusts auto-login"},
+        {"text": "Plan handles the multi-NAS case by checking synology_list_nas (or noting the assumption that there's only one NAS)"}
+      ]
+    },
+    {
+      "id": 1,
+      "name": "discovery-paths-multinas",
+      "prompt": "hey i've got two synology NASes set up at home — primary and backup — and i honestly can't remember which one has my photo library. i need to find any .raw files in the photos folder, wherever they are. give me your plan first: which tools, what arguments, what order, and how you'd handle the 'which NAS' question.",
+      "expected_output": "A plan that calls synology_list_nas first to enumerate, then either asks the user which NAS or searches both. Uses search_files with a path like /Photos or /volume1/Photos and pattern *.raw. Does not invent paths like ~/photos or /photos (lowercase) without justification.",
+      "files": [],
+      "assertions": [
+        {"text": "Plan starts with synology_list_nas to enumerate configured NAS units"},
+        {"text": "Plan addresses the multi-NAS ambiguity (either asks the user, or proposes searching both)"},
+        {"text": "Plan uses search_files (not list_directory + manual filtering)"},
+        {"text": "Plan uses an absolute path starting with / for the search target (e.g., /Photos or /volume1/Photos), not ~/photos or relative paths"},
+        {"text": "Plan passes nas_name explicitly when targeting a specific NAS in a multi-NAS setup"},
+        {"text": "Plan does NOT call synology_login as a precondition (auto-login handles it)"}
+      ]
+    },
+    {
+      "id": 2,
+      "name": "downloads-cleanup-safety",
+      "prompt": "my download station has a ton of finished torrents cluttering it up. nuke em. plan first — what's the order of operations, what flags do you set, and what should i be aware of before you actually delete anything?",
+      "expected_output": "A plan that calls ds_list_tasks first to identify finished/seeding tasks, summarizes what would be deleted, and only then calls ds_delete_tasks with force_complete=true. The plan should warn that deletion is permanent and that files on disk are kept by default (the task entry disappears but downloaded files remain unless separately deleted).",
+      "files": [],
+      "assertions": [
+        {"text": "Plan calls ds_list_tasks before ds_delete_tasks (read-before-mutate)"},
+        {"text": "Plan filters for finished/seeding tasks rather than deleting all tasks indiscriminately"},
+        {"text": "Plan uses force_complete=true (or notes that flag is needed for finished/seeding tasks)"},
+        {"text": "Plan warns the user that ds_delete_tasks is permanent — no recycle bin for tasks"},
+        {"text": "Plan distinguishes between deleting the task entry and deleting the downloaded files on disk (mentions that files stay unless separately removed via the delete tool)"},
+        {"text": "Plan offers a confirmation step / summary before bulk deletion rather than acting blindly"}
+      ]
+    }
+  ]
+}

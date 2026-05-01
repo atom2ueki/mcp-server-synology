@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `synology-nas` Anthropic Agent Skill at `skills/synology-nas/` — teaches Claude how to use the MCP tools effectively (multi-NAS targeting, aggregate health checks, path conventions, per-domain workflows for files/downloads/health/NFS/users). Works in Claude Code, Claude Desktop, and claude.ai. Closes #5.
+
 ## [1.1.0] - 2025-06-07
 
 # 🚀 Synology MCP Server v1.1.0 - Xiaozhi WebSocket & Enhanced Docker Support

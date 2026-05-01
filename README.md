@@ -300,6 +300,19 @@ docker-compose up
 - **`synology_nfs_list_shares`** - List all shared folders with their NFS permissions
 - **`synology_nfs_set_permission`** - Set NFS client access permissions on a shared folder
 
+## 🧠 Claude Code / Claude.ai Skill
+
+For Claude Code, Claude Desktop, and claude.ai users, this repo ships an Anthropic Agent Skill that teaches Claude how to use the MCP tools effectively — picking the right tool, targeting the right NAS in multi-NAS setups, preferring aggregate health checks over fan-out calls, and using correct path conventions.
+
+The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across six domains (auth, files, downloads, health, shares/NFS, user management).
+
+**Install:**
+
+- **Claude Code**: copy or symlink the folder into `~/.claude/skills/synology-nas/`
+- **Claude.ai / Claude Desktop**: upload the `synology-nas/` folder via the Skills settings page
+
+The skill is purely additive — it works alongside the MCP and only triggers on Synology/NAS-related prompts.
+
 ## ⚙️ Configuration Options
 
 > **⚠️ Security Warning: Use a Dedicated Account**
