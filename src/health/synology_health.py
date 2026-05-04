@@ -49,12 +49,11 @@ class SynologyHealth:
 
     def system_info(self) -> Dict[str, Any]:
         """Get system model, serial, DSM version, uptime, temperature."""
-        return self._api_call_with_fallback(
-            "SYNO.Core.System",
-            "info",
-            "SYNO.DSM.Info",
-            "getinfo",
-        )
+        result = self._api_call("SYNO.Core.System", "info")
+        if result.get("success"):
+            return result
+        # SYNO.DSM.Info requires version 2 on DSM 7.x (minVersion=2, maxVersion=2)
+        return self._api_call("SYNO.DSM.Info", "getinfo", 2)
 
     def utilization(self) -> Dict[str, Any]:
         """Get real-time CPU, memory, swap, and disk I/O utilization."""

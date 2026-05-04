@@ -1,6 +1,7 @@
 """Health monitoring module tests."""
 
 import pytest
+from unittest.mock import patch
 
 
 @pytest.mark.real_nas
@@ -196,6 +197,46 @@ class TestSynologyHealth:
             print(f"   Sections: {list(data.keys())}")
         else:
             print(f"⚠️  Health summary failed: {result.get('error')}")
+
+
+class TestSystemInfoFallback:
+    """Unit tests for system_info DSM 6/7 fallback behaviour (no live NAS required)."""
+
+    def _make_health(self):
+        from health.synology_health import SynologyHealth
+        return SynologyHealth("http://nas:5000", "fake-sid", verify_ssl=False)
+
+    def test_primary_success(self):
+        """Uses SYNO.Core.System when it returns data."""
+        health = self._make_health()
+        expected = {"success": True, "data": {"model": "DS920+"}}
+        with patch.object(health._api, "get", return_value=expected) as mock_get:
+            result = health.system_info()
+        assert result == expected
+        mock_get.assert_called_once_with("SYNO.Core.System", "info", 1, None)
+
+    def test_fallback_uses_version_2(self):
+        """Falls back to SYNO.DSM.Info v2 when SYNO.Core.System fails."""
+        health = self._make_health()
+        dsm_info = {"success": True, "data": {"model": "DS1621+", "version_string": "DSM 7.3.2-86009"}}
+
+        def side_effect(api, method, version=1, extra_params=None):
+            if api == "SYNO.Core.System":
+                return {"success": False, "error": {"code": 1006}}
+            if api == "SYNO.DSM.Info" and version == 2:
+                return dsm_info
+            return {"success": False, "error": {"code": 999}}
+
+        with patch.object(health._api, "get", side_effect=side_effect):
+            result = health.system_info()
+        assert result == dsm_info
+
+    def test_both_fail(self):
+        """Returns the fallback error when both APIs fail."""
+        health = self._make_health()
+        with patch.object(health._api, "get", return_value={"success": False, "error": {"code": 104}}):
+            result = health.system_info()
+        assert not result.get("success")
 
 
 def test_health_url_construction():
