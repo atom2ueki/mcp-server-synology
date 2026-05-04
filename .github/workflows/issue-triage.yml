@@ -1,0 +1,42 @@
+name: Issue Triage
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_non_write_users: "*"
+          prompt: |
+            You are a GitHub issue triage assistant.
+
+            REPO: ${{ github.repository }}
+            ISSUE: #${{ github.event.issue.number }}
+
+            Steps:
+              1. Fetch label vocabulary: gh label list --limit 200
+              2. Read the issue: gh issue view ${{ github.event.issue.number }} --comments
+              3. (Optional) Search related: gh search issues "<keywords>" --repo ${{ github.repository }} --limit 10 --state open
+              4. Pick at most 5 labels from the fetched vocabulary. Do NOT invent labels.
+              5. Apply with: gh issue edit ${{ github.event.issue.number }} --add-label "<l1>" --add-label "<l2>"
+
+            Hard rules:
+              - DO NOT post comments on the issue.
+              - DO NOT use any label not present in `gh label list` output.
+              - If nothing applies cleanly, apply nothing.
+          claude_args: |
+            --max-turns 8
+            --allowedTools "Bash(gh label list:*),Bash(gh issue view:*),Bash(gh search issues:*),Bash(gh issue edit:*)"

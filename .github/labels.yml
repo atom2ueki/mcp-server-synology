@@ -1,0 +1,50 @@
+# Single source of truth for this repo's labels.
+# Edit and merge to main -> .github/workflows/label-sync.yml runs and
+# reconciles labels via the GitHub API.
+#
+# Each label's `description` is a classification rubric (max 100 chars).
+# Claude triage reads them via `gh label list`.
+
+# ---- TYPE axis ---- (Claude triage applies based on issue body)
+- name: bug
+  description: Something isn't working as designed.
+  color: "d73a4a"
+- name: enhancement
+  description: New feature or improvement to existing functionality.
+  color: "a2eeef"
+- name: documentation
+  description: Improvements or additions to documentation.
+  color: "0075ca"
+- name: question
+  description: Further information is requested or clarification needed.
+  color: "d876e3"
+- name: idea
+  description: Open-ended exploration or unscoped concept; not yet ready to schedule.
+  color: "ededed"
+
+# ---- PRIORITY axis ---- (Claude triage applies; REQUIRED on every classified issue)
+- name: p1
+  description: Showstopper. Production broken, data loss, or security incident. Drop other work.
+  color: "b60205"
+- name: p2
+  description: Normal priority. Real bug or commonly requested feature; schedule normally.
+  color: "d93f0b"
+- name: p3
+  description: Low priority. Minor issue, edge case, or nice-to-have.
+  color: "fbca04"
+
+# ---- DOMAIN ---- (cross-cutting concern)
+- name: security
+  description: Security-related - auth bypass, secret exposure, vulnerability, or hardening.
+  color: "ee0701"
+
+# ---- OUTCOME axis ---- (terminal states)
+- name: duplicate
+  description: This issue or pull request already exists. Close in favor of original.
+  color: "cfd3d7"
+- name: invalid
+  description: Empty test, wrong repo, or otherwise not a real issue. Should be closed.
+  color: "e4e669"
+- name: wontfix
+  description: Working as intended or out of scope. Will not be addressed.
+  color: "ffffff"
