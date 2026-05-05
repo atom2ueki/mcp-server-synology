@@ -5,10 +5,44 @@
 ## [1.4.1] - 2026-05-05
 
 ### Fixed
-- `system_info`: use `SYNO.DSM.Info` version 2 as fallback on DSM 7.x — version 1 is below `minVersion` and returns error 104; `SYNO.DSM.Info/getinfo/v2` returns model, serial, DSM version string, RAM, temperature, and uptime successfully. (#17)
+- `system_info`: use `SYNO.DSM.Info` version 2 as fallback on DSM 7.x — version 1 is below `minVersion` and returns error 104; `SYNO.DSM.Info/getinfo/v2` returns model, serial, DSM version string, RAM, temperature, and uptime successfully. Thanks @leto1210. (#17)
 
-### CI
-- Hardened Claude Code workflows: skip runs on bot-triggered events, add `id-token: write` for claude-code-action OIDC, and refresh Dependabot config with PR limits and labels.
+### Changed
+- Hardened Claude Code workflows: skip runs on bot-triggered events, add `id-token: write` for claude-code-action OIDC, refresh Dependabot config with PR limits and labels, and add label-sync + issue-triage workflows. (#18, #19)
+
+## [1.4.0] - 2026-05-01
+
+### Added
+- `synology-nas` Anthropic Agent Skill at `skills/synology-nas/` — teaches Claude how to use the MCP tools effectively (multi-NAS targeting, aggregate health checks, path conventions, per-domain workflows for files/downloads/health/NFS/users). Works in Claude Code, Claude Desktop, and claude.ai. (#14, closes #5)
+- Claude Code `@claude`-mention reviewer workflow on PRs. (#15)
+
+### Fixed
+- CI now checks out the PR head SHA on `issue_comment` triggers so commit-aware reviews work. (#16)
+
+## [1.3.0] - 2026-04-28
+
+### Added
+- DSM 7.3.2+ CSRF support: capture `SynoToken` at login (`enable_syno_token=yes`), thread `X-SYNO-TOKEN` through every service module, default session type changed to `webui`. Older DSM (6.x, 7.0–7.2) ignore the flag and continue to work header-less.
+
+### Fixed
+- `synology_create_share` on DSM 7.3.2 — `SYNO.Core.Share.create` now sends a JSON-encoded `shareinfo` envelope plus a top-level JSON-encoded `name`. Verified against DSM 7.3.2-86009 Update 3. (#8)
+- Silent loss of `additional` field data on DSM 7.3.2 — now sent as JSON arrays in `FileStation.list_directory`, `FileStation.get_file_info`, and `DownloadStation.list_tasks`. Thanks @CynicalTyr. (#7)
+- `FileStation.create_file` upload now threads `X-SYNO-TOKEN` on the direct `requests.Session().post(...)` path.
+
+### Tests
+- New regression test pinning the `create_share` wire format.
+- Repaired 11 stale `test_config` tests broken by an earlier `SECRETS_FILE` → `SETTINGS_FILE` rename.
+
+## [1.2.0] - 2026-02-27
+
+### Added
+- Unified `settings.json` configuration replacing `secrets.json` — single file for NAS credentials, Xiaozhi, and server settings. Uses XDG path `~/.config/synology-mcp/settings.json`. Supports multiple NAS devices.
+- Centralized logging via Python's `logging` module with configurable levels (DEBUG/INFO/WARNING/ERROR), set in `settings.json`.
+- Lint configuration in `pyproject.toml` (Ruff, Black, mypy). Codebase reformatted with Black.
+
+### Security
+- File permission enforcement: refuses to load settings with insecure permissions (e.g. 0644).
+- README guidance on using dedicated accounts without 2FA.
 
 ## [1.1.0] - 2025-06-07
 
