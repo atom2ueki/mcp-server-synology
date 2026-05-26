@@ -1,0 +1,68 @@
+# Alternative deployment for HTTP/SSE transport
+#
+# This compose file exposes the Synology MCP server over HTTP/SSE using
+# mcp-proxy (https://github.com/sparfenyuk/mcp-proxy) so it can be consumed
+# as a *remote* MCP server by clients that support URL-based connectors
+# (Claude Desktop "Custom connectors", Claude.ai web, Cursor, etc.).
+#
+# The stdio mode in the main docker-compose.yml stays unchanged; use this
+# file when you want a long-running, network-accessible MCP server.
+#
+# Prerequisites:
+#   - mcp-proxy added to requirements.txt (already done in this PR)
+#   - A reverse proxy in front (DSM, Nginx, Traefik, Caddy...) terminating
+#     TLS, since most MCP clients only accept HTTPS endpoints.
+#
+# Usage:
+#   1. Copy this file to docker-compose.http.yml (or use -f docker-compose.http.yml)
+#   2. Edit the environment block with your credentials (or use settings.json)
+#   3. docker compose -f docker-compose.http.yml up -d --build
+#   4. Point your reverse proxy at http://<host>:8765
+#   5. In your MCP client, add a custom connector:
+#        URL: https://your-domain.example.com/sse
+#
+# Security note:
+#   mcp-proxy does NOT provide server-side authentication. Put it behind a
+#   reverse proxy that adds authentication (Basic Auth, mTLS, OAuth2 proxy,
+#   IP allow-list) before exposing it to anything other than a trusted LAN
+#   or VPN.
+
+services:
+  synology-mcp-http:
+    build: .
+    container_name: synology-mcp-http
+    # mcp-proxy spawns `python main.py` as a stdio child and exposes it
+    # over SSE/Streamable HTTP on port 8765.
+    command:
+      - "mcp-proxy"
+      - "--host=0.0.0.0"
+      - "--port=8765"
+      - "--pass-environment"
+      - "--allow-origin=*"
+      - "--"
+      - "python"
+      - "main.py"
+    ports:
+      - "8765:8765"
+    environment:
+      - XDG_CONFIG_HOME=/home/mcpuser/.config
+      # Required: Synology NAS connection
+      - SYNOLOGY_URL=https://your-nas.example.com:5001
+      - SYNOLOGY_USERNAME=your_username
+      - SYNOLOGY_PASSWORD=your_password
+      # Optional
+      - AUTO_LOGIN=true
+      - VERIFY_SSL=false
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+      - ENABLE_XIAOZHI=false
+    volumes:
+      - ./logs:/app/logs
+      # Multi-NAS settings.json support (XDG path) — optional
+      - ${XDG_CONFIG_HOME:-$HOME/.config}/synology-mcp:/home/mcpuser/.config/synology-mcp:ro
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
