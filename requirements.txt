@@ -3,6 +3,7 @@ requests
 mcp>=1.27.1
 python-dotenv
 websockets>=16.0
+mcp-proxy>=0.7.0
 
 # Testing dependencies
 pytest>=9.0.3
