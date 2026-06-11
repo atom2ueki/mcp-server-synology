@@ -7,12 +7,14 @@ name: PR Review
 # `pull_request_target` runs the workflow definition from the base branch with
 # secrets available, regardless of where the PR came from.
 #
-# Security: because this job has secrets, it must NOT execute untrusted PR code.
-# It only checks out the PR head to let Claude READ the diff, and Claude's tools
-# are locked down (gh pr comment/diff/view + inline comments only) — no build,
-# test, or arbitrary command execution. Keep the "require approval for fork PRs"
-# setting on as the anti-abuse gate. Residual risk is prompt injection via PR
-# content, contained by the restricted toolset.
+# Security (avoiding a "pwn request"): this job is privileged (it holds secrets),
+# so it must never place untrusted fork code in the workspace. We deliberately do
+# NOT check out the PR head — only the trusted base repo. Claude reads the PR as
+# *text* via `gh pr diff` / `gh pr view` (GitHub API), and its tools are locked
+# down to gh pr comment/diff/view + inline comments — no checkout of PR files, no
+# build, test, or arbitrary command execution. Keep the "require approval for fork
+# PRs" setting on as the anti-abuse gate. Residual risk is prompt injection via PR
+# content, contained by the restricted, read-only toolset.
 on:
   pull_request_target:
     types: [opened]
@@ -30,12 +32,11 @@ jobs:
     if: github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
+      # Check out the BASE repo only (the trusted default for pull_request_target).
+      # We intentionally do NOT pass `ref: ...head.sha` — no PR-controlled files
+      # land on disk. Claude reads the PR via `gh pr diff` (API) instead.
       - uses: actions/checkout@v6
         with:
-          # Explicitly check out the PR head. With pull_request_target the default
-          # ref is the base branch, but we want Claude to review the PR's code.
-          # We only READ this code (never build/run it) — see the security note above.
-          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
       - uses: anthropics/claude-code-action@v1
         with:
@@ -51,7 +52,9 @@ jobs:
             - Security implications
             - Performance concerns
 
-            The PR branch is checked out in the working directory.
+            The PR's code is NOT checked out locally (only the base branch is, for
+            context). Read the PR's changes via `gh pr diff` and `gh pr view` — do
+            not assume the diff is present on disk.
 
             Use `gh pr comment` for top-level summary feedback (one comment max).
             Use mcp__github_inline_comment__create_inline_comment (with confirmed: true)
