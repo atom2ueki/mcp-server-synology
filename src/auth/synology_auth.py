@@ -1,6 +1,7 @@
 # src/synology_auth.py - Simple Synology authentication utilities
 
 import logging
+import threading
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
@@ -42,6 +43,9 @@ class SynologyAuth:
         # (base_url, session_id, syno_token). Lets the caller (e.g. mcp_server)
         # resync any cached session state with the refreshed SID.
         self.on_relogin: Optional[Callable[[str, Optional[str], Optional[str]], None]] = None
+        # Serializes relogin() so concurrent DSM-119 recoveries don't each open a
+        # separate session (which would leak the orphaned SIDs on the NAS).
+        self._relogin_lock = threading.Lock()
         # Register this instance for cross-module discovery (see _AUTH_REGISTRY).
         _AUTH_REGISTRY[self.base_url] = self
 
@@ -109,7 +113,7 @@ class SynologyAuth:
         """Authenticate specifically for Download Station."""
         return self.login_with_session(username, password, "DownloadStation")
 
-    def relogin(self) -> bool:
+    def relogin(self, stale_session_id: Optional[str] = None) -> bool:
         """Re-authenticate using credentials cached from the last successful login.
 
         Returns True on success, False if no credentials are cached or login fails.
@@ -117,20 +121,34 @@ class SynologyAuth:
         found"), which happens when the server-side session expires (typically
         after ~1h of inactivity for SYNO.Core.* APIs). Without this, the client's
         SID stays dead until the process restarts.
+
+        Concurrency-safe: the login is serialized by a per-instance lock. If
+        `stale_session_id` is given and another thread already refreshed the
+        session while this caller waited for the lock, the relogin is skipped
+        (the current session is already valid) — so simultaneous 119s open a
+        single new session instead of one per caller.
         """
         if not self._credentials:
             return False
-        username, password = self._credentials
-        result = self.login_with_session(username, password, self.current_session_type)
-        success = bool(result.get("success"))
-        if success and self.on_relogin is not None:
-            # Notify the caller so it can resync cached session state with the
-            # new SID. A callback failure must never break the relogin path.
-            try:
-                self.on_relogin(self.base_url, self.current_session_id, self.current_syno_token)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("on_relogin callback failed for %s: %s", self.base_url, exc)
-        return success
+        with self._relogin_lock:
+            # Another thread already recovered the session under the lock.
+            if (
+                stale_session_id is not None
+                and self.current_session_id is not None
+                and self.current_session_id != stale_session_id
+            ):
+                return True
+            username, password = self._credentials
+            result = self.login_with_session(username, password, self.current_session_type)
+            success = bool(result.get("success"))
+            if success and self.on_relogin is not None:
+                # Notify the caller so it can resync cached session state with the
+                # new SID. A callback failure must never break the relogin path.
+                try:
+                    self.on_relogin(self.base_url, self.current_session_id, self.current_syno_token)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("on_relogin callback failed for %s: %s", self.base_url, exc)
+            return success
 
     def logout(
         self, session_id: Optional[str] = None, session_type: Optional[str] = None

@@ -235,4 +235,34 @@ def test_auth_url_construction():
         assert auth.base_url == expected_base
         print(f"✅ URL '{url}' → '{auth.base_url}'")
 
+
+def test_relogin_without_credentials_returns_false():
+    """relogin() is a no-op (False) before any successful login caches creds."""
+    from auth.synology_auth import SynologyAuth
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    assert auth._credentials is None
+    assert auth.relogin() is False
+
+
+def test_relogin_skips_when_session_already_refreshed():
+    """Concurrent DSM-119 recovery: if another caller already refreshed the
+    session while this one waited on the lock, relogin() must NOT log in again
+    (which would open a second, orphaned session)."""
+    from auth.synology_auth import SynologyAuth
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth._credentials = ("user", "pass")
+    # Simulate another thread having already re-authenticated under the lock.
+    auth.current_session_id = "NEW_SID"
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("login_with_session should not be called on a no-op relogin")
+
+    auth.login_with_session = _fail  # type: ignore[assignment]
+
+    # This caller saw OLD_SID get the 119; current is already NEW_SID → skip.
+    assert auth.relogin(stale_session_id="OLD_SID") is True
+    assert auth.current_session_id == "NEW_SID"
+
     print("✅ URL construction tests passed")
