@@ -19,8 +19,27 @@ permissions:
 
 jobs:
   claude:
+    # Trust gate (load-bearing): this job runs from the default branch WITH secrets,
+    # contents: write, and a checkout of the PR head — comment/issue events are NOT
+    # protected by the fork-PR "require approval" gate, so without this check ANY
+    # non-bot user who types "@claude" could trigger a privileged, write-capable run.
+    # Restrict triggering to the repo owner / org members / collaborators. The
+    # association field differs per event, and only the firing event's field is set,
+    # so we OR across them (the others are empty strings and never match).
     if: |
-      github.event.sender.type != 'Bot' && (
+      github.event.sender.type != 'Bot'
+      && (
+        github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR' ||
+        github.event.review.author_association == 'OWNER' ||
+        github.event.review.author_association == 'MEMBER' ||
+        github.event.review.author_association == 'COLLABORATOR' ||
+        github.event.issue.author_association == 'OWNER' ||
+        github.event.issue.author_association == 'MEMBER' ||
+        github.event.issue.author_association == 'COLLABORATOR'
+      )
+      && (
         (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
         (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
         (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||

@@ -17,7 +17,10 @@ name: PR Review
 # content, contained by the restricted, read-only toolset.
 on:
   pull_request_target:
-    types: [opened]
+    # opened: first review. synchronize: re-review when the PR gets new commits.
+    # reopened: lets a maintainer re-run the review by closing+reopening the PR
+    # (the only re-trigger lever, since this is a privileged target workflow).
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
