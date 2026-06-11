@@ -17,15 +17,16 @@ name: PR Review
 # content, contained by the restricted, read-only toolset.
 on:
   pull_request_target:
-    # opened: one-time auto-review on a new PR.
-    # reopened: the re-trigger lever — a maintainer re-runs the review by
-    #   closing+reopening the PR (a privileged target workflow can't be re-run
-    #   any other way on an already-open PR).
+    # labeled: the opt-in trigger — review runs only after a maintainer applies
+    #   the 'ai-review' label (see the job's `if:`). This is the token-spend gate.
+    # opened/reopened: re-fire the trigger so a PR that ALREADY carries the label
+    #   (e.g. reopened, or opened by a maintainer who pre-labels) gets reviewed.
+    #   On a fresh unlabeled fork PR these fire but the job is skipped — 0 tokens.
     # NOT synchronize: re-review on every push would double up with the explicit
     #   @claude pings that the auto-pr / auto-issue loops already post per push,
     #   producing two Claude reviews per commit. Re-reviews are driven explicitly
-    #   (auto-pr's ping, a manual @claude, or close+reopen) instead.
-    types: [opened, reopened]
+    #   (re-apply the label, auto-pr's ping, a manual @claude, or close+reopen).
+    types: [opened, reopened, labeled]
 
 permissions:
   contents: read
@@ -35,9 +36,17 @@ permissions:
 
 jobs:
   review:
-    # Skip on Dependabot PRs: they run with the isolated Dependabot secret store,
-    # so secrets.CLAUDE_CODE_OAUTH_TOKEN is empty and the action always fails.
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    # Token-spend gate. This is a privileged pull_request_target run: it carries
+    # secrets and is NOT covered by the fork-PR "require approval" prompt (that
+    # gate is for the `pull_request` event), so without this `if:` it would auto-
+    # run — and spend Claude tokens — on any fork PR from anyone. Require a
+    # maintainer to opt in by applying the 'ai-review' label. External
+    # contributors cannot add labels, so only a maintainer can authorize the
+    # spend. Until the label is present the job is skipped and 0 tokens are used.
+    # Also skip Dependabot (isolated secret store → empty token → always fails).
+    if: >-
+      github.event.pull_request.user.login != 'dependabot[bot]'
+      && contains(github.event.pull_request.labels.*.name, 'ai-review')
     runs-on: ubuntu-latest
     steps:
       # Check out the BASE repo only (the trusted default for pull_request_target).
