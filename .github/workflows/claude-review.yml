@@ -1,7 +1,20 @@
 name: PR Review
 
+# Triggered by `pull_request_target` (not `pull_request`) so the review job runs
+# in the BASE repo's context. This is required for PRs from forks: `pull_request`
+# fork runs get a read-only token with no secrets and no OIDC, so
+# secrets.CLAUDE_CODE_OAUTH_TOKEN / id-token are unavailable and the action fails.
+# `pull_request_target` runs the workflow definition from the base branch with
+# secrets available, regardless of where the PR came from.
+#
+# Security: because this job has secrets, it must NOT execute untrusted PR code.
+# It only checks out the PR head to let Claude READ the diff, and Claude's tools
+# are locked down (gh pr comment/diff/view + inline comments only) — no build,
+# test, or arbitrary command execution. Keep the "require approval for fork PRs"
+# setting on as the anti-abuse gate. Residual risk is prompt injection via PR
+# content, contained by the restricted toolset.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened]
 
 permissions:
@@ -19,6 +32,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # Explicitly check out the PR head. With pull_request_target the default
+          # ref is the base branch, but we want Claude to review the PR's code.
+          # We only READ this code (never build/run it) — see the security note above.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
       - uses: anthropics/claude-code-action@v1
         with:
