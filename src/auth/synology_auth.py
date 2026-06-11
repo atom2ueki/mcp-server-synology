@@ -1,8 +1,11 @@
 # src/synology_auth.py - Simple Synology authentication utilities
 
-from typing import Any, Dict, Optional, Tuple
+import logging
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level registry of SynologyAuth instances, keyed by base_url.
@@ -35,6 +38,10 @@ class SynologyAuth:
         # Credentials cached on a successful login, used by relogin() to recover
         # from DSM session expiry without requiring a process restart.
         self._credentials: Optional[Tuple[str, str]] = None
+        # Optional callback invoked after a successful relogin() with
+        # (base_url, session_id, syno_token). Lets the caller (e.g. mcp_server)
+        # resync any cached session state with the refreshed SID.
+        self.on_relogin: Optional[Callable[[str, Optional[str], Optional[str]], None]] = None
         # Register this instance for cross-module discovery (see _AUTH_REGISTRY).
         _AUTH_REGISTRY[self.base_url] = self
 
@@ -115,7 +122,15 @@ class SynologyAuth:
             return False
         username, password = self._credentials
         result = self.login_with_session(username, password, self.current_session_type)
-        return bool(result.get("success"))
+        success = bool(result.get("success"))
+        if success and self.on_relogin is not None:
+            # Notify the caller so it can resync cached session state with the
+            # new SID. A callback failure must never break the relogin path.
+            try:
+                self.on_relogin(self.base_url, self.current_session_id, self.current_syno_token)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("on_relogin callback failed for %s: %s", self.base_url, exc)
+        return success
 
     def logout(
         self, session_id: Optional[str] = None, session_type: Optional[str] = None
