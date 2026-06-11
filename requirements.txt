@@ -3,7 +3,10 @@ requests
 mcp>=1.27.2
 python-dotenv
 websockets>=16.0
-mcp-proxy>=0.7.0
+
+# HTTP/SSE transport (mcp-proxy) is intentionally NOT here — it's only needed
+# for docker-compose.http.yml and lives in requirements-http.txt, installed
+# only when building the HTTP image (INSTALL_HTTP=true).
 
 # Testing dependencies
 pytest>=9.0.3
