@@ -1,8 +1,28 @@
 # src/utils/synology_api.py - Shared API client for all Synology modules
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
+
+
+def _try_relogin(base_url: str) -> Tuple[Optional[str], Optional[str]]:
+    """Lookup the SynologyAuth registered for this URL and trigger a relogin.
+
+    Used internally by SynologyAPIClient.request() to silently recover from
+    DSM error 119 (SID expired). Returns (new_session_id, new_syno_token) on
+    success, (None, None) if no auth instance is registered for this URL or
+    if the relogin attempt fails.
+
+    Import is deferred to runtime to avoid a circular import (auth → utils).
+    """
+    try:
+        from auth.synology_auth import get_auth_for_url
+    except ImportError:
+        return (None, None)
+    auth = get_auth_for_url(base_url)
+    if auth is None or not auth.relogin():
+        return (None, None)
+    return (auth.current_session_id, auth.current_syno_token)
 
 
 class SynologyAPIClient:
@@ -10,6 +30,14 @@ class SynologyAPIClient:
 
     Provides standardized API calls with timeout, SSL verification,
     and error handling across all Synology services.
+
+    Transparently recovers from DSM error code 119 ("SID not found") — the
+    error DSM returns when the server-side session has expired (typically
+    after ~1h of inactivity for SYNO.Core.* APIs). When that happens, the
+    client looks up the SynologyAuth instance registered for its base_url,
+    triggers a relogin, refreshes its local SID/token, and retries the call
+    once. If no auth is registered (e.g. in standalone tests), the 119 is
+    returned to the caller unchanged.
     """
 
     def __init__(
@@ -45,6 +73,28 @@ class SynologyAPIClient:
         Returns:
             Dict with API response or error information
         """
+        result = self._do_request(api, method, version, extra_params, use_post)
+        # DSM error 119 = "SID not found" → server-side session has expired.
+        # Try a single transparent re-auth via the SynologyAuth registered for
+        # this base_url. If it succeeds, refresh local SID/token and retry once.
+        # If no auth is registered, return the original 119 to the caller.
+        if not result.get("success") and result.get("error", {}).get("code") == 119:
+            new_sid, new_token = _try_relogin(self.base_url)
+            if new_sid:
+                self.session_id = new_sid
+                self.syno_token = new_token
+                result = self._do_request(api, method, version, extra_params, use_post)
+        return result
+
+    def _do_request(
+        self,
+        api: str,
+        method: str,
+        version: int = 1,
+        extra_params: Optional[Dict] = None,
+        use_post: bool = False,
+    ) -> Dict[str, Any]:
+        """Internal: perform the HTTP call without any retry logic."""
         params = {
             "api": api,
             "version": str(version),

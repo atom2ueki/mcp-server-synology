@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 import urllib3
 
@@ -158,6 +158,7 @@ class SynologyMCPServer:
                     )
 
                 auth = self.auth_instances[base_url]
+                auth.on_relogin = self._resync_session_after_relogin
                 result = auth.login(nas_cfg["username"], nas_cfg["password"])
 
                 if result.get("success"):
@@ -405,6 +406,33 @@ class SynologyMCPServer:
         except Exception:
             return False
 
+    def _resync_session_after_relogin(
+        self, base_url: str, session_id: Optional[str], syno_token: Optional[str]
+    ) -> None:
+        """Resync cached session state after a transparent relogin (DSM 119 recovery).
+
+        SynologyAuth invokes this once it re-authenticates an expired session.
+        Without it, self.sessions / self.syno_tokens keep the dead SID — so logout
+        would target the expired session (leaking the new one) and lazily-created
+        subsystems would start with a stale SID. Mirrors the post-login bookkeeping.
+        """
+        if not session_id:
+            return
+        self.sessions[base_url] = session_id
+        if syno_token:
+            self.syno_tokens[base_url] = syno_token
+        else:
+            self.syno_tokens.pop(base_url, None)
+        # Drop cached service instances so they rebuild with the refreshed session.
+        for inst_dict in (
+            self.filestation_instances,
+            self.downloadstation_instances,
+            self.health_instances,
+            self.nfs_instances,
+            self.usermgr_instances,
+        ):
+            inst_dict.pop(base_url, None)
+
     async def _handle_login(self, arguments: dict) -> list[types.TextContent]:
         """Handle Synology login."""
         base_url = arguments["base_url"]
@@ -426,6 +454,7 @@ class SynologyMCPServer:
             self.auth_instances[base_url] = SynologyAuth(base_url, verify_ssl=config.verify_ssl)
 
         auth = self.auth_instances[base_url]
+        auth.on_relogin = self._resync_session_after_relogin
 
         # Perform login
         result = auth.login(username, password)

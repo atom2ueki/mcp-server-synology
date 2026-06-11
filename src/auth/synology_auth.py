@@ -1,8 +1,28 @@
 # src/synology_auth.py - Simple Synology authentication utilities
 
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
+
+logger = logging.getLogger(__name__)
+
+
+# Module-level registry of SynologyAuth instances, keyed by base_url.
+# Used by SynologyAPIClient to perform transparent session re-auth when DSM
+# returns error code 119 ("SID not found"), which happens when the server-side
+# session expires (typically after ~1h of inactivity for SYNO.Core.* APIs).
+# Without this, the client's SID stays dead until the process restarts.
+_AUTH_REGISTRY: Dict[str, "SynologyAuth"] = {}
+
+
+def get_auth_for_url(base_url: str) -> Optional["SynologyAuth"]:
+    """Return the SynologyAuth instance registered for `base_url`, if any.
+
+    Used by SynologyAPIClient.request() when it needs to recover from a
+    DSM error 119 (SID expired) by silently re-authenticating.
+    """
+    return _AUTH_REGISTRY.get(base_url.rstrip("/"))
 
 
 class SynologyAuth:
@@ -15,6 +35,15 @@ class SynologyAuth:
         # Mirrors what login_with_session uses by default; overwritten on every login.
         self.current_session_type: str = "webui"
         self.current_syno_token: Optional[str] = None
+        # Credentials cached on a successful login, used by relogin() to recover
+        # from DSM session expiry without requiring a process restart.
+        self._credentials: Optional[Tuple[str, str]] = None
+        # Optional callback invoked after a successful relogin() with
+        # (base_url, session_id, syno_token). Lets the caller (e.g. mcp_server)
+        # resync any cached session state with the refreshed SID.
+        self.on_relogin: Optional[Callable[[str, Optional[str], Optional[str]], None]] = None
+        # Register this instance for cross-module discovery (see _AUTH_REGISTRY).
+        _AUTH_REGISTRY[self.base_url] = self
 
     def login(self, username: str, password: str) -> Dict[str, Any]:
         """Authenticate with Synology NAS and return session info.
@@ -62,6 +91,8 @@ class SynologyAuth:
                     self.current_session_id = result["data"]["sid"]
                     self.current_session_type = session_type
                     self.current_syno_token = result["data"].get("synotoken")
+                    # Cache credentials so relogin() can recover from session expiry.
+                    self._credentials = (username, password)
                     return result
                 else:
                     error_code = result.get("error", {}).get("code", "unknown")
@@ -77,6 +108,29 @@ class SynologyAuth:
     def login_download_station(self, username: str, password: str) -> Dict[str, Any]:
         """Authenticate specifically for Download Station."""
         return self.login_with_session(username, password, "DownloadStation")
+
+    def relogin(self) -> bool:
+        """Re-authenticate using credentials cached from the last successful login.
+
+        Returns True on success, False if no credentials are cached or login fails.
+        Called by SynologyAPIClient when DSM returns error code 119 ("SID not
+        found"), which happens when the server-side session expires (typically
+        after ~1h of inactivity for SYNO.Core.* APIs). Without this, the client's
+        SID stays dead until the process restarts.
+        """
+        if not self._credentials:
+            return False
+        username, password = self._credentials
+        result = self.login_with_session(username, password, self.current_session_type)
+        success = bool(result.get("success"))
+        if success and self.on_relogin is not None:
+            # Notify the caller so it can resync cached session state with the
+            # new SID. A callback failure must never break the relogin path.
+            try:
+                self.on_relogin(self.base_url, self.current_session_id, self.current_syno_token)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("on_relogin callback failed for %s: %s", self.base_url, exc)
+        return success
 
     def logout(
         self, session_id: Optional[str] = None, session_type: Optional[str] = None
@@ -127,6 +181,10 @@ class SynologyAuth:
                         self.current_session_id = None
                         self.current_session_type = "webui"
                         self.current_syno_token = None
+                        # Drop cached credentials when the user explicitly logs out;
+                        # otherwise a subsequent 119 would silently re-auth them
+                        # against their explicit intent.
+                        self._credentials = None
                     return result
                 else:
                     last_error = result
