@@ -1,32 +1,23 @@
 name: PR Review
 
-# Triggered by `pull_request_target` (not `pull_request`) so the review job runs
-# in the BASE repo's context. This is required for PRs from forks: `pull_request`
-# fork runs get a read-only token with no secrets and no OIDC, so
-# secrets.CLAUDE_CODE_OAUTH_TOKEN / id-token are unavailable and the action fails.
-# `pull_request_target` runs the workflow definition from the base branch with
-# secrets available, regardless of where the PR came from.
+# Auto-review only for SAME-REPO pull requests.
 #
-# Security (avoiding a "pwn request"): this job is privileged (it holds secrets),
-# so it must never place untrusted fork code in the workspace. We deliberately do
-# NOT check out the PR head — only the trusted base repo. Claude reads the PR as
-# *text* via `gh pr diff` / `gh pr view` (GitHub API), and its tools are locked
-# down to gh pr comment/diff/view + inline comments — no checkout of PR files, no
-# build, test, or arbitrary command execution. Keep the "require approval for fork
-# PRs" setting on as the anti-abuse gate. Residual risk is prompt injection via PR
-# content, contained by the restricted, read-only toolset.
+# Why not fork PRs: anthropics/claude-code-action cannot authenticate on a fork
+# PR by any trigger. `on: pull_request` from a fork gets no OIDC token; switching
+# to `on: pull_request_target` makes secrets available but then fails at the
+# OIDC -> GitHub App token exchange (401 "Invalid OIDC token"). Either way a fork
+# PR can never produce a green review check — it only burns a run (and, with
+# pull_request_target, exposes secrets to fork code).
+#
+# So this workflow uses the safe `pull_request` event and the job is gated to
+# same-repo PRs (head.repo == this repo). Result:
+#   - same-repo PRs (trusted, ours): reviewed automatically (OIDC works);
+#   - fork PRs: the job is SKIPPED — no failing check, zero token spend, no
+#     secret exposure. Review a fork PR on demand by commenting `@claude`
+#     (claude.yml, gated to OWNER/MEMBER/COLLABORATOR).
 on:
-  pull_request_target:
-    # labeled: the opt-in trigger — review runs only after a maintainer applies
-    #   the 'ai-review' label (see the job's `if:`). This is the token-spend gate.
-    # opened/reopened: re-fire the trigger so a PR that ALREADY carries the label
-    #   (e.g. reopened, or opened by a maintainer who pre-labels) gets reviewed.
-    #   On a fresh unlabeled fork PR these fire but the job is skipped — 0 tokens.
-    # NOT synchronize: re-review on every push would double up with the explicit
-    #   @claude pings that the auto-pr / auto-issue loops already post per push,
-    #   producing two Claude reviews per commit. Re-reviews are driven explicitly
-    #   (re-apply the label, auto-pr's ping, a manual @claude, or close+reopen).
-    types: [opened, reopened, labeled]
+  pull_request:
+    types: [opened]
 
 permissions:
   contents: read
@@ -36,22 +27,14 @@ permissions:
 
 jobs:
   review:
-    # Token-spend gate. This is a privileged pull_request_target run: it carries
-    # secrets and is NOT covered by the fork-PR "require approval" prompt (that
-    # gate is for the `pull_request` event), so without this `if:` it would auto-
-    # run — and spend Claude tokens — on any fork PR from anyone. Require a
-    # maintainer to opt in by applying the 'ai-review' label. External
-    # contributors cannot add labels, so only a maintainer can authorize the
-    # spend. Until the label is present the job is skipped and 0 tokens are used.
-    # Also skip Dependabot (isolated secret store → empty token → always fails).
+    # Same-repo PRs only. Fork PRs (head.repo != this repo) are skipped before any
+    # token is spent — see the header for why fork PRs can't be reviewed in CI.
+    # Also skip Dependabot (isolated secret store -> empty token -> always fails).
     if: >-
-      github.event.pull_request.user.login != 'dependabot[bot]'
-      && contains(github.event.pull_request.labels.*.name, 'ai-review')
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      # Check out the BASE repo only (the trusted default for pull_request_target).
-      # We intentionally do NOT pass `ref: ...head.sha` — no PR-controlled files
-      # land on disk. Claude reads the PR via `gh pr diff` (API) instead.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
@@ -69,9 +52,7 @@ jobs:
             - Security implications
             - Performance concerns
 
-            The PR's code is NOT checked out locally (only the base branch is, for
-            context). Read the PR's changes via `gh pr diff` and `gh pr view` — do
-            not assume the diff is present on disk.
+            Read the PR's changes via `gh pr diff` and `gh pr view`.
 
             Use `gh pr comment` for top-level summary feedback (one comment max).
             Use mcp__github_inline_comment__create_inline_comment (with confirmed: true)
