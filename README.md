@@ -177,6 +177,82 @@ If you prefer not to use Docker:
   }
 }
 ```
+## 🌐 Remote HTTP/SSE Deployment (NEW)
+
+By default the server speaks **stdio**, which means the MCP client has to spawn the process locally (or via a bridge such as SSH/docker exec). For setups where the NAS is remote (different machine from where Claude/Cursor runs), you can expose the MCP server over **HTTP/SSE** using [`mcp-proxy`](https://github.com/sparfenyuk/mcp-proxy). This makes it consumable by any MCP client that supports URL-based connectors — exactly like `ha-mcp` or other "remote" MCP servers.
+
+### Architecture
+
+```
+[Claude Desktop / Cursor / ...]
+        │
+        │ HTTPS (URL connector)
+        ▼
+[Reverse proxy: DSM / Nginx / Traefik / Caddy]
+        │  (TLS termination + auth)
+        │ HTTP localhost:8765
+        ▼
+[Docker container]
+  └─ mcp-proxy
+       └─ python main.py (stdio)
+```
+
+### Deploy
+
+1. Make sure `mcp-proxy` is in `requirements.txt` (it is, as of this version).
+2. Use the provided `docker-compose.http.yml`:
+
+```bash
+# Edit credentials in docker-compose.http.yml first
+docker compose -f docker-compose.http.yml up -d --build
+docker logs -f synology-mcp-http
+```
+
+You should see mcp-proxy report `Uvicorn running on http://0.0.0.0:8765` and the auto-login succeed.
+
+### Reverse proxy
+
+Most MCP clients require HTTPS, so the HTTP endpoint must be fronted by a TLS-terminating reverse proxy. For DSM users, the built-in **Login Portal → Reverse Proxy** does the job:
+
+- **Source**: `HTTPS`, hostname `synology-mcp.example.com`, port `443`
+- **Destination**: `HTTP`, `localhost`, port `8765`
+- **Custom Headers**: click *Create → WebSocket* (adds the headers needed for SSE/long-lived connections)
+
+For Nginx, the equivalent is:
+
+```nginx
+location / {
+    proxy_pass http://localhost:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # SSE-specific
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 24h;
+}
+```
+
+### Client configuration
+
+In Claude Desktop (or any MCP client that supports remote connectors), add a custom connector pointing at:
+
+```
+https://synology-mcp.example.com/sse
+```
+
+No `command`, no `args`, no local Python — just a URL.
+
+### Security
+
+`mcp-proxy` does **not** provide server-side authentication. Anything that can reach the HTTP endpoint can call every tool. Mitigations:
+
+- Keep it on a private network or behind a VPN
+- Use the reverse proxy to enforce an IP allow-list
+- Add Basic Auth / mTLS / OAuth2 proxy at the reverse proxy layer
+- Use a dedicated low-privilege DSM user (already recommended in the security warning above)
 
 ## 🌟 Xiaozhi Integration
 
