@@ -235,6 +235,8 @@ def test_auth_url_construction():
         assert auth.base_url == expected_base
         print(f"✅ URL '{url}' → '{auth.base_url}'")
 
+    print("✅ URL construction tests passed")
+
 
 def test_relogin_without_credentials_returns_false():
     """relogin() is a no-op (False) before any successful login caches creds."""
@@ -264,5 +266,3 @@ def test_relogin_skips_when_session_already_refreshed():
     # This caller saw OLD_SID get the 119; current is already NEW_SID → skip.
     assert auth.relogin(stale_session_id="OLD_SID") is True
     assert auth.current_session_id == "NEW_SID"
-
-    print("✅ URL construction tests passed")
