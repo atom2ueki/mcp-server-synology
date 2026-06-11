@@ -199,7 +199,9 @@ By default the server speaks **stdio**, which means the MCP client has to spawn 
 
 ### Deploy
 
-1. Make sure `mcp-proxy` is in `requirements.txt` (it is, as of this version).
+1. `mcp-proxy` is installed automatically when you build the HTTP image — it
+   lives in `requirements-http.txt` and the provided compose file sets the
+   `INSTALL_HTTP=true` build arg (it is not in the default stdio/Xiaozhi image).
 2. Use the provided `docker-compose.http.yml`:
 
 ```bash

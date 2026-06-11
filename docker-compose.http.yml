@@ -9,27 +9,33 @@
 # file when you want a long-running, network-accessible MCP server.
 #
 # Prerequisites:
-#   - mcp-proxy added to requirements.txt (already done in this PR)
+#   - The HTTP image installs mcp-proxy from requirements-http.txt via the
+#     INSTALL_HTTP=true build arg below (it is NOT in the default image).
 #   - A reverse proxy in front (DSM, Nginx, Traefik, Caddy...) terminating
 #     TLS, since most MCP clients only accept HTTPS endpoints.
 #
 # Usage:
-#   1. Copy this file to docker-compose.http.yml (or use -f docker-compose.http.yml)
-#   2. Edit the environment block with your credentials (or use settings.json)
-#   3. docker compose -f docker-compose.http.yml up -d --build
-#   4. Point your reverse proxy at http://<host>:8765
-#   5. In your MCP client, add a custom connector:
+#   1. Edit the environment block below with your credentials (or use settings.json)
+#   2. docker compose -f docker-compose.http.yml up -d --build
+#   3. Point your reverse proxy at http://127.0.0.1:8765
+#   4. In your MCP client, add a custom connector:
 #        URL: https://your-domain.example.com/sse
 #
 # Security note:
-#   mcp-proxy does NOT provide server-side authentication. Put it behind a
-#   reverse proxy that adds authentication (Basic Auth, mTLS, OAuth2 proxy,
-#   IP allow-list) before exposing it to anything other than a trusted LAN
-#   or VPN.
+#   mcp-proxy does NOT provide server-side authentication. The port below is
+#   published on 127.0.0.1 only, so it is reachable solely from a reverse proxy
+#   on this host (DSM/Nginx/etc.) — never directly from the LAN/internet. Keep
+#   that reverse proxy adding authentication (Basic Auth, mTLS, OAuth2 proxy,
+#   IP allow-list). A reverse proxy running in another container should reach
+#   this service over the Docker network rather than the published port.
 
 services:
   synology-mcp-http:
-    build: .
+    build:
+      context: .
+      # Install the HTTP/SSE transport deps (mcp-proxy) into this image only.
+      args:
+        INSTALL_HTTP: "true"
     container_name: synology-mcp-http
     # mcp-proxy spawns `python main.py` as a stdio child and exposes it
     # over SSE/Streamable HTTP on port 8765.
@@ -43,7 +49,9 @@ services:
       - "python"
       - "main.py"
     ports:
-      - "8765:8765"
+      # Publish on loopback only — a same-host reverse proxy (DSM/Nginx) reaches
+      # it; the unauthenticated proxy is never directly exposed to the network.
+      - "127.0.0.1:8765:8765"
     environment:
       - XDG_CONFIG_HOME=/home/mcpuser/.config
       # Required: Synology NAS connection
@@ -52,7 +60,9 @@ services:
       - SYNOLOGY_PASSWORD=your_password
       # Optional
       - AUTO_LOGIN=true
-      - VERIFY_SSL=false
+      # Default to verifying the NAS TLS cert. Set to false only if your DSM
+      # uses a self-signed cert you can't add to the trust store.
+      - VERIFY_SSL=true
       - DEBUG=false
       - LOG_LEVEL=INFO
       - ENABLE_XIAOZHI=false
