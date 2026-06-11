@@ -12,6 +12,9 @@ permissions:
 
 jobs:
   review:
+    # Skip on Dependabot PRs: they run with the isolated Dependabot secret store,
+    # so secrets.CLAUDE_CODE_OAUTH_TOKEN is empty and the action always fails.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
