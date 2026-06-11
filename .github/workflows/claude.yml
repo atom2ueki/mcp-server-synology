@@ -19,12 +19,40 @@ permissions:
 
 jobs:
   claude:
+    # Trust gate (load-bearing): this job runs from the default branch WITH secrets,
+    # contents: write, and a checkout of the PR head — comment/issue events are NOT
+    # protected by the fork-PR "require approval" gate, so without this check ANY
+    # non-bot user who types "@claude" could trigger a privileged, write-capable run.
+    #
+    # The association MUST be checked against the actor of the *firing* event — the
+    # commenter for *_comment, the reviewer for pull_request_review, the issue
+    # author for issues. An issue_comment payload carries BOTH `comment` and
+    # `issue`, so a blanket OR across them lets an untrusted commenter pass via the
+    # trusted issue author on a maintainer-owned issue/PR. So each event clause
+    # binds its own actor's association inline.
     if: |
-      github.event.sender.type != 'Bot' && (
-        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      github.event.sender.type != 'Bot'
+      && (
+        (github.event_name == 'issue_comment'
+          && contains(github.event.comment.body, '@claude')
+          && (github.event.comment.author_association == 'OWNER'
+            || github.event.comment.author_association == 'MEMBER'
+            || github.event.comment.author_association == 'COLLABORATOR')) ||
+        (github.event_name == 'pull_request_review_comment'
+          && contains(github.event.comment.body, '@claude')
+          && (github.event.comment.author_association == 'OWNER'
+            || github.event.comment.author_association == 'MEMBER'
+            || github.event.comment.author_association == 'COLLABORATOR')) ||
+        (github.event_name == 'pull_request_review'
+          && contains(github.event.review.body, '@claude')
+          && (github.event.review.author_association == 'OWNER'
+            || github.event.review.author_association == 'MEMBER'
+            || github.event.review.author_association == 'COLLABORATOR')) ||
+        (github.event_name == 'issues'
+          && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))
+          && (github.event.issue.author_association == 'OWNER'
+            || github.event.issue.author_association == 'MEMBER'
+            || github.event.issue.author_association == 'COLLABORATOR'))
       )
     runs-on: ubuntu-latest
     steps:
