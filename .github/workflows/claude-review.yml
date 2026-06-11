@@ -17,10 +17,15 @@ name: PR Review
 # content, contained by the restricted, read-only toolset.
 on:
   pull_request_target:
-    # opened: first review. synchronize: re-review when the PR gets new commits.
-    # reopened: lets a maintainer re-run the review by closing+reopening the PR
-    # (the only re-trigger lever, since this is a privileged target workflow).
-    types: [opened, synchronize, reopened]
+    # opened: one-time auto-review on a new PR.
+    # reopened: the re-trigger lever — a maintainer re-runs the review by
+    #   closing+reopening the PR (a privileged target workflow can't be re-run
+    #   any other way on an already-open PR).
+    # NOT synchronize: re-review on every push would double up with the explicit
+    #   @claude pings that the auto-pr / auto-issue loops already post per push,
+    #   producing two Claude reviews per commit. Re-reviews are driven explicitly
+    #   (auto-pr's ping, a manual @claude, or close+reopen) instead.
+    types: [opened, reopened]
 
 permissions:
   contents: read
