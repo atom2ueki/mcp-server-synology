@@ -1,11 +1,11 @@
 ---
 name: synology-nas
-description: Use this skill for ANY task on a Synology NAS via the mcp-server-synology MCP — managing files and folders on the NAS, searching NAS shares, reading or creating NAS files, running Download Station tasks (torrents, magnets, downloads), checking NAS health (disks, SMART, volumes, RAID, SHR, UPS, CPU/memory utilization), creating shared folders, configuring NFS exports, and managing NAS users, groups, or share permissions. Triggers on "synology", "NAS", "DSM", "DiskStation", "DS220+/DS920+/etc", "Download Station", "/volume1", and any NAS-share path. Use even when the user just says "my NAS" or names a model number without saying "Synology". Distinct from the lifehacker-cert skill, which only handles SSL certs on one specific NAS — this skill is for general NAS operation.
+description: Use this skill for ANY task on a Synology NAS via the mcp-server-synology MCP — managing files and folders on the NAS, searching NAS shares, reading or creating NAS files, running Download Station tasks (torrents, magnets, downloads), checking NAS health (disks, SMART, volumes, RAID, SHR, UPS, CPU/memory utilization), managing Container Manager containers/projects/images/registries/networks, creating shared folders, configuring NFS exports, and managing NAS users, groups, or share permissions. Triggers on "synology", "NAS", "DSM", "DiskStation", "DS220+/DS920+/etc", "Download Station", "Container Manager", "Docker", "container", "/volume1", and any NAS-share path. Use even when the user just says "my NAS" or names a model number without saying "Synology". Distinct from the lifehacker-cert skill, which only handles SSL certs on one specific NAS — this skill is for general NAS operation.
 ---
 
 # Synology NAS
 
-This skill teaches you how to use the `mcp-server-synology` MCP effectively. The MCP exposes ~50 tools across six domains; the trick is picking the right tool, targeting the right NAS, and not exploding a single user request into a dozen redundant calls.
+This skill teaches you how to use the `mcp-server-synology` MCP effectively. The MCP exposes ~80 tools across seven domains; the trick is picking the right tool, targeting the right NAS, and not exploding a single user request into a dozen redundant calls.
 
 ## Mental model
 
@@ -47,6 +47,7 @@ When the user asks about… → read…
 | list/find/search files, read/create/delete/move/rename files & folders, shares | filestation | [references/files.md](references/files.md) |
 | download, torrent, magnet, BT, transmission-style task | Download Station | [references/downloads.md](references/downloads.md) |
 | disks, SMART, RAID/SHR, volume, UPS, CPU/memory utilization, system info, "is the NAS healthy" | health | [references/health.md](references/health.md) |
+| containers, Docker, compose projects, images, registries, networks, logs, resource usage | Container Manager | [references/containers.md](references/containers.md) |
 | NFS, share permissions, "let host X mount", create share | shares & NFS | [references/shares-nfs.md](references/shares-nfs.md) |
 | users, groups, permissions, "add user", "remove from group" | user management | [references/users.md](references/users.md) |
 
@@ -64,6 +65,7 @@ When in doubt about a destructive action, list/inspect first:
 
 - Before `delete`: `get_file_info` to confirm the path resolves to what you think.
 - Before `ds_delete_tasks`: `ds_list_tasks` to confirm the IDs.
+- Before `synology_container_delete`, `synology_container_project_delete`, `synology_container_image_delete`, or `synology_container_network_delete`: inspect/list the target first.
 - Before `synology_delete_user`: `synology_get_user` to confirm the account.
 
 This is a real NAS with real data — there is no "undo" for these tools.
@@ -80,6 +82,23 @@ Auto-login is on by default — the server logs in to every configured NAS at st
 
 If the user says "list shares and then list the photos folder," do those two calls — don't preface them with a discovery dance. Discovery (`synology_list_nas`/`synology_status`) is for when targeting or auth is genuinely unclear, not as a ritual before every request.
 
+### Container Manager: GHCR and runtime DNS
+
+GHCR pulls:
+1. `synology_container_registry_list`; require `using: GitHub Container Registry` for `ghcr.io/...`.
+2. On `2202` or `docker.io/ghcr.io/...`, switch registry in DSM, then `synology_container_registry_download`.
+3. Try `owner/image` first with GHCR active; try `ghcr.io/owner/image` only if needed.
+4. Wait after successful download; confirm with `synology_container_image_list`.
+5. If project `start` fails, run `synology_container_project_build` for DSM logs/start behavior.
+
+Runtime DNS:
+- Restart loop: inspect `synology_container_logs`.
+- Logs show `Temporary failure in name resolution` and NAS has internet: use `network_mode: host` for single-port apps; remove `ports:`.
+- Avoid `dns:` first; Synology compose may accept it then fail with `2202`.
+
+Optional companion services: skip when README says optional and main app works; add when user needs feature.
+
+
 ## Anti-patterns to avoid
 
 - **Calling `synology_login` reflexively.** Auto-login almost always handled it.
@@ -87,6 +106,7 @@ If the user says "list shares and then list the photos folder," do those two cal
 - **Inventing paths like `/Documents/foo` or `~/photos`.** Real paths start with `/volume1/`. List the parent if unsure.
 - **Picking a NAS in a multi-NAS setup without confirmation.** Ask which one.
 - **Confusing "shares" with "files."** A *share* is the top-level mount (Photos, video, homes); creating one is an admin action and lives in `synology_create_share` (see shares-nfs.md). Creating a *folder under* a share is `create_directory`.
+- **Treating containers as files.** Container Manager tools use names/repositories/projects, not NAS paths, except project `share_path`.
 - **Bulk operations without verification.** If the user asks to delete "all old downloads," list them, summarize what you're about to delete, and confirm before calling `ds_delete_tasks` or `delete`.
 
 ## Example: a typical session

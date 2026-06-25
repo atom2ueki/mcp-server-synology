@@ -44,6 +44,20 @@
         {"text": "Plan distinguishes between deleting the task entry and deleting the downloaded files on disk (mentions that files stay unless separately removed via the delete tool)"},
         {"text": "Plan offers a confirmation step / summary before bulk deletion rather than acting blindly"}
       ]
+    },
+    {
+      "id": 3,
+      "name": "container-restart-safety",
+      "prompt": "watchtower on my Synology looks wedged. plan first: how would you inspect it, restart it, and check whether it came back cleanly? don't actually call anything yet.",
+      "expected_output": "A plan that uses Container Manager tools: inspect/list the watchtower container first, restart it by name, then check logs and/or resource/status afterward. It should not treat watchtower as a file path, image repository, or Download Station task.",
+      "files": [],
+      "assertions": [
+        {"text": "Plan uses synology_container_get or synology_container_list before restarting"},
+        {"text": "Plan uses synology_container_restart with name=\"watchtower\""},
+        {"text": "Plan checks synology_container_logs and/or synology_container_resource after restart"},
+        {"text": "Plan does NOT use file tools or Download Station tools for a container restart"},
+        {"text": "Plan handles multi-NAS targeting with nas_name when needed"}
+      ]
     }
   ]
 }

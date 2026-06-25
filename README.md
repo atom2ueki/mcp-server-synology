@@ -372,6 +372,97 @@ docker-compose up
 - **`synology_system_log`** - Get recent system log entries
 - **`synology_health_summary`** - Aggregate system info, utilization, disk health, and volume status
 
+### 🐳 Container Manager
+- **`synology_container_list`** - List Container Manager containers
+  - `offset` (optional): Pagination offset
+  - `limit` (optional): Maximum containers to return
+  - `container_type` (optional): Container filter (default: `all`)
+- **`synology_container_get`** - Get a Container Manager container
+  - `name` (required): Container name
+- **`synology_container_start`** - Start a Container Manager container
+  - `name` (required): Container name
+- **`synology_container_stop`** - Stop a Container Manager container
+  - `name` (required): Container name
+- **`synology_container_restart`** - Restart a Container Manager container
+  - `name` (required): Container name
+- **`synology_container_delete`** - Delete a Container Manager container
+  - `name` (required): Container name
+  - `force` (optional): Force deletion (default: false)
+  - `preserve_profile` (optional): Preserve Synology container profile (default: true)
+- **`synology_container_logs`** - Get Container Manager container logs
+  - `name` (required): Container name
+  - `since` (optional): Log start time/filter
+  - `timestamps` (optional): Include log timestamps (default: false)
+- **`synology_container_resource`** - Get real-time resource usage for a Container Manager container
+  - `name` (required): Container name
+- **`synology_container_project_list`** - List Container Manager projects
+- **`synology_container_project_get`** - Get a Container Manager project
+  - `name` (required): Project name
+- **`synology_container_project_create`** - Create a Container Manager project
+  - `name` (required): Project name
+  - `share_path` (required): Project folder path on the NAS
+  - `content` (required): Docker Compose YAML content
+  - `enable_service_portal` (optional): Enable Synology service portal (default: false)
+  - `service_portal_name` (optional): Service portal name
+  - `service_portal_port` (optional): Service portal port
+  - `service_portal_protocol` (optional): Service portal protocol (default: `http`)
+- **`synology_container_project_update`** - Update a Container Manager project
+  - `name` (required): Project name
+  - `content` (required): Docker Compose YAML content
+  - `enable_service_portal` (optional): Enable Synology service portal
+  - `service_portal_name` (optional): Service portal name
+  - `service_portal_port` (optional): Service portal port
+  - `service_portal_protocol` (optional): Service portal protocol
+- **`synology_container_project_start`** - Start a Container Manager project
+  - `name` (required): Project name
+- **`synology_container_project_stop`** - Stop a Container Manager project
+  - `name` (required): Project name
+- **`synology_container_project_restart`** - Restart a Container Manager project
+  - `name` (required): Project name
+- **`synology_container_project_build`** - Build a Container Manager project
+  - `name` (required): Project name
+- **`synology_container_project_clean`** - Clean a Container Manager project
+  - `name` (required): Project name
+- **`synology_container_project_delete`** - Delete a Container Manager project
+  - `name` (required): Project name
+- **`synology_container_image_list`** - List Container Manager images
+  - `offset` (optional): Pagination offset
+  - `limit` (optional): Maximum images to return
+  - `show_dsm` (optional): Include DSM images (default: false)
+- **`synology_container_image_get`** - Get a Container Manager image
+  - `name` (required): Image repository name
+  - `tag` (optional): Image tag (default: `latest`)
+- **`synology_container_image_delete`** - Delete a Container Manager image
+  - `name` (required): Image repository name
+  - `tag` (optional): Image tag (default: `latest`)
+- **`synology_container_image_pull`** - Pull a Container Manager image
+  - `repository` (required): Image repository name
+  - `tag` (optional): Image tag (default: `latest`)
+- **`synology_container_registry_list`** - List Container Manager registries
+- **`synology_container_registry_search`** - Search Container Manager registries
+  - `query` (required): Image search query
+  - `offset` (optional): Pagination offset
+  - `limit` (optional): Maximum results to return
+- **`synology_container_registry_tags`** - List tags for a registry image
+  - `repository` (required): Image repository name
+  - `offset` (optional): Pagination offset
+  - `limit` (optional): Maximum tags to return
+- **`synology_container_registry_download`** - Download a registry image
+  - `repository` (required): Image repository name
+  - `tag` (optional): Image tag (default: `latest`)
+- **`synology_container_network_list`** - List Container Manager networks
+- **`synology_container_network_get`** - Get a Container Manager network
+  - `name` (required): Network name
+- **`synology_container_network_create`** - Create a Container Manager network
+  - `name` (required): Network name
+  - `driver` (optional): Network driver (default: `bridge`)
+  - `subnet` (optional): Subnet CIDR
+  - `gateway` (optional): Gateway IP
+  - `ip_range` (optional): Allocatable IP range CIDR
+  - `enable_ipv6` (optional): Enable IPv6 (default: false)
+- **`synology_container_network_delete`** - Delete a Container Manager network
+  - `name` (required): Network name
+
 ### 📦 NFS Management
 - **`synology_nfs_status`** - Get NFS service status and configuration
 - **`synology_nfs_enable`** - Enable or disable the NFS service
@@ -382,7 +473,7 @@ docker-compose up
 
 For Claude Code, Claude Desktop, and claude.ai users, this repo ships an Anthropic Agent Skill that teaches Claude how to use the MCP tools effectively — picking the right tool, targeting the right NAS in multi-NAS setups, preferring aggregate health checks over fan-out calls, and using correct path conventions.
 
-The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across six domains (auth, files, downloads, health, shares/NFS, user management).
+The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across seven domains (auth, files, downloads, health, containers, shares/NFS, user management).
 
 **Install:**
 

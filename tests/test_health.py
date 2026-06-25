@@ -1,7 +1,8 @@
 """Health monitoring module tests."""
 
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 
 @pytest.mark.real_nas
@@ -204,6 +205,7 @@ class TestSystemInfoFallback:
 
     def _make_health(self):
         from health.synology_health import SynologyHealth
+
         return SynologyHealth("http://nas:5000", "fake-sid", verify_ssl=False)
 
     def test_primary_success(self):
@@ -218,7 +220,10 @@ class TestSystemInfoFallback:
     def test_fallback_uses_version_2(self):
         """Falls back to SYNO.DSM.Info v2 when SYNO.Core.System fails."""
         health = self._make_health()
-        dsm_info = {"success": True, "data": {"model": "DS1621+", "version_string": "DSM 7.3.2-86009"}}
+        dsm_info = {
+            "success": True,
+            "data": {"model": "DS1621+", "version_string": "DSM 7.3.2-86009"},
+        }
 
         def side_effect(api, method, version=1, extra_params=None):
             if api == "SYNO.Core.System":
@@ -234,7 +239,9 @@ class TestSystemInfoFallback:
     def test_both_fail(self):
         """Returns the fallback error when both APIs fail."""
         health = self._make_health()
-        with patch.object(health._api, "get", return_value={"success": False, "error": {"code": 104}}):
+        with patch.object(
+            health._api, "get", return_value={"success": False, "error": {"code": 104}}
+        ):
             result = health.system_info()
         assert not result.get("success")
 
