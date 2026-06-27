@@ -253,6 +253,63 @@ def test_project_update_finds_project_id_before_updating():
     assert update_data["enable_service_portal"] == "false"
 
 
+def test_project_update_quotes_service_portal_params_like_create():
+    """Portal name/protocol must be JSON-quoted on update, matching create."""
+    container = _container()
+
+    with patch(
+        "utils.synology_api.requests.post",
+        side_effect=[
+            _successful_response({"abc-123": {"id": "abc-123", "name": "media"}}),
+            _successful_response(),
+        ],
+    ) as post:
+        container.update_project(
+            name="media",
+            content="services:\n  app:\n    image: caddy:latest\n",
+            enable_service_portal=True,
+            service_portal_name="media",
+            service_portal_port=8080,
+            service_portal_protocol="https",
+        )
+
+    update_data = post.call_args_list[1].kwargs["data"]
+    assert update_data["enable_service_portal"] == "true"
+    assert update_data["service_portal_name"] == '"media"'
+    assert update_data["service_portal_port"] == "8080"
+    assert update_data["service_portal_protocol"] == '"https"'
+
+
+def _response_with_data(data):
+    """Build a success response whose `data` is exactly `data` (no falsy coercion)."""
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"data": data, "success": True}
+    fake_response.raise_for_status = MagicMock()
+    return fake_response
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [{"id": "x", "name": "other"}],  # DSM returns a list
+        None,  # DSM returns null
+        "unexpected",  # DSM returns something else entirely
+    ],
+)
+def test_project_id_lookup_tolerates_non_dict_data(data):
+    """A list/None/other project payload yields a structured not-found, not a crash."""
+    container = _container()
+
+    with patch(
+        "utils.synology_api.requests.post",
+        return_value=_response_with_data(data),
+    ):
+        result = container.get_project("missing")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "not_found"
+
+
 def test_image_methods_wire_format_matches_dsm():
     """Image tools expose local image list/get/delete and pull."""
     container = _container()
@@ -423,7 +480,7 @@ def test_container_logs_wire_format_matches_dsm():
         "utils.synology_api.requests.post",
         return_value=_successful_response({"logs": []}),
     ) as post:
-        container.get_container_logs("watchtower", since="2026-06-13T00:00:00", timestamps=True)
+        container.get_container_logs("watchtower", since="2026-06-13T00:00:00")
 
     sent_data = post.call_args.kwargs["data"]
     assert sent_data["api"] == "SYNO.Docker.Container.Log"

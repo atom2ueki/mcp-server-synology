@@ -105,7 +105,15 @@ class SynologyContainer:
         if not projects.get("success"):
             return None, projects
 
-        for project in projects.get("data", {}).values():
+        data = projects.get("data", {})
+        if isinstance(data, dict):
+            candidates = list(data.values())
+        elif isinstance(data, list):
+            candidates = data
+        else:
+            candidates = []
+
+        for project in candidates:
             if isinstance(project, dict) and project.get("name") == name:
                 return project["id"], None
 
@@ -224,11 +232,11 @@ class SynologyContainer:
         if enable_service_portal is not None:
             params["enable_service_portal"] = json.dumps(enable_service_portal)
         if service_portal_name is not None:
-            params["service_portal_name"] = service_portal_name
+            params["service_portal_name"] = json.dumps(service_portal_name)
         if service_portal_port is not None:
             params["service_portal_port"] = str(service_portal_port)
         if service_portal_protocol is not None:
-            params["service_portal_protocol"] = service_portal_protocol
+            params["service_portal_protocol"] = json.dumps(service_portal_protocol)
 
         return self._make_request(self.project_api, self.project_version, "update", **params)
 
@@ -386,7 +394,6 @@ class SynologyContainer:
         self,
         name: str,
         since: Optional[str] = None,
-        timestamps: bool = False,
     ) -> Dict[str, Any]:
         """Get Container Manager logs for a container."""
         params = {

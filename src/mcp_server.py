@@ -1060,7 +1060,6 @@ class SynologyMCPServer:
             result = container.get_container_logs(
                 arguments["name"],
                 since=arguments.get("since"),
-                timestamps=arguments.get("timestamps", False),
             )
         elif method_name in {
             "project_get",
@@ -1300,10 +1299,6 @@ class SynologyMCPServer:
                 {
                     **name_properties,
                     "since": {"type": "string", "description": "Optional log start time/filter"},
-                    "timestamps": {
-                        "type": "boolean",
-                        "description": "Include log timestamps (default: false)",
-                    },
                 },
                 ["name"],
             ),
