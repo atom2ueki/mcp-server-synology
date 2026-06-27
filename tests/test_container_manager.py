@@ -497,6 +497,21 @@ def test_container_logs_wire_format_matches_dsm():
     assert "timestamps" not in sent_data
 
 
+def test_container_logs_forwards_custom_offset_and_limit():
+    """Caller-supplied offset/limit override the DSM pagination defaults."""
+    container = _container()
+
+    with patch(
+        "utils.synology_api.requests.post",
+        return_value=_successful_response({"logs": []}),
+    ) as post:
+        container.get_container_logs("watchtower", offset=200, limit=50)
+
+    sent_data = post.call_args.kwargs["data"]
+    assert sent_data["offset"] == "200"
+    assert sent_data["limit"] == "50"
+
+
 def test_container_tools_are_registered():
     """MCP exposes the container operations."""
     from mcp_server import SynologyMCPServer

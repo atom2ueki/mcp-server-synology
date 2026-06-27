@@ -18,22 +18,22 @@ class SynologyContainer:
     ):
         self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)
         self.container_api = "SYNO.Docker.Container"
-        self.container_version = "1"
+        self.container_version = 1
         self.project_api = "SYNO.Docker.Project"
-        self.project_version = "1"
+        self.project_version = 1
         self.image_api = "SYNO.Docker.Image"
-        self.image_version = "1"
+        self.image_version = 1
         self.registry_api = "SYNO.Docker.Registry"
-        self.registry_version = "1"
+        self.registry_version = 1
         self.network_api = "SYNO.Docker.Network"
-        self.network_version = "1"
+        self.network_version = 1
         self.container_log_api = "SYNO.Docker.Container.Log"
         self.container_resource_api = "SYNO.Docker.Container.Resource"
 
     def _make_request(
         self,
         api: str,
-        version: str,
+        version: int,
         method: str,
         **params: Any,
     ) -> Dict[str, Any]:
@@ -146,7 +146,7 @@ class SynologyContainer:
 
         return self._make_request(
             "SYNO.FileStation.CreateFolder",
-            "2",
+            2,
             "create",
             folder_path=folder_path,
             name=name,
@@ -324,7 +324,7 @@ class SynologyContainer:
         """List tags for a registry image."""
         return self._make_request(
             self.registry_api,
-            "2",
+            2,
             "tags",
             repository=repository,
             offset=str(offset),
@@ -394,6 +394,8 @@ class SynologyContainer:
         self,
         name: str,
         since: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 1000,
     ) -> Dict[str, Any]:
         """Get Container Manager logs for a container."""
         params = {
@@ -403,8 +405,8 @@ class SynologyContainer:
             "level": json.dumps(""),
             "keyword": json.dumps(""),
             "sort_dir": json.dumps("DESC"),
-            "offset": "0",
-            "limit": "1000",
+            "offset": str(offset),
+            "limit": str(limit),
         }
         return self._make_request(self.container_log_api, self.container_version, "get", **params)
 
