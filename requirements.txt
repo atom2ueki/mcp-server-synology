@@ -9,5 +9,5 @@ websockets>=16.0
 # only when building the HTTP image (INSTALL_HTTP=true).
 
 # Testing dependencies
-pytest>=9.1.0
+pytest>=9.1.1
 pytest-asyncio>=1.4.0
