@@ -17,6 +17,7 @@ from mcp.server.models import InitializationOptions
 
 from auth import SynologyAuth
 from config import config
+from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
 from filestation import SynologyFileStation
 from health import SynologyHealth
@@ -42,6 +43,7 @@ class SynologyMCPServer:
         self.filestation_instances: Dict[str, SynologyFileStation] = {}
         self.downloadstation_instances: Dict[str, SynologyDownloadStation] = {}
         self.health_instances: Dict[str, SynologyHealth] = {}
+        self.container_instances: Dict[str, SynologyContainer] = {}
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
@@ -94,6 +96,22 @@ class SynologyMCPServer:
             )
 
         return self.health_instances[base_url]
+
+    def _get_container(self, base_url: str) -> SynologyContainer:
+        """Get or create Container Manager instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.container_instances:
+            session_id = self.sessions[base_url]
+            self.container_instances[base_url] = SynologyContainer(
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl,
+                syno_token=self.syno_tokens.get(base_url),
+            )
+
+        return self.container_instances[base_url]
 
     def _get_nfs(self, base_url: str) -> SynologyNFS:
         """Get or create NFS instance for a base URL."""
@@ -148,7 +166,7 @@ class SynologyMCPServer:
             try:
                 nas_cfg = config.get_synology_config(nas_name)
                 base_url = nas_cfg["base_url"]
-                label = nas_name or base_url
+                label = nas_name or "default"
 
                 logger.info(f"Auto-login: {label} ({base_url})...")
 
@@ -171,12 +189,15 @@ class SynologyMCPServer:
                         self.syno_tokens.pop(base_url, None)
                     # Store the name->url mapping for tool resolution
                     self.nas_name_map[label] = base_url
+                    if nas_name is None:
+                        self.nas_name_map[base_url] = base_url
                     logger.info(f"{label}: session {session_id[:8]}...")
 
                     for inst_dict in (
                         self.filestation_instances,
                         self.downloadstation_instances,
                         self.health_instances,
+                        self.container_instances,
                         self.nfs_instances,
                         self.usermgr_instances,
                     ):
@@ -321,6 +342,11 @@ class SynologyMCPServer:
                     return await self._handle_system_log(arguments)
                 elif name == "synology_health_summary":
                     return await self._handle_health_call(arguments, "health_summary")
+                # Container Manager handlers
+                elif name.startswith("synology_container_"):
+                    return await self._handle_container_call(
+                        arguments, name.removeprefix("synology_container_")
+                    )
                 # NFS management handlers
                 elif name == "synology_nfs_status":
                     return await self._handle_nfs_call(arguments, "nfs_status")
@@ -428,6 +454,7 @@ class SynologyMCPServer:
             self.filestation_instances,
             self.downloadstation_instances,
             self.health_instances,
+            self.container_instances,
             self.nfs_instances,
             self.usermgr_instances,
         ):
@@ -474,6 +501,7 @@ class SynologyMCPServer:
                 self.filestation_instances,
                 self.downloadstation_instances,
                 self.health_instances,
+                self.container_instances,
                 self.nfs_instances,
                 self.usermgr_instances,
             ):
@@ -937,6 +965,134 @@ class SynologyMCPServer:
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     # ------------------------------------------------------------------
+    # Container Manager handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_container_call(
+        self, arguments: dict, method_name: str
+    ) -> list[types.TextContent]:
+        """Handle Container Manager container operations."""
+        base_url = self._get_base_url(arguments)
+        container = self._get_container(base_url)
+
+        if method_name == "list":
+            result = container.list_containers(
+                offset=arguments.get("offset", 0),
+                limit=arguments.get("limit", -1),
+                container_type=arguments.get("container_type", "all"),
+            )
+        elif method_name == "project_list":
+            result = container.list_projects()
+        elif method_name == "project_create":
+            result = container.create_project(
+                name=arguments["name"],
+                share_path=arguments["share_path"],
+                content=arguments["content"],
+                enable_service_portal=arguments.get("enable_service_portal", False),
+                service_portal_name=arguments.get("service_portal_name"),
+                service_portal_port=arguments.get("service_portal_port"),
+                service_portal_protocol=arguments.get("service_portal_protocol", "http"),
+            )
+        elif method_name == "project_update":
+            result = container.update_project(
+                name=arguments["name"],
+                content=arguments["content"],
+                enable_service_portal=arguments.get("enable_service_portal"),
+                service_portal_name=arguments.get("service_portal_name"),
+                service_portal_port=arguments.get("service_portal_port"),
+                service_portal_protocol=arguments.get("service_portal_protocol"),
+            )
+        elif method_name == "project_delete":
+            result = container.delete_project(arguments["name"])
+        elif method_name == "image_list":
+            result = container.list_images(
+                offset=arguments.get("offset", 0),
+                limit=arguments.get("limit", -1),
+                show_dsm=arguments.get("show_dsm", False),
+            )
+        elif method_name in {"image_get", "image_delete"}:
+            image_method = {
+                "image_get": container.get_image,
+                "image_delete": container.delete_image,
+            }[method_name]
+            result = image_method(arguments["name"], tag=arguments.get("tag", "latest"))
+        elif method_name in {"image_pull", "registry_download"}:
+            result = container.pull_image(
+                arguments["repository"],
+                tag=arguments.get("tag", "latest"),
+            )
+        elif method_name == "registry_list":
+            result = container.list_registries()
+        elif method_name == "registry_search":
+            result = container.search_registry(
+                arguments["query"],
+                offset=arguments.get("offset", 0),
+                limit=arguments.get("limit", 50),
+            )
+        elif method_name == "registry_tags":
+            result = container.list_registry_tags(
+                arguments["repository"],
+                offset=arguments.get("offset", 0),
+                limit=arguments.get("limit", 50),
+            )
+        elif method_name == "network_list":
+            result = container.list_networks()
+        elif method_name == "network_get":
+            result = container.get_network(arguments["name"])
+        elif method_name == "network_create":
+            result = container.create_network(
+                arguments["name"],
+                driver=arguments.get("driver", "bridge"),
+                subnet=arguments.get("subnet"),
+                gateway=arguments.get("gateway"),
+                ip_range=arguments.get("ip_range"),
+                enable_ipv6=arguments.get("enable_ipv6", False),
+            )
+        elif method_name == "network_delete":
+            result = container.delete_network(arguments["name"])
+        elif method_name == "delete":
+            result = container.delete_container(
+                arguments["name"],
+                force=arguments.get("force", False),
+                preserve_profile=arguments.get("preserve_profile", True),
+            )
+        elif method_name == "logs":
+            result = container.get_container_logs(
+                arguments["name"],
+                since=arguments.get("since"),
+            )
+        elif method_name in {
+            "project_get",
+            "project_start",
+            "project_stop",
+            "project_restart",
+            "project_build",
+            "project_clean",
+        }:
+            project_method = {
+                "project_get": container.get_project,
+                "project_start": container.start_project,
+                "project_stop": container.stop_project,
+                "project_restart": container.restart_project,
+                "project_build": container.build_project,
+                "project_clean": container.clean_project,
+            }[method_name]
+            result = project_method(arguments["name"])
+        elif method_name in {"get", "start", "stop", "restart", "resource"}:
+            container_method = {
+                "get": container.get_container,
+                "start": container.start_container,
+                "stop": container.stop_container,
+                "restart": container.restart_container,
+                "resource": container.get_container_resource,
+            }[method_name]
+            result = container_method(arguments["name"])
+        else:
+            raise ValueError(f"Unknown container method: {method_name}")
+
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    # ------------------------------------------------------------------
     # User management handlers
     # ------------------------------------------------------------------
 
@@ -1016,6 +1172,318 @@ class SynologyMCPServer:
         usermgr = self._get_usermgr(base_url)
         result = usermgr.set_user_permissions(arguments["name"], arguments["permissions"])
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    def _get_container_tool_definitions(self):
+        """Get Container Manager container tool definitions."""
+        target = {
+            "nas_name": {
+                "type": "string",
+                "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+            },
+            "base_url": {
+                "type": "string",
+                "description": "Synology NAS base URL (alternative to nas_name)",
+            },
+        }
+        name = {"type": "string", "description": "Container name (e.g. 'watchtower')"}
+        project_name = {"type": "string", "description": "Project name (e.g. 'watchtower')"}
+
+        def tool(tool_name: str, description: str, properties: dict, required: list[str]):
+            return types.Tool(
+                name=tool_name,
+                description=description,
+                inputSchema={
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            )
+
+        name_properties = {**target, "name": name}
+        project_name_properties = {**target, "name": project_name}
+        image_properties = {
+            **target,
+            "name": {"type": "string", "description": "Image repository name (e.g. 'nginx')"},
+            "tag": {"type": "string", "description": "Image tag (default: latest)"},
+        }
+        repository_properties = {
+            **target,
+            "repository": {
+                "type": "string",
+                "description": "Image repository name (e.g. 'nginx')",
+            },
+            "tag": {"type": "string", "description": "Image tag (default: latest)"},
+        }
+        network_properties = {
+            **target,
+            "name": {"type": "string", "description": "Network name"},
+        }
+        project_content_properties = {
+            **project_name_properties,
+            "content": {
+                "type": "string",
+                "description": "Docker Compose YAML content",
+            },
+            "enable_service_portal": {
+                "type": "boolean",
+                "description": "Enable Synology service portal (default: false)",
+            },
+            "service_portal_name": {
+                "type": "string",
+                "description": "Optional service portal name",
+            },
+            "service_portal_port": {
+                "type": "integer",
+                "description": "Optional service portal port",
+            },
+            "service_portal_protocol": {
+                "type": "string",
+                "description": "Service portal protocol (default: http)",
+            },
+        }
+        return [
+            tool(
+                "synology_container_list",
+                "List Container Manager containers",
+                {
+                    **target,
+                    "offset": {"type": "integer", "description": "Pagination offset"},
+                    "limit": {"type": "integer", "description": "Maximum containers to return"},
+                    "container_type": {
+                        "type": "string",
+                        "description": "Container filter (default: all)",
+                    },
+                },
+                [],
+            ),
+            tool(
+                "synology_container_get",
+                "Get a Container Manager container",
+                name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_start",
+                "Start a Container Manager container",
+                name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_stop",
+                "Stop a Container Manager container",
+                name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_restart",
+                "Restart a Container Manager container",
+                name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_delete",
+                "Delete a Container Manager container",
+                {
+                    **name_properties,
+                    "force": {"type": "boolean", "description": "Force deletion (default: false)"},
+                    "preserve_profile": {
+                        "type": "boolean",
+                        "description": "Preserve Synology container profile (default: true)",
+                    },
+                },
+                ["name"],
+            ),
+            tool(
+                "synology_container_logs",
+                "Get Container Manager container logs",
+                {
+                    **name_properties,
+                    "since": {"type": "string", "description": "Optional log start time/filter"},
+                },
+                ["name"],
+            ),
+            tool(
+                "synology_container_resource",
+                "Get real-time resource usage for a Container Manager container",
+                name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_project_list",
+                "List Container Manager projects",
+                target,
+                [],
+            ),
+            tool(
+                "synology_container_project_get",
+                "Get a Container Manager project",
+                project_name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_project_create",
+                "Create a Container Manager project",
+                {
+                    **project_content_properties,
+                    "share_path": {
+                        "type": "string",
+                        "description": "Project folder path on the NAS",
+                    },
+                },
+                ["name", "share_path", "content"],
+            ),
+            tool(
+                "synology_container_project_update",
+                "Update a Container Manager project",
+                project_content_properties,
+                ["name", "content"],
+            ),
+            tool(
+                "synology_container_project_start",
+                "Start a Container Manager project",
+                project_name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_project_stop",
+                "Stop a Container Manager project",
+                project_name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_project_restart",
+                "Restart a Container Manager project",
+                project_name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_project_build",
+                "Build a Container Manager project",
+                project_name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_project_clean",
+                "Clean a Container Manager project",
+                project_name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_project_delete",
+                "Delete a Container Manager project by name",
+                project_name_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_image_list",
+                "List Container Manager images",
+                {
+                    **target,
+                    "offset": {"type": "integer", "description": "Pagination offset"},
+                    "limit": {"type": "integer", "description": "Maximum images to return"},
+                    "show_dsm": {
+                        "type": "boolean",
+                        "description": "Include DSM images (default: false)",
+                    },
+                },
+                [],
+            ),
+            tool(
+                "synology_container_image_get",
+                "Get a Container Manager image",
+                image_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_image_delete",
+                "Delete a Container Manager image",
+                image_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_image_pull",
+                "Pull a Container Manager image",
+                repository_properties,
+                ["repository"],
+            ),
+            tool(
+                "synology_container_registry_list",
+                "List Container Manager registries",
+                target,
+                [],
+            ),
+            tool(
+                "synology_container_registry_search",
+                "Search Container Manager registries",
+                {
+                    **target,
+                    "query": {"type": "string", "description": "Image search query"},
+                    "offset": {"type": "integer", "description": "Pagination offset"},
+                    "limit": {"type": "integer", "description": "Maximum results to return"},
+                },
+                ["query"],
+            ),
+            tool(
+                "synology_container_registry_tags",
+                "List tags for a registry image",
+                {
+                    **target,
+                    "repository": {
+                        "type": "string",
+                        "description": "Image repository name (e.g. 'nginx')",
+                    },
+                    "offset": {"type": "integer", "description": "Pagination offset"},
+                    "limit": {"type": "integer", "description": "Maximum tags to return"},
+                },
+                ["repository"],
+            ),
+            tool(
+                "synology_container_registry_download",
+                "Download a registry image",
+                repository_properties,
+                ["repository"],
+            ),
+            tool(
+                "synology_container_network_list",
+                "List Container Manager networks",
+                target,
+                [],
+            ),
+            tool(
+                "synology_container_network_get",
+                "Get a Container Manager network",
+                network_properties,
+                ["name"],
+            ),
+            tool(
+                "synology_container_network_create",
+                "Create a Container Manager network",
+                {
+                    **network_properties,
+                    "driver": {
+                        "type": "string",
+                        "description": "Network driver (default: bridge)",
+                    },
+                    "subnet": {
+                        "type": "string",
+                        "description": "Subnet CIDR (e.g. 172.28.0.0/16)",
+                    },
+                    "gateway": {"type": "string", "description": "Gateway IP"},
+                    "ip_range": {"type": "string", "description": "Allocatable IP range CIDR"},
+                    "enable_ipv6": {
+                        "type": "boolean",
+                        "description": "Enable IPv6 (default: false)",
+                    },
+                },
+                ["name"],
+            ),
+            tool(
+                "synology_container_network_delete",
+                "Delete a Container Manager network",
+                network_properties,
+                ["name"],
+            ),
+        ]
 
     def _get_tool_definitions(self):
         """Get tool definitions shared between MCP handler and bridge."""
@@ -1678,6 +2146,10 @@ class SynologyMCPServer:
                 },
             ),
             # ============================================================
+            # Container Manager Tools
+            # ============================================================
+            *self._get_container_tool_definitions(),
+            # ============================================================
             # NFS Management Tools
             # ============================================================
             types.Tool(
@@ -2165,6 +2637,10 @@ class SynologyMCPServer:
             }
 
             handler = dispatch.get(name)
+            if handler is None and name.startswith("synology_container_"):
+                return await self._handle_container_call(
+                    arguments, name.removeprefix("synology_container_")
+                )
             if handler is None:
                 raise ValueError(f"Unknown tool: {name}")
             return await handler(arguments)
@@ -2256,6 +2732,7 @@ class SynologyMCPServer:
                     self.filestation_instances,
                     self.downloadstation_instances,
                     self.health_instances,
+                    self.container_instances,
                     self.nfs_instances,
                     self.usermgr_instances,
                 ):

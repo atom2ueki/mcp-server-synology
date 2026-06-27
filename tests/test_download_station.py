@@ -41,13 +41,13 @@ class TestRealDownloadStation:
 
             # Format size
             if size > 1024 * 1024 * 1024:
-                size_str = f"{size/(1024*1024*1024):.1f} GB"
+                size_str = f"{size / (1024 * 1024 * 1024):.1f} GB"
             elif size > 1024 * 1024:
-                size_str = f"{size/(1024*1024):.1f} MB"
+                size_str = f"{size / (1024 * 1024):.1f} MB"
             else:
                 size_str = f"{size:,} B"
 
-            print(f"  {i+1}. {title[:50]}... [{status}] ({size_str})")
+            print(f"  {i + 1}. {title[:50]}... [{status}] ({size_str})")
 
     def test_download_statistics(self, download_station):
         """Test getting download statistics."""
@@ -61,9 +61,9 @@ class TestRealDownloadStation:
         # Format speeds
         def format_speed(speed):
             if speed > 1024 * 1024:
-                return f"{speed/(1024*1024):.1f} MB/s"
+                return f"{speed / (1024 * 1024):.1f} MB/s"
             elif speed > 1024:
-                return f"{speed/1024:.1f} KB/s"
+                return f"{speed / 1024:.1f} KB/s"
             else:
                 return f"{speed} B/s"
 
