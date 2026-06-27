@@ -193,14 +193,7 @@ class SynologyMCPServer:
                         self.nas_name_map[base_url] = base_url
                     logger.info(f"{label}: session {session_id[:8]}...")
 
-                    for inst_dict in (
-                        self.filestation_instances,
-                        self.downloadstation_instances,
-                        self.health_instances,
-                        self.container_instances,
-                        self.nfs_instances,
-                        self.usermgr_instances,
-                    ):
+                    for inst_dict in self._service_instance_dicts():
                         inst_dict.pop(base_url, None)
                     success_count += 1
                 else:
@@ -386,6 +379,21 @@ class SynologyMCPServer:
             except Exception as e:
                 return [types.TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
 
+    def _service_instance_dicts(self):
+        """Canonical set of per-domain instance caches keyed by base_url.
+
+        Returned as one tuple so session login/relogin/logout/cleanup all evict
+        the same set; adding a new service means updating this one place.
+        """
+        return (
+            self.filestation_instances,
+            self.downloadstation_instances,
+            self.health_instances,
+            self.container_instances,
+            self.nfs_instances,
+            self.usermgr_instances,
+        )
+
     def _get_base_url(self, arguments: dict) -> str:
         """Get base URL from arguments or config.
 
@@ -450,14 +458,7 @@ class SynologyMCPServer:
         else:
             self.syno_tokens.pop(base_url, None)
         # Drop cached service instances so they rebuild with the refreshed session.
-        for inst_dict in (
-            self.filestation_instances,
-            self.downloadstation_instances,
-            self.health_instances,
-            self.container_instances,
-            self.nfs_instances,
-            self.usermgr_instances,
-        ):
+        for inst_dict in self._service_instance_dicts():
             inst_dict.pop(base_url, None)
 
     async def _handle_login(self, arguments: dict) -> list[types.TextContent]:
@@ -497,14 +498,7 @@ class SynologyMCPServer:
                 self.syno_tokens.pop(base_url, None)
 
             # Drop cached service instances so they pick up the new session/token
-            for inst_dict in (
-                self.filestation_instances,
-                self.downloadstation_instances,
-                self.health_instances,
-                self.container_instances,
-                self.nfs_instances,
-                self.usermgr_instances,
-            ):
+            for inst_dict in self._service_instance_dicts():
                 inst_dict.pop(base_url, None)
 
             return [
@@ -540,14 +534,7 @@ class SynologyMCPServer:
             # Remove session and all cached service instances on successful logout
             del self.sessions[base_url]
             self.syno_tokens.pop(base_url, None)
-            for inst_dict in (
-                self.filestation_instances,
-                self.downloadstation_instances,
-                self.health_instances,
-                self.container_instances,
-                self.nfs_instances,
-                self.usermgr_instances,
-            ):
+            for inst_dict in self._service_instance_dicts():
                 inst_dict.pop(base_url, None)
 
             return [
@@ -563,18 +550,11 @@ class SynologyMCPServer:
             error_msg = error_info.get("message", "Unknown error")
 
             # Handle expected session expiration gracefully
-            if error_code in ["105", "106", "no_session"]:
+            if str(error_code) in {"105", "106", "no_session"}:
                 # Still clean up local session data
                 del self.sessions[base_url]
                 self.syno_tokens.pop(base_url, None)
-                for inst_dict in (
-                    self.filestation_instances,
-                    self.downloadstation_instances,
-                    self.health_instances,
-                    self.container_instances,
-                    self.nfs_instances,
-                    self.usermgr_instances,
-                ):
+                for inst_dict in self._service_instance_dicts():
                     inst_dict.pop(base_url, None)
 
                 return [
@@ -2728,7 +2708,7 @@ class SynologyMCPServer:
                         error_info = result.get("error", {})
                         error_code = error_info.get("code", "unknown")
 
-                        if error_code in ["105", "106", "no_session"]:
+                        if str(error_code) in {"105", "106", "no_session"}:
                             logger.info(f"Session {session_id[:10]}... was already expired")
                             cleanup_results.append(f"{base_url}: Session already expired")
                         else:
@@ -2738,14 +2718,7 @@ class SynologyMCPServer:
                 # Always clear local data
                 del self.sessions[base_url]
                 self.syno_tokens.pop(base_url, None)
-                for inst_dict in (
-                    self.filestation_instances,
-                    self.downloadstation_instances,
-                    self.health_instances,
-                    self.container_instances,
-                    self.nfs_instances,
-                    self.usermgr_instances,
-                ):
+                for inst_dict in self._service_instance_dicts():
                     inst_dict.pop(base_url, None)
 
             except Exception as e:

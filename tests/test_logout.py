@@ -53,11 +53,15 @@ async def test_logout_clears_all_service_instance_caches():
     _assert_fully_evicted(server)
 
 
+# DSM returns numeric session codes via response.json(); "no_session" is the
+# one string code SynologyAuth.logout() emits itself. The handler must treat all
+# of them as the graceful-cleanup path.
+@pytest.mark.parametrize("error_code", [105, 106, "no_session"])
 @pytest.mark.asyncio
-async def test_expired_session_logout_clears_all_service_instance_caches():
+async def test_expired_session_logout_clears_all_service_instance_caches(error_code):
     """The expired-session branch (105/106/no_session) also evicts every cache."""
     server = _server_with_active_session(
-        {"success": False, "error": {"code": "105", "message": "session expired"}}
+        {"success": False, "error": {"code": error_code, "message": "session expired"}}
     )
 
     await server._handle_logout({"base_url": BASE_URL})
