@@ -392,6 +392,8 @@ docker-compose up
 - **`synology_container_logs`** - Get Container Manager container logs
   - `name` (required): Container name
   - `since` (optional): Log start time/filter
+  - `offset` (optional): Pagination offset (default: 0)
+  - `limit` (optional): Maximum log lines to return (default: 1000)
 - **`synology_container_resource`** - Get real-time resource usage for a Container Manager container
   - `name` (required): Container name
 - **`synology_container_project_list`** - List Container Manager projects

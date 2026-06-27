@@ -1050,6 +1050,8 @@ class SynologyMCPServer:
             result = container.get_container_logs(
                 arguments["name"],
                 since=arguments.get("since"),
+                offset=arguments.get("offset", 0),
+                limit=arguments.get("limit", 1000),
             )
         elif method_name in {
             "project_get",
@@ -1289,6 +1291,11 @@ class SynologyMCPServer:
                 {
                     **name_properties,
                     "since": {"type": "string", "description": "Optional log start time/filter"},
+                    "offset": {"type": "integer", "description": "Pagination offset (default: 0)"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum log lines to return (default: 1000)",
+                    },
                 },
                 ["name"],
             ),
