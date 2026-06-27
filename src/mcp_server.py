@@ -537,13 +537,18 @@ class SynologyMCPServer:
 
         # Handle the result and provide detailed feedback
         if result.get("success"):
-            # Remove session and FileStation/DownloadStation instances on successful logout
+            # Remove session and all cached service instances on successful logout
             del self.sessions[base_url]
             self.syno_tokens.pop(base_url, None)
-            if base_url in self.filestation_instances:
-                del self.filestation_instances[base_url]
-            if base_url in self.downloadstation_instances:
-                del self.downloadstation_instances[base_url]
+            for inst_dict in (
+                self.filestation_instances,
+                self.downloadstation_instances,
+                self.health_instances,
+                self.container_instances,
+                self.nfs_instances,
+                self.usermgr_instances,
+            ):
+                inst_dict.pop(base_url, None)
 
             return [
                 types.TextContent(
@@ -562,10 +567,15 @@ class SynologyMCPServer:
                 # Still clean up local session data
                 del self.sessions[base_url]
                 self.syno_tokens.pop(base_url, None)
-                if base_url in self.filestation_instances:
-                    del self.filestation_instances[base_url]
-                if base_url in self.downloadstation_instances:
-                    del self.downloadstation_instances[base_url]
+                for inst_dict in (
+                    self.filestation_instances,
+                    self.downloadstation_instances,
+                    self.health_instances,
+                    self.container_instances,
+                    self.nfs_instances,
+                    self.usermgr_instances,
+                ):
+                    inst_dict.pop(base_url, None)
 
                 return [
                     types.TextContent(
