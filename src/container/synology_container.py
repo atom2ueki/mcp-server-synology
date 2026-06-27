@@ -25,6 +25,8 @@ class SynologyContainer:
         self.image_version = 1
         self.registry_api = "SYNO.Docker.Registry"
         self.registry_version = 1
+        # The registry `tags` method is served by API v2, unlike the v1 list/search/get.
+        self.registry_tags_version = 2
         self.network_api = "SYNO.Docker.Network"
         self.network_version = 1
         self.container_log_api = "SYNO.Docker.Container.Log"
@@ -324,7 +326,7 @@ class SynologyContainer:
         """List tags for a registry image."""
         return self._make_request(
             self.registry_api,
-            2,
+            self.registry_tags_version,
             "tags",
             repository=repository,
             offset=str(offset),
