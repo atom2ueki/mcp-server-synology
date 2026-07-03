@@ -1,6 +1,6 @@
 pycryptodome
 requests
-mcp>=1.28.0
+mcp>=1.28.1
 python-dotenv
 websockets>=16.0
 
