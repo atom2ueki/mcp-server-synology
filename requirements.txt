@@ -2,7 +2,7 @@ pycryptodome
 requests
 mcp>=1.28.1
 python-dotenv
-websockets>=16.0
+websockets>=16.1
 
 # HTTP/SSE transport (mcp-proxy) is intentionally NOT here — it's only needed
 # for docker-compose.http.yml and lives in requirements-http.txt, installed
