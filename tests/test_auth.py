@@ -266,3 +266,195 @@ def test_relogin_skips_when_session_already_refreshed():
     # This caller saw OLD_SID get the 119; current is already NEW_SID → skip.
     assert auth.relogin(stale_session_id="OLD_SID") is True
     assert auth.current_session_id == "NEW_SID"
+
+
+# ---------------------------------------------------------------------------
+# OTP + device-token unit tests (no live NAS required)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    """Minimal stand-in for requests.Response used by the OTP payload tests."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def _patch_requests_get(monkeypatch, payloads):
+    """Replace requests.get in synology_auth with a recorder.
+
+    `payloads` is a list of dicts; each call pops the head. Every call also
+    records the params it was called with into `calls` for assertions.
+    """
+    import auth.synology_auth as mod
+
+    calls = []
+
+    def _fake_get(url, params=None, verify=None):
+        calls.append({"url": url, "params": dict(params or {}), "verify": verify})
+        return _FakeResponse(payloads.pop(0) if payloads else {"success": False})
+
+    monkeypatch.setattr(mod.requests, "get", _fake_get)
+    return calls
+
+
+def test_login_with_otp_code_adds_otp_and_device_token_request(monkeypatch):
+    """First-time 2FA login: payload includes `otp_code` + `enable_device_token=yes`
+    so DSM both accepts the OTP AND returns a `did` for future reuse."""
+    from auth.synology_auth import SynologyAuth
+
+    success_payload = {
+        "success": True,
+        "data": {"sid": "SID_123", "synotoken": "SYNO_TOK", "did": "DID_abc"},
+    }
+    calls = _patch_requests_get(monkeypatch, [success_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw", otp_code="123456")
+
+    assert len(calls) == 1
+    params = calls[0]["params"]
+    assert params["otp_code"] == "123456"
+    assert params["enable_device_token"] == "yes"
+    # Device-id path must NOT be taken when we're sending an OTP.
+    assert "device_id" not in params
+
+
+def test_login_with_device_id_trusted_device_path(monkeypatch):
+    """Returning trusted device: payload includes `device_id` and skips both
+    `otp_code` and `enable_device_token` — DSM treats the call as already
+    authenticated."""
+    from auth.synology_auth import SynologyAuth
+
+    success_payload = {"success": True, "data": {"sid": "SID_456", "synotoken": "T"}}
+    calls = _patch_requests_get(monkeypatch, [success_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw", device_id="DID_abc")
+
+    assert len(calls) == 1
+    params = calls[0]["params"]
+    assert params["device_id"] == "DID_abc"
+    assert "otp_code" not in params
+    assert "enable_device_token" not in params
+
+
+def test_device_id_wins_over_otp_code(monkeypatch):
+    """When both are passed, device_id wins — DSM won't ask for OTP on a
+    trusted device, so we don't send one."""
+    from auth.synology_auth import SynologyAuth
+
+    success_payload = {"success": True, "data": {"sid": "SID_789", "synotoken": "T"}}
+    calls = _patch_requests_get(monkeypatch, [success_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw", otp_code="123456", device_id="DID_abc")
+
+    params = calls[0]["params"]
+    assert params["device_id"] == "DID_abc"
+    assert "otp_code" not in params
+    assert "enable_device_token" not in params
+
+
+def test_successful_otp_login_caches_did_for_relogin(monkeypatch):
+    """A login that returns `did` must cache it so relogin() can reuse the
+    trusted-device path instead of asking the user for OTP again."""
+    from auth.synology_auth import SynologyAuth
+
+    success_payload = {
+        "success": True,
+        "data": {"sid": "SID_1", "synotoken": "T", "did": "DID_persisted"},
+    }
+    _patch_requests_get(monkeypatch, [success_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw", otp_code="123456")
+
+    assert auth.current_device_id == "DID_persisted"
+    assert auth._cached_device_id == "DID_persisted"
+
+
+def test_successful_login_without_device_token_leaves_cache_empty(monkeypatch):
+    """Plain 2FA-off login must not populate the device-id cache — relogin
+    should fall back to plain password auth (legacy behavior)."""
+    from auth.synology_auth import SynologyAuth
+
+    success_payload = {"success": True, "data": {"sid": "SID_2", "synotoken": "T"}}
+    _patch_requests_get(monkeypatch, [success_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw")
+
+    assert auth.current_device_id is None
+    assert auth._cached_device_id is None
+
+
+def test_relogin_reuses_cached_device_id(monkeypatch):
+    """relogin() after a 2FA login must pass the cached did as `device_id`
+    so DSM doesn't ask for OTP on session recovery (error 119 path)."""
+    from auth.synology_auth import SynologyAuth
+
+    initial = {
+        "success": True,
+        "data": {"sid": "SID_OLD", "synotoken": "T_OLD", "did": "DID_reuse"},
+    }
+    refreshed = {
+        "success": True,
+        "data": {"sid": "SID_NEW", "synotoken": "T_NEW", "did": "DID_reuse"},
+    }
+    calls = _patch_requests_get(monkeypatch, [initial, refreshed])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw", otp_code="111222")
+    # Pre-arm a different SID so relogin doesn't no-op under the "already
+    # refreshed" guard.
+    stale = auth.current_session_id
+    auth.current_session_id = stale  # unchanged; relogin sees no change
+
+    # Force a relogin call that actually hits login_with_session.
+    assert auth.relogin() is True
+
+    # Second call (relogin) must include device_id; no otp_code/enable_device_token.
+    relogin_params = calls[1]["params"]
+    assert relogin_params["device_id"] == "DID_reuse"
+    assert "otp_code" not in relogin_params
+    assert "enable_device_token" not in relogin_params
+
+
+def test_logout_clears_device_id_cache(monkeypatch):
+    """User-initiated logout forgets the trusted-device token, mirroring the
+    cached-credentials drop — otherwise a later 119 would silently re-auth
+    against the user's explicit logout."""
+    from auth.synology_auth import SynologyAuth
+
+    login_payload = {
+        "success": True,
+        "data": {"sid": "SID_3", "synotoken": "T", "did": "DID_forget_me"},
+    }
+    logout_payload = {"success": True}
+    _patch_requests_get(monkeypatch, [login_payload, logout_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw", otp_code="333444")
+    assert auth._cached_device_id == "DID_forget_me"
+
+    auth.logout()
+    assert auth.current_device_id is None
+    assert auth._cached_device_id is None
+
+
+def test_get_session_info_includes_device_id():
+    """get_session_info surfaces device_id so callers (e.g. mcp_server status
+    tool) can show the operator whether the session is OTP-exempt."""
+    from auth.synology_auth import SynologyAuth
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.current_device_id = "DID_visible"
+    info = auth.get_session_info()
+    assert info["device_id"] == "DID_visible"

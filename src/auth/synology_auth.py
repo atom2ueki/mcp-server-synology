@@ -36,9 +36,18 @@ class SynologyAuth:
         # Mirrors what login_with_session uses by default; overwritten on every login.
         self.current_session_type: str = "webui"
         self.current_syno_token: Optional[str] = None
+        # Device token returned by DSM when login includes
+        # `enable_device_token=yes` (the 2FA "remember this device" flow).
+        # Reused by relogin() so OTP isn't required on session recovery.
+        self.current_device_id: Optional[str] = None
         # Credentials cached on a successful login, used by relogin() to recover
         # from DSM session expiry without requiring a process restart.
         self._credentials: Optional[Tuple[str, str]] = None
+        # Device token cached from a prior login. Sent on relogin() as
+        # `device_id` so DSM treats us as a trusted device and skips OTP.
+        # Only populated when the original login used `enable_device_token=yes`
+        # — otherwise None, and relogin falls back to plain password auth.
+        self._cached_device_id: Optional[str] = None
         # Optional callback invoked after a successful relogin() with
         # (base_url, session_id, syno_token). Lets the caller (e.g. mcp_server)
         # resync any cached session state with the refreshed SID.
@@ -49,7 +58,13 @@ class SynologyAuth:
         # Register this instance for cross-module discovery (see _AUTH_REGISTRY).
         _AUTH_REGISTRY[self.base_url] = self
 
-    def login(self, username: str, password: str) -> Dict[str, Any]:
+    def login(
+        self,
+        username: str,
+        password: str,
+        otp_code: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Authenticate with Synology NAS and return session info.
 
         Defaults to `session=webui` — the same scope the DSM web UI uses.
@@ -57,13 +72,31 @@ class SynologyAuth:
         affect which APIs are reachable (account permissions do); we
         pick `webui` for semantic alignment with the official client.
         Use `login_with_session(...)` to pick a different session type.
+
+        Auth options:
+            - `device_id`: a previously-issued DSM device token. When supplied,
+              DSM treats us as a trusted device and skips any 2FA/OTP step.
+            - `otp_code`: a one-time 6-digit code from the user's authenticator.
+              Required only on the first 2FA login (where no `device_id` is
+              available yet). When both are given, `device_id` wins and the
+              OTP is ignored — DSM won't ask for it on a trusted device.
         """
-        return self.login_with_session(username, password, "webui")
+        return self.login_with_session(
+            username, password, "webui", otp_code=otp_code, device_id=device_id
+        )
 
     def login_with_session(
-        self, username: str, password: str, session_type: str = "webui"
+        self,
+        username: str,
+        password: str,
+        session_type: str = "webui",
+        otp_code: Optional[str] = None,
+        device_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Authenticate with Synology NAS using specific session type."""
+        """Authenticate with Synology NAS using specific session type.
+
+        See `login()` for the meaning of `otp_code` and `device_id`.
+        """
         login_url = f"{self.base_url}/webapi/auth.cgi"
 
         # Try common API versions (start with newer versions)
@@ -84,6 +117,18 @@ class SynologyAuth:
                 # which still work pre-7.3.2).
                 "enable_syno_token": "yes",
             }
+            if device_id:
+                # Returning trusted device → DSM skips OTP. This is the path
+                # used by relogin() once we've cached a `did` from a prior
+                # 2FA login, and by callers who pre-loaded a `did` from
+                # settings.json at process start.
+                payload["device_id"] = device_id
+            elif otp_code:
+                # First-time 2FA login: include the user-supplied OTP and ask
+                # DSM to issue a device token (`did`) for reuse. Subsequent
+                # re-logins on this process use the device_id path above.
+                payload["otp_code"] = otp_code
+                payload["enable_device_token"] = "yes"
 
             try:
                 response = requests.get(login_url, params=payload, verify=self.verify_ssl)
@@ -95,6 +140,13 @@ class SynologyAuth:
                     self.current_session_id = result["data"]["sid"]
                     self.current_session_type = session_type
                     self.current_syno_token = result["data"].get("synotoken")
+                    # DSM returns `did` only when enable_device_token=yes is
+                    # honored. Cache it for relogin(); the caller may also
+                    # persist it (settings.json) to skip OTP across restarts.
+                    did = result["data"].get("did")
+                    if did:
+                        self.current_device_id = did
+                        self._cached_device_id = did
                     # Cache credentials so relogin() can recover from session expiry.
                     self._credentials = (username, password)
                     return result
@@ -109,9 +161,17 @@ class SynologyAuth:
         # If all versions failed, return the last result
         return {"success": False, "error": {"code": "unknown", "message": "Authentication failed"}}
 
-    def login_download_station(self, username: str, password: str) -> Dict[str, Any]:
+    def login_download_station(
+        self,
+        username: str,
+        password: str,
+        otp_code: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Authenticate specifically for Download Station."""
-        return self.login_with_session(username, password, "DownloadStation")
+        return self.login_with_session(
+            username, password, "DownloadStation", otp_code=otp_code, device_id=device_id
+        )
 
     def relogin(self, stale_session_id: Optional[str] = None) -> bool:
         """Re-authenticate using credentials cached from the last successful login.
@@ -139,7 +199,16 @@ class SynologyAuth:
             ):
                 return True
             username, password = self._credentials
-            result = self.login_with_session(username, password, self.current_session_type)
+            # Reuse the cached device token when available: DSM treats us as
+            # a trusted device and won't require OTP. If we never had one
+            # (the initial login didn't use enable_device_token), this falls
+            # through to plain password auth — same behavior as pre-OTP.
+            result = self.login_with_session(
+                username,
+                password,
+                self.current_session_type,
+                device_id=self._cached_device_id,
+            )
             success = bool(result.get("success"))
             if success and self.on_relogin is not None:
                 # Notify the caller so it can resync cached session state with the
@@ -203,6 +272,11 @@ class SynologyAuth:
                         # otherwise a subsequent 119 would silently re-auth them
                         # against their explicit intent.
                         self._credentials = None
+                        # Also forget the trusted-device token: a user-initiated
+                        # logout ends the session deliberately, and reusing the
+                        # device_id on a later auto-relogin would contradict that.
+                        self.current_device_id = None
+                        self._cached_device_id = None
                     return result
                 else:
                     last_error = result
@@ -246,5 +320,6 @@ class SynologyAuth:
             "session_id": self.current_session_id,
             "session_type": self.current_session_type,
             "syno_token": self.current_syno_token,
+            "device_id": self.current_device_id,
             "logged_in": self.is_logged_in(),
         }
