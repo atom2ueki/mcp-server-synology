@@ -619,8 +619,10 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 
    **Workflow:**
    1. Set `otp_code` to a fresh 6-digit code from your authenticator and start the server.
-   2. The first successful login returns a `did` in the auto-login log line.
-   3. Paste that value into `device_id` and delete `otp_code`.
+   2. On the first successful login, the server logs a warning line like:
+      `nas1: 2FA bootstrap — copy this device_id into settings.json to skip OTP on future starts: <did>`
+      Copy the `<did>` value.
+   3. Paste it into `device_id` and delete `otp_code`.
    4. From now on, DSM treats this process as a trusted device — restarts, relogins after DSM error 119, and container-manager sessions all skip OTP.
 
    When `device_id` is present, it takes precedence over `otp_code` (trusted-device path). Legacy `.env` users can set the one-shot `SYNOLOGY_OTP_CODE` env var; for persistent `device_id`, migrate to `settings.json` (long opaque token doesn't fit an env var cleanly).

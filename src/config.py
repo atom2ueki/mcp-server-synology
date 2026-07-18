@@ -84,7 +84,8 @@ class SynologyConfig:
         self.synology_password = os.getenv("SYNOLOGY_PASSWORD")
         # One-shot 2FA code for legacy .env single-NAS users on first login.
         # Settings.json users store `device_id` per-NAS for ongoing reuse and
-        # don't need this. Cleared after first use by the caller.
+        # don't need this. Read-only here; auto-login consumes it but does
+        # not clear it (auto-login only runs once per process start today).
         self.synology_otp_code = os.getenv("SYNOLOGY_OTP_CODE")
 
     def _check_file_permissions(self, path: Path) -> bool:

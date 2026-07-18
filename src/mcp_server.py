@@ -199,6 +199,20 @@ class SynologyMCPServer:
                     self.nas_name_map[label] = base_url
                     if nas_name is None:
                         self.nas_name_map[base_url] = base_url
+                    # Surface the DSM device token so users can copy it into
+                    # settings.json (`device_id`) to skip OTP on future starts.
+                    # Only present when DSM issued one — i.e. the first-time
+                    # OTP login (the steady-state `device_id` path doesn't
+                    # echo it back). Logged in full because (a) the value
+                    # is destined for settings.json anyway and (b) it's
+                    # useless without the password, so truncation provides
+                    # no meaningful protection.
+                    did = result["data"].get("did")
+                    if did:
+                        logger.warning(
+                            f"{label}: 2FA bootstrap — copy this device_id into "
+                            f"settings.json to skip OTP on future starts: {did}"
+                        )
                     logger.info(f"{label}: session {session_id[:8]}...")
 
                     for inst_dict in self._service_instance_dicts():

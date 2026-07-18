@@ -395,6 +395,34 @@ def test_successful_login_without_device_token_leaves_cache_empty(monkeypatch):
     assert auth._cached_device_id is None
 
 
+def test_login_with_explicit_device_id_seeds_cache_for_relogin(monkeypatch):
+    """Steady-state 2FA config: user has pasted `did` into settings.json as
+    `device_id`. The returning-device login path doesn't get `did` echoed
+    back by DSM, so the cache must be seeded from the INPUT device_id —
+    otherwise the next relogin() would silently fall through to plain
+    password auth (which DSM rejects for 2FA accounts)."""
+    from auth.synology_auth import SynologyAuth
+
+    # DSM response on the device_id path: no `did` field echoed.
+    success_payload = {"success": True, "data": {"sid": "SID_steady", "synotoken": "T"}}
+    calls = _patch_requests_get(monkeypatch, [success_payload, success_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw", device_id="DID_from_settings")
+
+    # Cache seeded from input despite no `did` in response.
+    assert auth.current_device_id == "DID_from_settings"
+    assert auth._cached_device_id == "DID_from_settings"
+
+    # Relogin must reuse the cached did — not fall through to password-only.
+    auth.current_session_id = "SID_ABOUT_TO_EXPIRE"
+    assert auth.relogin() is True
+
+    relogin_params = calls[1]["params"]
+    assert relogin_params["device_id"] == "DID_from_settings"
+    assert "otp_code" not in relogin_params
+
+
 def test_relogin_reuses_cached_device_id(monkeypatch):
     """relogin() after a 2FA login must pass the cached did as `device_id`
     so DSM doesn't ask for OTP on session recovery (error 119 path)."""

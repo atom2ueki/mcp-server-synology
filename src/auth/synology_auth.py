@@ -140,10 +140,16 @@ class SynologyAuth:
                     self.current_session_id = result["data"]["sid"]
                     self.current_session_type = session_type
                     self.current_syno_token = result["data"].get("synotoken")
-                    # DSM returns `did` only when enable_device_token=yes is
-                    # honored. Cache it for relogin(); the caller may also
-                    # persist it (settings.json) to skip OTP across restarts.
-                    did = result["data"].get("did")
+                    # Cache the trusted-device token for relogin(). DSM only
+                    # returns `did` when the request includes
+                    # `enable_device_token=yes` (the first-time-OTP path); on
+                    # the returning-device path we send `device_id` but DSM
+                    # doesn't echo it back, so fall back to the input value.
+                    # Without this, relogin() would lose the device token
+                    # after the first successful login on the steady-state
+                    # configuration and silently fall through to plain
+                    # password auth — which DSM rejects for 2FA accounts.
+                    did = result["data"].get("did") or device_id
                     if did:
                         self.current_device_id = did
                         self._cached_device_id = did
