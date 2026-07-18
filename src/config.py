@@ -82,6 +82,11 @@ class SynologyConfig:
         self.synology_url = os.getenv("SYNOLOGY_URL")
         self.synology_username = os.getenv("SYNOLOGY_USERNAME")
         self.synology_password = os.getenv("SYNOLOGY_PASSWORD")
+        # One-shot 2FA code for legacy .env single-NAS users on first login.
+        # Settings.json users store `device_id` per-NAS for ongoing reuse and
+        # don't need this. Read-only here; auto-login consumes it but does
+        # not clear it (auto-login only runs once per process start today).
+        self.synology_otp_code = os.getenv("SYNOLOGY_OTP_CODE")
 
     def _check_file_permissions(self, path: Path) -> bool:
         """Check if secrets file has safe permissions (0600 or stricter).
@@ -144,6 +149,17 @@ class SynologyConfig:
                     port = nas_info.get("port", 5000)
                     username = nas_info.get("username", "")
                     password = nas_info.get("password", "")
+                    # Optional 2FA/OTP support (DSM Login Web API Guide):
+                    #   - `otp_code`: one-shot code from authenticator. Needed
+                    #     only on the FIRST login after enabling 2FA on the
+                    #     DSM account. After that first login, DSM issues a
+                    #     device token (`did`); paste it as `device_id` and
+                    #     remove `otp_code`.
+                    #   - `device_id`: long-lived trusted-device token. When
+                    #     present, DSM skips OTP for this login and for the
+                    #     silent re-auth path (DSM error 119 recovery).
+                    otp_code = nas_info.get("otp_code") or None
+                    device_id = nas_info.get("device_id") or None
 
                     if not host:
                         logger.warning(f"Missing 'host' for NAS '{nas_name}' in {SETTINGS_FILE}")
@@ -168,6 +184,8 @@ class SynologyConfig:
                         "password": password,
                         "verify_ssl": self.verify_ssl,
                         "note": nas_info.get("note", ""),
+                        "otp_code": otp_code,
+                        "device_id": device_id,
                     }
 
                 # Load Xiaozhi settings
@@ -246,6 +264,8 @@ class SynologyConfig:
             "username": self.synology_username,
             "password": self.synology_password,
             "verify_ssl": self.verify_ssl,
+            "otp_code": self.synology_otp_code,
+            "device_id": None,
         }
 
     def resolve_base_url(self, nas_name: str) -> Optional[str]:

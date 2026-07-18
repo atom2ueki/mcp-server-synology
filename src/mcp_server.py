@@ -177,7 +177,15 @@ class SynologyMCPServer:
 
                 auth = self.auth_instances[base_url]
                 auth.on_relogin = self._resync_session_after_relogin
-                result = auth.login(nas_cfg["username"], nas_cfg["password"])
+                # Pass optional 2FA material from settings.json (or legacy .env
+                # for otp_code). device_id wins over otp_code; both None means
+                # the DSM account has 2FA off (existing behavior).
+                result = auth.login(
+                    nas_cfg["username"],
+                    nas_cfg["password"],
+                    otp_code=nas_cfg.get("otp_code"),
+                    device_id=nas_cfg.get("device_id"),
+                )
 
                 if result.get("success"):
                     session_id = result["data"]["sid"]
@@ -191,6 +199,20 @@ class SynologyMCPServer:
                     self.nas_name_map[label] = base_url
                     if nas_name is None:
                         self.nas_name_map[base_url] = base_url
+                    # Surface the DSM device token so users can copy it into
+                    # settings.json (`device_id`) to skip OTP on future starts.
+                    # Only present when DSM issued one — i.e. the first-time
+                    # OTP login (the steady-state `device_id` path doesn't
+                    # echo it back). Logged in full because (a) the value
+                    # is destined for settings.json anyway and (b) it's
+                    # useless without the password, so truncation provides
+                    # no meaningful protection.
+                    did = result["data"].get("did")
+                    if did:
+                        logger.warning(
+                            f"{label}: 2FA bootstrap — copy this device_id into "
+                            f"settings.json to skip OTP on future starts: {did}"
+                        )
                     logger.info(f"{label}: session {session_id[:8]}...")
 
                     for inst_dict in self._service_instance_dicts():
@@ -223,7 +245,14 @@ class SynologyMCPServer:
                     [
                         types.Tool(
                             name="synology_login",
-                            description="Authenticate with Synology NAS and establish session",
+                            description=(
+                                "Authenticate with Synology NAS and establish session.\n\n"
+                                "2FA/OTP accounts: pass `otp_code` on the first login only; "
+                                "DSM will issue a `device_id` in the response, which you can "
+                                "persist into settings.json to skip OTP on future logins. If "
+                                "you already have a `device_id`, pass it instead of `otp_code` "
+                                "— DSM treats trusted devices as already authenticated."
+                            ),
                             inputSchema={
                                 "type": "object",
                                 "properties": {
@@ -238,6 +267,23 @@ class SynologyMCPServer:
                                     "password": {
                                         "type": "string",
                                         "description": "Password for authentication",
+                                    },
+                                    "otp_code": {
+                                        "type": "string",
+                                        "description": (
+                                            "One-time 6-digit code from the user's authenticator. "
+                                            "Required only on the first 2FA login for a new device. "
+                                            "Ignored when `device_id` is also given."
+                                        ),
+                                    },
+                                    "device_id": {
+                                        "type": "string",
+                                        "description": (
+                                            "Long-lived trusted-device token previously issued by DSM "
+                                            "(returned as `did` in a successful 2FA login). When "
+                                            "supplied, DSM skips the OTP step. Preferred over "
+                                            "`otp_code` for repeated logins."
+                                        ),
                                     },
                                 },
                                 "required": ["base_url", "username", "password"],
@@ -466,6 +512,11 @@ class SynologyMCPServer:
         base_url = arguments["base_url"]
         username = arguments["username"]
         password = arguments["password"]
+        # Both 2FA fields are optional. When both are supplied, `device_id`
+        # wins (DSM won't ask for OTP on a trusted device). When neither is
+        # supplied, behavior matches pre-2FA support.
+        otp_code = arguments.get("otp_code")
+        device_id = arguments.get("device_id")
 
         # Validate base_url format
         if not self._validate_url(base_url):
@@ -485,7 +536,7 @@ class SynologyMCPServer:
         auth.on_relogin = self._resync_session_after_relogin
 
         # Perform login
-        result = auth.login(username, password)
+        result = auth.login(username, password, otp_code=otp_code, device_id=device_id)
 
         # Store session if successful
         if result.get("success"):

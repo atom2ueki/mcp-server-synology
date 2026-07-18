@@ -488,11 +488,12 @@ The skill is purely additive — it works alongside the MCP and only triggers on
 > **⚠️ Security Warning: Use a Dedicated Account**
 >
 > For this MCP server, create a dedicated Synology user account with appropriate permissions. This account should:
-> - **NOT have 2FA enabled** - The MCP server cannot handle 2FA prompts and will fail authentication
 > - Have minimal required permissions only (not admin!)
 > - Be used exclusively for MCP server automation
->
-> Using your primary account with 2FA is dangerous - if auto-login fails, you may be locked out of your NAS!
+> - **2FA is now supported** — if your DSM account has 2FA enabled, see the
+>   [2FA / OTP Accounts](#2fa--otp-accounts-optional) section below to supply
+>   an `otp_code` (one-shot) or `device_id` (persistent) field. Older guidance
+>   of "no 2FA" is no longer required.
 
 ### Using settings.json (Recommended)
 
@@ -566,6 +567,8 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 | `port` | No | API port (default: 5000 for HTTP, 5001 for HTTPS) |
 | `username` | Yes | NAS username |
 | `password` | Yes | NAS password |
+| `otp_code` | No | One-shot 6-digit 2FA code (first login only, then remove) |
+| `device_id` | No | Long-lived trusted-device token from DSM (`did`); skip OTP on all future logins |
 | `note` | No | Optional description for your reference |
 
 **Notes:**
@@ -586,6 +589,43 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 - Default is `true` for convenience with settings.json
 - Credentials are stored securely in `~/.config/synology-mcp/settings.json` with 0600 permissions
 - If you prefer manual login, set `AUTO_LOGIN=false` and use the `synology_login` tool
+
+**2FA / OTP Accounts (optional):**
+
+The MCP server supports DSM accounts with 2FA enabled. There are two ways to use it:
+
+1. **One-shot OTP via `synology_login` tool** (interactive):
+   ```json
+   { "base_url": "https://nas.lan:5001", "username": "alice", "password": "…", "otp_code": "123456" }
+   ```
+   DSM will return a `did` (device token) in the response — copy that value into `settings.json` (below) to skip OTP on future process restarts.
+
+2. **Persistent trusted-device token** (recommended for `AUTO_LOGIN=true`):
+
+   Add `otp_code` (one-shot, **first login only**) and/or `device_id` (long-lived, ongoing) fields per-NAS in `settings.json`:
+
+   ```json
+   {
+     "synology": {
+       "nas1": {
+         "host": "192.168.1.100", "port": 5001,
+         "username": "alice", "password": "…",
+         "otp_code": "123456",
+         "note": "primary — 2FA enabled"
+       }
+     }
+   }
+   ```
+
+   **Workflow:**
+   1. Set `otp_code` to a fresh 6-digit code from your authenticator and start the server.
+   2. On the first successful login, the server logs a warning line like:
+      `nas1: 2FA bootstrap — copy this device_id into settings.json to skip OTP on future starts: <did>`
+      Copy the `<did>` value.
+   3. Paste it into `device_id` and delete `otp_code`.
+   4. From now on, DSM treats this process as a trusted device — restarts, relogins after DSM error 119, and container-manager sessions all skip OTP.
+
+   When `device_id` is present, it takes precedence over `otp_code` (trusted-device path). Legacy `.env` users can set the one-shot `SYNOLOGY_OTP_CODE` env var; for persistent `device_id`, migrate to `settings.json` (long opaque token doesn't fit an env var cleanly).
 
 ## 📖 Usage Examples
 

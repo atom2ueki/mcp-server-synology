@@ -44,17 +44,28 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard). The file require
 ```json
 {
   "synology": {
-    "nas1": { "host": "192.168.1.100", "port": 5000, "username": "...", "password": "...", "note": "Primary" },
+    "nas1": {
+      "host": "192.168.1.100", "port": 5000,
+      "username": "...", "password": "...",
+      "note": "Primary",
+      "otp_code": "123456",
+      "device_id": "did_returned_by_dsm"
+    },
     "nas2": { "host": "192.168.1.200", "port": 5001, "username": "...", "password": "...", "note": "Backup" }
   }
 }
 ```
 
+`otp_code` and `device_id` are both optional. `device_id` wins over `otp_code`. Workflow: set `otp_code` once → start the server → copy the returned `did` into `device_id` → delete `otp_code`. From then on, OTP is no longer needed.
+
 Port 5001 enables HTTPS; anything else uses HTTP. The `note` is for the user's reference — surface it when listing NAS units to a user, since human-readable notes ("primary", "backup") are easier to reason about than `nas1`/`nas2`.
 
 ## Gotchas
 
-- **2FA**: the server can't handle 2FA prompts. If a NAS is configured with 2FA on the account, login will hang or fail. Tell the user to use a dedicated, non-admin account without 2FA for the MCP. Don't try to work around it.
+- **2FA / OTP**: the server supports DSM accounts with 2FA enabled. Two ways to log in:
+  - Interactive (one-shot): call `synology_login` with an `otp_code` argument. DSM returns a `did` in the response — that value can be pasted into `settings.json` as `device_id` for the next process start.
+  - Persistent: store `device_id` (long-lived trusted-device token) per-NAS in `settings.json`. Auto-login then skips OTP, and silent re-login after DSM error 119 also uses the device token. When `device_id` is set, `otp_code` is ignored.
+  For `.env` legacy single-NAS, `SYNOLOGY_OTP_CODE` is honored as a one-shot code on first login; for ongoing reuse, migrate to `settings.json`.
 - **Session expiry**: long-idle sessions can be invalidated by DSM. If a tool returns a session error, re-running after a `synology_login` usually fixes it. Don't loop on retry — diagnose with `synology_status` first.
 - **Stale `secrets.json` references**: some tool descriptions still say "from secrets.json". The actual file is `settings.json`. This is a docs bug in the MCP, not a config you need to recreate.
 
