@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `synology_disk_smart` never returned SMART attributes. `disk_smart_info()` queried `SYNO.Core.Storage.Disk/get_smart_info`, which does not exist on DSM 6 or 7, and its DSM 6 fallback called `SYNO.Storage.CGI.Smart/get` **without forwarding `extra_params`** — asking DSM for SMART data without naming a disk. On DSM 7.3.2 the tool returned error 103; on DSM 7.1.1 it returned `success: true` with an empty `hddinfo`, so a monitoring caller saw "no problems" from a query that never looked at a drive. The attribute table now comes from `SYNO.Storage.CGI.Smart/get_smart_info` keyed by the disk's **device path** (`device=/dev/sata1`); a bare name is rejected by DSM with error 117, so `disk_id` accepts either the id (`sata1`, `sda`, `nvme0n1`) or a full `/dev` path and is normalized, falling back to a `disk_list()` lookup when the two diverge. Verified against DSM 7.1.1-42962 (DS214play) and DSM 7.3.2-86009 (RS822RP+), returning 19–20 attributes per drive.
+
 ## [1.5.0] - 2026-06-27
 
 ### Added

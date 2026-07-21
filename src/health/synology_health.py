@@ -78,15 +78,36 @@ class SynologyHealth:
             return {"success": True, "data": {"disks": storage["data"].get("disks", [])}}
         return storage
 
+    def _disk_device_path(self, disk_id: str) -> Optional[str]:
+        """Resolve a disk id ("sata1", "sda") to its /dev path via the disk list."""
+        disks = self.disk_list().get("data", {}).get("disks", []) or []
+        for disk in disks:
+            if disk.get("id") == disk_id:
+                return disk.get("device")
+        return None
+
     def disk_smart_info(self, disk_id: str) -> Dict[str, Any]:
-        """Get detailed SMART attributes for a specific disk."""
+        """Get detailed SMART attributes for a specific disk.
+
+        DSM serves the attribute table from SYNO.Storage.CGI.Smart/get_smart_info
+        keyed by the disk's **device path**; a bare name like "sata1" is rejected
+        with error 117. disk_list() reports both forms (`id` and `device`), so
+        accept either here and normalize.
+        """
+        device = disk_id if disk_id.startswith("/dev/") else f"/dev/{disk_id}"
         result = self._api_call(
-            "SYNO.Core.Storage.Disk", "get_smart_info", extra_params={"disk": disk_id}
+            "SYNO.Storage.CGI.Smart", "get_smart_info", extra_params={"device": device}
         )
         if result.get("success"):
             return result
-        # DSM 6 fallback
-        return self._api_call("SYNO.Storage.CGI.Smart", "get")
+        # The constructed path can be wrong where a disk's id and device name
+        # diverge (e.g. external enclosures); resolve it from the disk list.
+        resolved = self._disk_device_path(disk_id)
+        if resolved and resolved != device:
+            return self._api_call(
+                "SYNO.Storage.CGI.Smart", "get_smart_info", extra_params={"device": resolved}
+            )
+        return result
 
     def volume_list(self) -> Dict[str, Any]:
         """List all volumes with status, size, usage, filesystem type."""
