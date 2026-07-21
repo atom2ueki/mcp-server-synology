@@ -246,6 +246,63 @@ class TestSystemInfoFallback:
         assert not result.get("success")
 
 
+class TestDiskSmartInfo:
+    """Unit tests for disk_smart_info API coordinates (no live NAS required)."""
+
+    SMART_OK = {"success": True, "data": {"smartInfo": [{"id": 5, "name": "Realloc_Sector_Ct"}]}}
+
+    def _make_health(self):
+        from health.synology_health import SynologyHealth
+
+        return SynologyHealth("http://nas:5000", "fake-sid", verify_ssl=False)
+
+    def test_queries_smart_cgi_with_device_path(self):
+        """Uses SYNO.Storage.CGI.Smart/get_smart_info keyed by /dev path."""
+        health = self._make_health()
+        with patch.object(health._api, "get", return_value=self.SMART_OK) as mock_get:
+            result = health.disk_smart_info("sata1")
+        assert result == self.SMART_OK
+        mock_get.assert_called_once_with(
+            "SYNO.Storage.CGI.Smart", "get_smart_info", 1, {"device": "/dev/sata1"}
+        )
+
+    def test_device_path_passed_through(self):
+        """An already-qualified /dev path is not prefixed twice."""
+        health = self._make_health()
+        with patch.object(health._api, "get", return_value=self.SMART_OK) as mock_get:
+            health.disk_smart_info("/dev/sda")
+        assert mock_get.call_args[0][3] == {"device": "/dev/sda"}
+
+    def test_resolves_device_via_disk_list(self):
+        """Falls back to the disk list when the constructed path is rejected."""
+        health = self._make_health()
+
+        def side_effect(api, method, version=1, extra_params=None):
+            if api == "SYNO.Core.Storage.Disk" and method == "list":
+                return {"success": True, "data": {"disks": [{"id": "usb1", "device": "/dev/sdq"}]}}
+            if extra_params == {"device": "/dev/sdq"}:
+                return self.SMART_OK
+            return {"success": False, "error": {"code": 117}}
+
+        with patch.object(health._api, "get", side_effect=side_effect):
+            result = health.disk_smart_info("usb1")
+        assert result == self.SMART_OK
+
+    def test_never_queries_without_a_disk(self):
+        """Regression: every SMART call must name a disk (see issue: empty hddinfo)."""
+        health = self._make_health()
+        with patch.object(
+            health._api, "get", return_value={"success": False, "error": {"code": 117}}
+        ) as mock_get:
+            health.disk_smart_info("sata1")
+
+        smart_calls = [c for c in mock_get.call_args_list if c[0][0] == "SYNO.Storage.CGI.Smart"]
+        assert smart_calls, "no SMART API call was made"
+        for call in smart_calls:
+            assert call[0][3], f"SMART call made with no disk parameter: {call}"
+            assert "device" in call[0][3]
+
+
 def test_health_url_construction():
     """Test URL handling in health module."""
     from health.synology_health import SynologyHealth

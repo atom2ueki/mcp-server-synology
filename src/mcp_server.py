@@ -2058,7 +2058,7 @@ class SynologyMCPServer:
                         },
                         "disk_id": {
                             "type": "string",
-                            "description": "Disk identifier (e.g. 'sda', 'sdb') from synology_disk_health output",
+                            "description": "Disk identifier from synology_disk_health output — either the disk id (e.g. 'sata1', 'sda', 'nvme0n1') or its device path (e.g. '/dev/sata1')",
                         },
                     },
                     "required": ["disk_id"],
