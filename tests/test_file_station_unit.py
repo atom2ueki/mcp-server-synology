@@ -275,3 +275,108 @@ class TestSearch:
         monkeypatch.setattr("filestation.synology_filestation.time.sleep", lambda _s: None)
 
         assert len(fs.search_files("/share", ".mpg")) == 1500
+
+class TestGetFileInfoMissingPath:
+    """DSM reports a missing path inside a successful response, not as a failure."""
+
+    def test_raises_on_per_entry_error(self, monkeypatch):
+        fs = make_client()
+        # Exactly what DSM 7.3.2 returns for a path that doesn't exist.
+        monkeypatch.setattr(
+            fs,
+            "_make_request",
+            lambda *a, **k: {"files": [{"code": 408, "path": "/share/nope.mp4"}]},
+        )
+
+        with pytest.raises(Exception, match="File not found"):
+            fs.get_file_info("/share/nope.mp4")
+
+    def test_still_returns_real_entries(self, monkeypatch):
+        fs = make_client()
+        monkeypatch.setattr(
+            fs, "_make_request", lambda *a, **k: {"files": [entry("clip.mp4", size=7)]}
+        )
+
+        assert fs.get_file_info("/share/clip.mp4")["size"] == 7
+
+    def test_empty_file_list_still_raises(self, monkeypatch):
+        fs = make_client()
+        monkeypatch.setattr(fs, "_make_request", lambda *a, **k: {"files": []})
+
+        with pytest.raises(Exception, match="File not found"):
+            fs.get_file_info("/share/nope.mp4")
+
+
+class TestMoveFileRename:
+    """`move_file` accepts a destination that names the file, not just a folder."""
+
+    def build(self, monkeypatch, dirs, files=()):
+        """Client whose filesystem view is the given dirs/files."""
+        fs = make_client()
+        dirs, files = set(dirs), set(files)
+
+        def fake_info(path):
+            if path in dirs:
+                return {"type": "directory", "path": path}
+            if path in files:
+                return {"type": "file", "path": path}
+            raise Exception(f"File not found: {path}")
+
+        calls = []
+        monkeypatch.setattr(fs, "get_file_info", fake_info)
+        monkeypatch.setattr(
+            fs,
+            "rename_file",
+            lambda p, n: calls.append(("rename", p, n)) or {"ok": True},
+        )
+        monkeypatch.setattr(
+            fs,
+            "_move_into_folder",
+            lambda s, d, o: calls.append(("move", s, d)) or {"ok": True},
+        )
+        return fs, calls
+
+    def test_existing_directory_is_a_plain_move(self, monkeypatch):
+        fs, calls = self.build(monkeypatch, dirs={"/share/dst"})
+
+        fs.move_file("/share/src/clip.mp4", "/share/dst")
+
+        assert calls == [("move", "/share/src/clip.mp4", "/share/dst")]
+
+    def test_full_path_renames_then_moves(self, monkeypatch):
+        fs, calls = self.build(monkeypatch, dirs={"/share/src", "/share/dst"})
+
+        fs.move_file("/share/src/clip.mp4", "/share/dst/case_01.mp4")
+
+        assert calls == [
+            ("rename", "/share/src/clip.mp4", "case_01.mp4"),
+            ("move", "/share/src/case_01.mp4", "/share/dst"),
+        ]
+
+    def test_same_directory_is_just_a_rename(self, monkeypatch):
+        fs, calls = self.build(monkeypatch, dirs={"/share/src"})
+
+        fs.move_file("/share/src/clip.mp4", "/share/src/case_01.mp4")
+
+        assert calls == [("rename", "/share/src/clip.mp4", "case_01.mp4")]
+
+    def test_staging_collision_moves_first_then_renames(self, monkeypatch):
+        """If the new name is already taken in the source dir, reverse the order."""
+        fs, calls = self.build(
+            monkeypatch,
+            dirs={"/share/src", "/share/dst"},
+            files={"/share/src/case_01.mp4"},
+        )
+
+        fs.move_file("/share/src/clip.mp4", "/share/dst/case_01.mp4")
+
+        assert calls == [
+            ("move", "/share/src/clip.mp4", "/share/dst"),
+            ("rename", "/share/dst/clip.mp4", "case_01.mp4"),
+        ]
+
+    def test_missing_destination_directory_raises(self, monkeypatch):
+        fs, _ = self.build(monkeypatch, dirs={"/share/src"})
+
+        with pytest.raises(Exception, match="Destination directory does not exist"):
+            fs.move_file("/share/src/clip.mp4", "/share/gone/case_01.mp4")

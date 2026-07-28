@@ -236,6 +236,13 @@ class SynologyFileStation:
             raise Exception(f"File not found: {path}")
 
         file_info = files[0]
+        # DSM does not fail the request for a path that doesn't exist. It answers
+        # `success: true` with a per-entry error instead — `{"code": 408, "path": ...}`
+        # and no `name`/`isdir`. Reporting that as a real file made every existence
+        # check say yes, so surface it as the error it is.
+        if "code" in file_info and "name" not in file_info:
+            raise Exception(f"File not found: {path} (Synology API error: {file_info['code']})")
+
         result = {
             "name": file_info.get("name"),
             "path": file_info.get("path"),
@@ -753,6 +760,13 @@ class SynologyFileStation:
         # For binary files, this would need to be handled differently
         return response.text
 
+    def _is_directory(self, path: str) -> bool:
+        """True if `path` exists and is a directory."""
+        try:
+            return self.get_file_info(path).get("type") == "directory"
+        except Exception:
+            return False
+
     def move_file(
         self, source_path: str, destination_path: str, overwrite: bool = False
     ) -> Dict[str, Any]:
@@ -760,7 +774,8 @@ class SynologyFileStation:
 
         Args:
             source_path: Full path to the file/directory to move
-            destination_path: Destination path (can be directory or full path with new name)
+            destination_path: An existing directory to move into, or a full path
+                whose last segment is the new name
             overwrite: Whether to overwrite existing files at destination
 
         Returns:
@@ -768,6 +783,46 @@ class SynologyFileStation:
         """
         formatted_source = self._format_path(source_path)
         formatted_dest = self._format_path(destination_path)
+
+        # SYNO.FileStation.CopyMove takes `dest_folder_path` and cannot rename on
+        # the way, so a destination ending in a new filename used to fail with
+        # 1002/408. Honour the documented "full path with new name" form by
+        # renaming around the move.
+        if formatted_dest != formatted_source and not self._is_directory(formatted_dest):
+            dest_parent, _, new_name = formatted_dest.rpartition("/")
+            dest_parent = dest_parent or "/"
+            if not self._is_directory(dest_parent):
+                raise Exception(f"Destination directory does not exist: {dest_parent}")
+
+            src_parent, _, src_name = formatted_source.rpartition("/")
+            src_parent = src_parent or "/"
+
+            if src_parent == dest_parent:
+                return self.rename_file(formatted_source, new_name)
+
+            # Rename first so the move can't collide with a same-named file in the
+            # destination; if that name is taken here, move first and rename after.
+            staged = f"{src_parent}/{new_name}"
+            if self._is_directory(staged) or self._path_exists(staged):
+                self._move_into_folder(formatted_source, dest_parent, overwrite)
+                return self.rename_file(f"{dest_parent}/{src_name}", new_name)
+
+            self.rename_file(formatted_source, new_name)
+            return self._move_into_folder(staged, dest_parent, overwrite)
+
+        return self._move_into_folder(formatted_source, formatted_dest, overwrite)
+
+    def _path_exists(self, path: str) -> bool:
+        try:
+            self.get_file_info(path)
+            return True
+        except Exception:
+            return False
+
+    def _move_into_folder(
+        self, formatted_source: str, formatted_dest: str, overwrite: bool
+    ) -> Dict[str, Any]:
+        """Move `formatted_source` into the existing folder `formatted_dest`."""
 
         # Check for critical paths
         self._check_critical_path(formatted_source)
