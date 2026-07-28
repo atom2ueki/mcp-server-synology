@@ -1615,7 +1615,12 @@ class SynologyMCPServer:
             ),
             types.Tool(
                 name="search_files",
-                description="Search for files and directories matching a pattern",
+                description=(
+                    "Recursively search a directory for files and folders whose "
+                    "name contains the given text (case-insensitive substring "
+                    "match). Wildcards are not special - searching for 'report' "
+                    "and '*report*' return the same matches."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1633,7 +1638,10 @@ class SynologyMCPServer:
                         },
                         "pattern": {
                             "type": "string",
-                            "description": "Search pattern (supports wildcards like *.txt)",
+                            "description": (
+                                "Text to look for in the name, e.g. 'invoice' or "
+                                "'.pdf' (case-insensitive substring)"
+                            ),
                         },
                     },
                     "required": ["path", "pattern"],

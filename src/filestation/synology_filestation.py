@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import time
 import unicodedata
 from typing import Any, Dict, List, Optional
 
@@ -121,6 +122,21 @@ class SynologyFileStation:
 
         return data.get("data", {})
 
+    @staticmethod
+    def _extract_size(file_info: Dict[str, Any]) -> int:
+        """Pull the byte size out of a FileStation file entry.
+
+        DSM returns the size inside the `additional` block (because we ask for
+        the `size` field there), not at the top level of the entry. Reading only
+        the top-level key made every file report 0 bytes. Keep the top-level
+        lookup as a fallback for API versions that do inline it.
+        """
+        additional = file_info.get("additional") or {}
+        size = additional.get("size")
+        if size is None:
+            size = file_info.get("size", 0)
+        return size or 0
+
     def _format_path(self, path: str) -> str:
         """Format path for Synology API."""
         if not path.startswith("/"):
@@ -168,7 +184,7 @@ class SynologyFileStation:
                 "name": file_info.get("name"),
                 "path": file_info.get("path"),
                 "type": "directory" if file_info.get("isdir") else "file",
-                "size": file_info.get("size", 0),
+                "size": self._extract_size(file_info),
             }
 
             # Add additional info if available
@@ -224,7 +240,7 @@ class SynologyFileStation:
             "name": file_info.get("name"),
             "path": file_info.get("path"),
             "type": "directory" if file_info.get("isdir") else "file",
-            "size": file_info.get("size", 0),
+            "size": self._extract_size(file_info),
         }
 
         # Add additional info
@@ -256,13 +272,53 @@ class SynologyFileStation:
 
         return result
 
-    def search_files(self, path: str, pattern: str) -> List[Dict[str, Any]]:
-        """Search for files matching a pattern."""
+    # SYNO.FileStation.Search intermittently discards a task right after `start`
+    # returns its id. Measured live on DSM 7.3.2 over 120 tasks: ~40% of tasks
+    # survive, and the failure is independent of session reuse, cleanup strategy
+    # and inter-task delay (0s/1s/2s/4s/8s spacing all landed in the 25-67%
+    # band). The longest run of consecutive discards observed in 60 back-to-back
+    # tasks was 9, so retry generously: at ~60% discard odds, 20 attempts leaves
+    # a ~1-in-30,000 chance of spurious failure. Since spacing doesn't help,
+    # back off only enough to stay polite.
+    SEARCH_MAX_ATTEMPTS = 20
+    SEARCH_RETRY_DELAY = 0.2
+    SEARCH_PAGE_SIZE = 1000
+
+    def search_files(self, path: str, pattern: str, timeout: float = 60.0) -> List[Dict[str, Any]]:
+        """Search for files and folders whose name contains `pattern`.
+
+        DSM matches `pattern` as a case-insensitive substring of the entry name;
+        wildcards carry no special meaning (verified live: `*.dcm`, `dcm` and
+        `*dcm*` all return the same 24 entries). Searching is recursive.
+        """
         formatted_path = self._format_path(path)
 
-        # Start search
+        for _attempt in range(self.SEARCH_MAX_ATTEMPTS):
+            results = self._run_search_task(formatted_path, pattern, timeout)
+            if results is not None:
+                return results
+            # Waiting longer doesn't improve the odds; just don't hammer.
+            time.sleep(self.SEARCH_RETRY_DELAY)
+
+        raise Exception(
+            f"Search failed: DSM discarded the search task "
+            f"{self.SEARCH_MAX_ATTEMPTS} times in a row. This is a known "
+            f"FileStation quirk — retrying usually succeeds."
+        )
+
+    def _run_search_task(
+        self, formatted_path: str, pattern: str, timeout: float
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Run one search task to completion.
+
+        Returns the matches, or None if DSM discarded the task (caller retries).
+        """
         start_data = self._make_request(
-            "SYNO.FileStation.Search", "2", "start", folder_path=formatted_path, pattern=pattern
+            "SYNO.FileStation.Search",
+            "2",
+            "start",
+            folder_path=formatted_path,
+            pattern=pattern,
         )
 
         task_id = start_data.get("taskid")
@@ -270,39 +326,97 @@ class SynologyFileStation:
             raise Exception("Failed to start search task")
 
         try:
-            # Wait for search to complete
-            import time
+            deadline = time.monotonic() + timeout
+            # A live task always echoes `total`/`files`, even while running. A
+            # discarded one answers `{"finished": true}` with neither key — the
+            # same body DSM returns for a taskid that never existed. Require two
+            # consecutive such replies so a momentary blip isn't mistaken for it.
+            consecutive_missing = 0
 
-            while True:
-                status_data = self._make_request(
-                    "SYNO.FileStation.Search", "2", "status", taskid=task_id
-                )
+            while time.monotonic() < deadline:
+                page = self._search_page(task_id, offset=0)
 
-                if status_data.get("finished"):
-                    break
+                if page is None:
+                    consecutive_missing += 1
+                    if consecutive_missing >= 2:
+                        return None
+                    time.sleep(0.3)
+                    continue
 
-                time.sleep(0.5)
+                consecutive_missing = 0
+                if not page.get("finished"):
+                    time.sleep(0.5)
+                    continue
 
-            # Get results
-            result_data = self._make_request("SYNO.FileStation.Search", "2", "list", taskid=task_id)
+                return self._collect_search_results(task_id, page)
 
-            files = result_data.get("files", [])
-            return [
-                {
-                    "name": file_info.get("name"),
-                    "path": file_info.get("path"),
-                    "type": "directory" if file_info.get("isdir") else "file",
-                    "size": file_info.get("size", 0),
-                }
-                for file_info in files
-            ]
+            raise Exception(f"Search timed out after {timeout:.0f}s")
 
         finally:
-            # Clean up search task
+            self._cleanup_search_task(task_id)
+
+    def _search_page(self, task_id: str, offset: int) -> Optional[Dict[str, Any]]:
+        """Fetch one page of search results, or None if the task is gone."""
+        data = self._make_request(
+            "SYNO.FileStation.Search",
+            "2",
+            "list",
+            taskid=task_id,
+            additional=json.dumps(["size", "time", "owner", "perm"]),
+            offset=offset,
+            limit=self.SEARCH_PAGE_SIZE,
+        )
+
+        if "total" not in data and "files" not in data:
+            return None
+        return data
+
+    def _collect_search_results(
+        self, task_id: str, first_page: Dict[str, Any]
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Page through a finished task and format every match.
+
+        Returns None if the task vanishes mid-collection, so the caller
+        restarts with a fresh task — partial results are never returned,
+        since `total` proving more matches exist would make a truncated
+        list look like a complete one. A single odd reply is tolerated;
+        two consecutive missing pages mean the task is gone.
+        """
+        files = list(first_page.get("files", []))
+        total = first_page.get("total", len(files))
+
+        consecutive_missing = 0
+        while len(files) < total:
+            page = self._search_page(task_id, offset=len(files))
+            if page is None:
+                consecutive_missing += 1
+                if consecutive_missing >= 2:
+                    return None
+                time.sleep(0.3)
+                continue
+            consecutive_missing = 0
+            batch = page.get("files", [])
+            if not batch:
+                break
+            files.extend(batch)
+
+        return [
+            {
+                "name": file_info.get("name"),
+                "path": file_info.get("path"),
+                "type": "directory" if file_info.get("isdir") else "file",
+                "size": self._extract_size(file_info),
+            }
+            for file_info in files
+        ]
+
+    def _cleanup_search_task(self, task_id: str) -> None:
+        """Release a search task. `stop` halts it, `clean` frees its slot."""
+        for method in ("stop", "clean"):
             try:
-                self._make_request("SYNO.FileStation.Search", "2", "stop", taskid=task_id)
+                self._make_request("SYNO.FileStation.Search", "2", method, taskid=task_id)
             except Exception:
-                pass  # Ignore cleanup errors
+                pass  # Best-effort cleanup; a failure here must not mask results.
 
     def rename_file(self, path: str, new_name: str) -> Dict[str, Any]:
         """Rename a file or directory.
