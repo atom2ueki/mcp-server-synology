@@ -217,3 +217,61 @@ class TestSearch:
         monkeypatch.setattr(fs, "_make_request", blow_up_on_cleanup)
 
         assert [r["name"] for r in fs.search_files("/share", "ok")] == ["ok.txt"]
+
+    def test_partial_results_are_never_returned(self, monkeypatch):
+        """If the task vanishes mid-pagination, restart with a fresh task
+        instead of returning a truncated list that looks complete."""
+        fs = make_client()
+        many = [entry(f"f{i}.mpg", size=i) for i in range(1500)]
+        state = {"task": 0}
+
+        def vanishing(api, version, method, **params):
+            if method == "start":
+                state["task"] += 1
+                return {"taskid": f"T{state['task']}"}
+            if method == "list":
+                offset = params.get("offset", 0)
+                if state["task"] == 1 and offset > 0:
+                    # Task discarded mid-collection: two consecutive ghost
+                    # replies (the first is tolerated, the second confirms).
+                    return {"finished": True}
+                return {
+                    "finished": True,
+                    "total": len(many),
+                    "files": many[offset : offset + 1000],
+                }
+            return {}
+
+        monkeypatch.setattr(fs, "_make_request", vanishing)
+        monkeypatch.setattr("filestation.synology_filestation.time.sleep", lambda _s: None)
+
+        results = fs.search_files("/share", ".mpg")
+
+        assert len(results) == 1500
+        assert state["task"] == 2, "must restart with a fresh task, not return 1000"
+
+    def test_single_blip_during_pagination_is_tolerated(self, monkeypatch):
+        """One odd reply mid-pagination must not abandon the task."""
+        fs = make_client()
+        many = [entry(f"f{i}.mpg", size=i) for i in range(1500)]
+        state = {"blipped": False}
+
+        def flaky(api, version, method, **params):
+            if method == "start":
+                return {"taskid": "T"}
+            if method == "list":
+                offset = params.get("offset", 0)
+                if offset > 0 and not state["blipped"]:
+                    state["blipped"] = True
+                    return {"finished": True}  # single transient blip
+                return {
+                    "finished": True,
+                    "total": len(many),
+                    "files": many[offset : offset + 1000],
+                }
+            return {}
+
+        monkeypatch.setattr(fs, "_make_request", flaky)
+        monkeypatch.setattr("filestation.synology_filestation.time.sleep", lambda _s: None)
+
+        assert len(fs.search_files("/share", ".mpg")) == 1500

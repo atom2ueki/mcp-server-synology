@@ -373,15 +373,28 @@ class SynologyFileStation:
 
     def _collect_search_results(
         self, task_id: str, first_page: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Page through a finished task and format every match."""
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Page through a finished task and format every match.
+
+        Returns None if the task vanishes mid-collection, so the caller
+        restarts with a fresh task — partial results are never returned,
+        since `total` proving more matches exist would make a truncated
+        list look like a complete one. A single odd reply is tolerated;
+        two consecutive missing pages mean the task is gone.
+        """
         files = list(first_page.get("files", []))
         total = first_page.get("total", len(files))
 
+        consecutive_missing = 0
         while len(files) < total:
             page = self._search_page(task_id, offset=len(files))
             if page is None:
-                break
+                consecutive_missing += 1
+                if consecutive_missing >= 2:
+                    return None
+                time.sleep(0.3)
+                continue
+            consecutive_missing = 0
             batch = page.get("files", [])
             if not batch:
                 break
