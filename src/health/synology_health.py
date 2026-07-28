@@ -108,11 +108,13 @@ class SynologyHealth:
         # diverge (e.g. external enclosures); resolve it from the disk list.
         resolved = self._disk_device_path(disk_id)
         if resolved and resolved != device:
-            retry = self._api_call(
+            # The constructed path was our own guess and the disk list just
+            # proved it wrong, so the resolved device is authoritative: the
+            # retry's result — success or failure — is the real answer.
+            # Surface its error rather than the speculative path's 117.
+            return self._api_call(
                 "SYNO.Storage.CGI.Smart", "get_smart_info", extra_params={"device": resolved}
             )
-            # Keep the original (more specific) error if the retry also fails.
-            return retry if retry.get("success") else result
         return result
 
     def volume_list(self) -> Dict[str, Any]:

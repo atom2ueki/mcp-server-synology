@@ -311,21 +311,22 @@ class TestDiskSmartInfo:
         assert result == fail
         assert mock_get.call_count == 1
 
-    def test_failed_retry_preserves_original_error(self):
-        """If the disk-list retry also fails, the original error is returned."""
+    def test_failed_retry_surfaces_retry_error(self):
+        """Once the disk list resolves the authoritative device, the retry's
+        error is the real failure — the speculative path's 117 is discarded."""
         health = self._make_health()
-        original = {"success": False, "error": {"code": 117}}
+        retry_fail = {"success": False, "error": {"code": "network_error"}}
 
         def side_effect(api, method, version=1, extra_params=None):
             if api == "SYNO.Core.Storage.Disk" and method == "list":
                 return {"success": True, "data": {"disks": [{"id": "usb1", "device": "/dev/sdq"}]}}
             if extra_params == {"device": "/dev/sdq"}:
-                return {"success": False, "error": {"code": "network_error"}}
-            return original
+                return retry_fail
+            return {"success": False, "error": {"code": 117}}
 
         with patch.object(health._api, "get", side_effect=side_effect):
             result = health.disk_smart_info("usb1")
-        assert result == original
+        assert result == retry_fail
 
 
 def test_health_url_construction():
