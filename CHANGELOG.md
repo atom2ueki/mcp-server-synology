@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- `list_directory` and `get_file_info` reported **every file as 0 bytes**. DSM returns the byte count inside the entry's `additional` block (which is where we ask for the `size` field), but both handlers only read a top-level `size` key that DSM never populates. Sizes are now read from `additional.size`, falling back to the top-level key for API versions that inline it.
+- `search_files` always failed with `Synology API error: 103` ("no such method"). It polled `SYNO.FileStation.Search`'s `status` method, which does not exist on DSM 7.3.2 — the `list` method reports completion via its own `finished` flag. Polling now goes through `list`, and cleanup calls `clean` as well as `stop` to release the task slot.
+- `search_files` now retries when DSM discards a freshly started search task. Measured live on DSM 7.3.2, roughly 60% of tasks vanish immediately after `start` returns their id, answering `{"finished": true}` with no `total`/`files` — indistinguishable from an unknown taskid. The retry loop makes results deterministic; without it, a single search silently returned 0 matches most of the time.
+- `search_files` pages through results instead of returning only the first page, and its matches now carry real byte sizes.
+
+### Changed
+- `search_files` documents DSM's actual matching rule: `pattern` is a case-insensitive **substring** of the entry name, and wildcards are not special (`*.dcm`, `dcm` and `*dcm*` all return the same entries). The tool description previously advertised glob-style wildcards.
+
 ## [1.5.0] - 2026-06-27
 
 ### Added

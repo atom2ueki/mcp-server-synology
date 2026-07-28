@@ -321,9 +321,9 @@ docker-compose up
   - `path` (required): Directory path starting with `/`
 - **`get_file_info`** - Get detailed file/directory information
   - `path` (required): File path starting with `/`
-- **`search_files`** - Search files matching pattern
+- **`search_files`** - Recursively search for files and folders by name
   - `path` (required): Search directory
-  - `pattern` (required): Search pattern (e.g., `*.pdf`)
+  - `pattern` (required): Case-insensitive substring of the name (e.g., `invoice`, `.pdf`). Wildcards are not special — DSM matches `report` and `*report*` identically.
 - **`create_file`** - Create new files with content
   - `path` (required): Full file path starting with `/`
   - `content` (optional): File content (default: empty string)
