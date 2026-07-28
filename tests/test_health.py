@@ -302,6 +302,31 @@ class TestDiskSmartInfo:
             assert call[0][3], f"SMART call made with no disk parameter: {call}"
             assert "device" in call[0][3]
 
+    def test_dev_path_failure_skips_disk_list(self):
+        """A rejected /dev path is returned as-is; no disk_list lookup is wasted."""
+        health = self._make_health()
+        fail = {"success": False, "error": {"code": 117}}
+        with patch.object(health._api, "get", return_value=fail) as mock_get:
+            result = health.disk_smart_info("/dev/sdq")
+        assert result == fail
+        assert mock_get.call_count == 1
+
+    def test_failed_retry_preserves_original_error(self):
+        """If the disk-list retry also fails, the original error is returned."""
+        health = self._make_health()
+        original = {"success": False, "error": {"code": 117}}
+
+        def side_effect(api, method, version=1, extra_params=None):
+            if api == "SYNO.Core.Storage.Disk" and method == "list":
+                return {"success": True, "data": {"disks": [{"id": "usb1", "device": "/dev/sdq"}]}}
+            if extra_params == {"device": "/dev/sdq"}:
+                return {"success": False, "error": {"code": "network_error"}}
+            return original
+
+        with patch.object(health._api, "get", side_effect=side_effect):
+            result = health.disk_smart_info("usb1")
+        assert result == original
+
 
 def test_health_url_construction():
     """Test URL handling in health module."""

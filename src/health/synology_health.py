@@ -100,13 +100,19 @@ class SynologyHealth:
         )
         if result.get("success"):
             return result
+        # A rejected full /dev path can't be improved by the disk list (the
+        # list can only resolve bare ids), so don't pay for the extra call.
+        if disk_id.startswith("/dev/"):
+            return result
         # The constructed path can be wrong where a disk's id and device name
         # diverge (e.g. external enclosures); resolve it from the disk list.
         resolved = self._disk_device_path(disk_id)
         if resolved and resolved != device:
-            return self._api_call(
+            retry = self._api_call(
                 "SYNO.Storage.CGI.Smart", "get_smart_info", extra_params={"device": resolved}
             )
+            # Keep the original (more specific) error if the retry also fails.
+            return retry if retry.get("success") else result
         return result
 
     def volume_list(self) -> Dict[str, Any]:
