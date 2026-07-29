@@ -38,10 +38,69 @@ class SynologyFileStation:
             headers["X-SYNO-TOKEN"] = self.syno_token
         return headers
 
+    def _relogin_and_refresh(self) -> bool:
+        """Re-authenticate via the SynologyAuth registered for this base_url.
+
+        On success, refreshes this instance's `_sid` / X-SYNO-TOKEN and returns
+        True. Returns False when no auth is registered (e.g. standalone use) or
+        the relogin fails, in which case the caller keeps the original error.
+
+        Import is deferred to runtime to avoid a circular import
+        (auth -> filestation).
+        """
+        try:
+            from auth.synology_auth import get_auth_for_url
+        except ImportError:
+            return False
+        auth = get_auth_for_url(self.base_url)
+        if auth is None or not auth.relogin():
+            return False
+        self.session_id = auth.current_session_id
+        self.syno_token = auth.current_syno_token
+        return True
+
     def _make_request(
         self, api: str, version: str, method: str, use_post: bool = False, **params
     ) -> Dict[str, Any]:
-        """Make a request to Synology API."""
+        """Make a request to Synology API.
+
+        Recovers transparently from DSM error 119 ("SID not found") — returned
+        once the server-side session dies (idle expiry, or a DSM reboot which
+        drops every session). FileStation keeps its own SID, so it needs the
+        same single-retry re-auth that SynologyAPIClient performs; otherwise the
+        SID stays dead until the process is restarted.
+        """
+        data = self._send(api, version, method, use_post, params)
+
+        if not data.get("success") and data.get("error", {}).get("code") == 119:
+            if self._relogin_and_refresh():
+                data = self._send(api, version, method, use_post, params)
+
+        if not data.get("success"):
+            error_code = data.get("error", {}).get("code", "unknown")
+            error_info = data.get("error", {})
+
+            # Include detailed error information if available
+            error_message = f"Synology API error: {error_code}"
+
+            # Check for detailed errors array as mentioned in documentation
+            if "errors" in error_info and error_info["errors"]:
+                detailed_errors = []
+                for err in error_info["errors"]:
+                    err_detail = f"Code {err.get('code', 'unknown')}"
+                    if "path" in err:
+                        err_detail += f" for path: {err['path']}"
+                    detailed_errors.append(err_detail)
+                error_message += f" - Details: {'; '.join(detailed_errors)}"
+
+            raise Exception(error_message)
+
+        return data.get("data", {})
+
+    def _send(
+        self, api: str, version: str, method: str, use_post: bool, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Internal: perform the HTTP call and return the parsed body, no retry."""
         request_params = {
             "api": api,
             "version": version,
@@ -68,27 +127,7 @@ class SynologyFileStation:
             )
         response.raise_for_status()
 
-        data = response.json()
-        if not data.get("success"):
-            error_code = data.get("error", {}).get("code", "unknown")
-            error_info = data.get("error", {})
-
-            # Include detailed error information if available
-            error_message = f"Synology API error: {error_code}"
-
-            # Check for detailed errors array as mentioned in documentation
-            if "errors" in error_info and error_info["errors"]:
-                detailed_errors = []
-                for err in error_info["errors"]:
-                    err_detail = f"Code {err.get('code', 'unknown')}"
-                    if "path" in err:
-                        err_detail += f" for path: {err['path']}"
-                    detailed_errors.append(err_detail)
-                error_message += f" - Details: {'; '.join(detailed_errors)}"
-
-            raise Exception(error_message)
-
-        return data.get("data", {})
+        return response.json()
 
     def _make_upload_request(
         self, api: str, version: str, method: str, files: Dict[str, Any], **params
