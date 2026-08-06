@@ -49,6 +49,70 @@ class SynologyMCPServer:
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
         self._setup_handlers()
 
+    def _login_nas(self, nas_name: Optional[str]) -> str:
+        """Log in to a configured NAS and return its base_url.
+
+        Single login path shared by startup auto-login and the on-demand login
+        in _get_base_url, so the two cannot drift apart. Raises with the DSM
+        error code on failure; callers decide whether that is fatal.
+        """
+        nas_cfg = config.get_synology_config(nas_name)
+        base_url = nas_cfg["base_url"]
+        label = nas_name or "default"
+
+        if base_url not in self.auth_instances:
+            self.auth_instances[base_url] = SynologyAuth(base_url, verify_ssl=config.verify_ssl)
+
+        auth = self.auth_instances[base_url]
+        auth.on_relogin = self._resync_session_after_relogin
+        # Optional 2FA material from settings.json (or legacy .env for
+        # otp_code). device_id wins over otp_code; both None means the DSM
+        # account has 2FA off.
+        result = auth.login(
+            nas_cfg["username"],
+            nas_cfg["password"],
+            otp_code=nas_cfg.get("otp_code"),
+            device_id=nas_cfg.get("device_id"),
+        )
+
+        if not result.get("success"):
+            code = result.get("error", {}).get("code", "?")
+            raise Exception(
+                f"Login to NAS '{label}' failed (DSM error code {code}). "
+                "Common codes: 400 bad account/password, 401 account disabled, "
+                "402 permission denied (the account may lack DSM application "
+                "access), 403 2FA required, 404 2FA code failed."
+            )
+
+        session_id = result["data"]["sid"]
+        self.sessions[base_url] = session_id
+        syno_token = result["data"].get("synotoken")
+        if syno_token:
+            self.syno_tokens[base_url] = syno_token
+        else:
+            self.syno_tokens.pop(base_url, None)
+
+        # Store the name->url mapping for tool resolution.
+        self.nas_name_map[label] = base_url
+        if nas_name is None:
+            self.nas_name_map[base_url] = base_url
+
+        # Surface the DSM device token so users can copy it into settings.json
+        # (`device_id`) to skip OTP on future starts. Only present on the
+        # first-time OTP login.
+        did = result["data"].get("did")
+        if did:
+            logger.warning(
+                f"{label}: 2FA bootstrap - copy this device_id into "
+                f"settings.json to skip OTP on future starts: {did}"
+            )
+        logger.info(f"{label}: session {session_id[:8]}...")
+
+        for inst_dict in self._service_instance_dicts():
+            inst_dict.pop(base_url, None)
+
+        return base_url
+
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
         if base_url not in self.sessions:
@@ -163,65 +227,12 @@ class SynologyMCPServer:
 
         success_count = 0
         for nas_name in nas_names:
+            label = nas_name or "default"
             try:
-                nas_cfg = config.get_synology_config(nas_name)
-                base_url = nas_cfg["base_url"]
-                label = nas_name or "default"
-
-                logger.info(f"Auto-login: {label} ({base_url})...")
-
-                if base_url not in self.auth_instances:
-                    self.auth_instances[base_url] = SynologyAuth(
-                        base_url, verify_ssl=config.verify_ssl
-                    )
-
-                auth = self.auth_instances[base_url]
-                auth.on_relogin = self._resync_session_after_relogin
-                # Pass optional 2FA material from settings.json (or legacy .env
-                # for otp_code). device_id wins over otp_code; both None means
-                # the DSM account has 2FA off (existing behavior).
-                result = auth.login(
-                    nas_cfg["username"],
-                    nas_cfg["password"],
-                    otp_code=nas_cfg.get("otp_code"),
-                    device_id=nas_cfg.get("device_id"),
-                )
-
-                if result.get("success"):
-                    session_id = result["data"]["sid"]
-                    self.sessions[base_url] = session_id
-                    syno_token = result["data"].get("synotoken")
-                    if syno_token:
-                        self.syno_tokens[base_url] = syno_token
-                    else:
-                        self.syno_tokens.pop(base_url, None)
-                    # Store the name->url mapping for tool resolution
-                    self.nas_name_map[label] = base_url
-                    if nas_name is None:
-                        self.nas_name_map[base_url] = base_url
-                    # Surface the DSM device token so users can copy it into
-                    # settings.json (`device_id`) to skip OTP on future starts.
-                    # Only present when DSM issued one — i.e. the first-time
-                    # OTP login (the steady-state `device_id` path doesn't
-                    # echo it back). Logged in full because (a) the value
-                    # is destined for settings.json anyway and (b) it's
-                    # useless without the password, so truncation provides
-                    # no meaningful protection.
-                    did = result["data"].get("did")
-                    if did:
-                        logger.warning(
-                            f"{label}: 2FA bootstrap — copy this device_id into "
-                            f"settings.json to skip OTP on future starts: {did}"
-                        )
-                    logger.info(f"{label}: session {session_id[:8]}...")
-
-                    for inst_dict in self._service_instance_dicts():
-                        inst_dict.pop(base_url, None)
-                    success_count += 1
-                else:
-                    error_code = result.get("error", {}).get("code", "?")
-                    logger.warning(f"{label}: login failed (code {error_code})")
-
+                logger.info(f"Auto-login: {label}...")
+                base_url = self._login_nas(nas_name)
+                logger.info(f"{label}: session established ({base_url})")
+                success_count += 1
             except Exception as e:
                 logger.warning(f"{nas_name or 'default'}: {e}")
                 if config.debug:
@@ -440,7 +451,7 @@ class SynologyMCPServer:
             self.usermgr_instances,
         )
 
-    def _get_base_url(self, arguments: dict) -> str:
+    def _get_base_url(self, arguments: dict, *, allow_login: bool = True) -> str:
         """Get base URL from arguments or config.
 
         Accepts either:
@@ -452,8 +463,42 @@ class SynologyMCPServer:
         nas_name = arguments.get("nas_name")
         if nas_name:
             base_url = self.nas_name_map.get(nas_name)
-            if base_url:
+            # The mapping outlives the session: synology_logout drops the
+            # session but leaves the name mapped. Returning the URL anyway
+            # would bypass the on-demand login below and fail downstream with
+            # "No active session", so lazy login would work exactly once per
+            # process. When no login is permitted (logout) the URL is still the
+            # right answer, and the caller reports the missing session itself.
+            if base_url and (base_url in self.sessions or not allow_login):
                 return base_url
+            # nas_name_map is populated only by startup auto-login, so with
+            # AUTO_LOGIN=false every nas_name call fails here and the only way
+            # in is synology_login -- which takes the password as a tool
+            # argument, so an MCP client writes it into its transcript. The
+            # credentials are already configured, so log in from them on demand
+            # and keep them inside the server.
+            if allow_login:
+                configured_name = nas_name if nas_name in config.nas_configs else None
+                target_url = None
+                if configured_name is not None:
+                    target_url = config.get_synology_config(configured_name).get("base_url")
+                elif not config.nas_configs and config.has_synology_credentials():
+                    # Legacy single-NAS setups have no settings.json entries;
+                    # _handle_list_nas surfaces them as "default" or the bare URL.
+                    legacy_url = config.get_synology_config(None).get("base_url")
+                    if nas_name in ("default", legacy_url):
+                        target_url = legacy_url
+
+                if target_url:
+                    # A session may already exist for this URL without the name
+                    # being mapped -- synology_login establishes one but does
+                    # not touch nas_name_map. Logging in again would overwrite
+                    # the tracked SID and strand that first session, leaving it
+                    # open on the NAS and unreachable by logout.
+                    if target_url in self.sessions:
+                        self.nas_name_map[nas_name] = target_url
+                        return target_url
+                    return self._login_nas(configured_name)
             raise Exception(
                 f"NAS '{nas_name}' not found. Available: {list(self.nas_name_map.keys())}"
             )
@@ -569,7 +614,10 @@ class SynologyMCPServer:
 
     async def _handle_logout(self, arguments: dict) -> list[types.TextContent]:
         """Handle Synology logout."""
-        base_url = self._get_base_url(arguments)
+        # Never log in just to log out: that would create a DSM session purely
+        # to tear it down, and can trip OTP failures, lockout counters and
+        # login audit events on a NAS the user never meant to touch.
+        base_url = self._get_base_url(arguments, allow_login=False)
 
         if base_url not in self.sessions:
             return [types.TextContent(type="text", text=f"No active session found for {base_url}")]

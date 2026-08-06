@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 import unicodedata
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -149,19 +150,57 @@ class SynologyFileStation:
         return path
 
     def list_shares(self) -> List[Dict[str, Any]]:
-        """List all available shares."""
-        data = self._make_request("SYNO.FileStation.List", "2", "list_share")
+        """List all available shares, with timestamps.
+
+        The `time` additional is requested because a share's access time is
+        often the only externally visible proof that a scheduled job touched it.
+        Active Backup for Google Workspace exposes no task-state API at all
+        (verified against SYNO.API.Info query=all on DSM 7.3.2 — only the
+        restore-portal APIs exist), so the backup destination share's atime is
+        the sole signal available through this server that last night's run
+        happened. Dropping these fields forced callers out to hand-rolled DSM
+        API scripts to get at them.
+
+        DSM 7.3.2 silently ignores the comma-string form of `additional`; it
+        must be a JSON array (the same quirk already documented in
+        list_directory).
+        """
+        data = self._make_request(
+            "SYNO.FileStation.List", "2", "list_share", additional=json.dumps(["time"])
+        )
         shares = data.get("shares", [])
 
-        return [
-            {
+        result: List[Dict[str, Any]] = []
+        for share in shares:
+            entry: Dict[str, Any] = {
                 "name": share.get("name"),
                 "path": share.get("path"),
                 "description": share.get("desc", ""),
                 "is_writable": share.get("iswritable", False),
             }
-            for share in shares
-        ]
+            times = (share.get("additional") or {}).get("time") or {}
+            for key in ("atime", "mtime", "ctime", "crtime"):
+                epoch = times.get(key)
+                if epoch is None:
+                    continue
+                entry[key] = epoch
+                try:
+                    # UTC, with an explicit offset. A naive local-time string
+                    # would be read in whatever timezone the consumer assumes,
+                    # which is wrong whenever the MCP host and the reader differ
+                    # (a container running in UTC is the common case) and can
+                    # land on the wrong date entirely. The raw epoch is kept
+                    # alongside it for anyone who wants to localise themselves.
+                    entry[f"{key}_iso"] = (
+                        datetime.fromtimestamp(epoch, tz=timezone.utc)
+                        .isoformat(timespec="seconds")
+                        .replace("+00:00", "Z")
+                    )
+                except (OverflowError, OSError, ValueError):
+                    # A nonsense epoch must not take down the whole listing.
+                    pass
+            result.append(entry)
+        return result
 
     def list_directory(self, path: str, additional_info: bool = True) -> List[Dict[str, Any]]:
         """List contents of a directory."""
