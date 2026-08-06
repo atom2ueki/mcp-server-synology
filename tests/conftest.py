@@ -5,6 +5,28 @@ from pathlib import Path
 
 import pytest
 
+# This file prints emoji in its session banners. On a console using a legacy
+# codepage (Windows cp1252 is the common case) that raises UnicodeEncodeError
+# inside pytest_sessionstart, which pytest reports as INTERNALERROR and which
+# aborts the whole run before a single test executes -- a decorative banner
+# taking down the suite. Reconfiguring sys.stdout at import time does not help,
+# because pytest replaces the stream with its own capture object afterwards, so
+# encode defensively at each call instead.
+_builtin_print = print
+
+
+def print(*args, **kwargs):  # noqa: A001 - deliberately shadowing within conftest
+    """print() that degrades unencodable characters instead of raising."""
+    try:
+        _builtin_print(*args, **kwargs)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        safe = [
+            str(a).encode(encoding, errors="replace").decode(encoding, errors="replace")
+            for a in args
+        ]
+        _builtin_print(*safe, **kwargs)
+
 # Add src directory to Python path
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))

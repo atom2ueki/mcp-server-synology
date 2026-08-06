@@ -15,6 +15,22 @@ def reload_config():
         del sys.modules[mod]
 
 
+# Variables Windows needs in order to resolve a home directory. Clearing the
+# whole environment breaks Path("~").expanduser() on Windows -- POSIX falls back
+# to the pwd database, Windows has nothing to fall back to and raises
+# RuntimeError("Could not determine home directory"), which failed 9 tests here
+# for reasons unrelated to what they assert. Keep these; none of them influence
+# any SYNOLOGY_* lookup under test.
+_HOME_VARS = ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME", "SYSTEMROOT", "SystemRoot")
+
+
+def clear_env(**overrides):
+    """patch.dict(os.environ, ..., clear=True) that still leaves a home directory."""
+    preserved = {k: os.environ[k] for k in _HOME_VARS if k in os.environ}
+    preserved.update(overrides)
+    return patch.dict(os.environ, preserved, clear=True)
+
+
 class TestSynologyConfig:
     """Test Synology configuration loading and validation."""
 
@@ -45,7 +61,7 @@ class TestSynologyConfig:
         """Test default configuration values."""
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -77,7 +93,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -102,7 +118,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -132,7 +148,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -150,7 +166,7 @@ class TestSynologyConfig:
         # load_dotenv(".env") at construction time, which re-injects whatever
         # is in the developer's local .env. Patch os.path.exists so the loader
         # treats the project as having no .env.
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch("config.os.path.exists", return_value=False):
                     with patch.object(Path, "exists", return_value=False):
@@ -202,7 +218,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -221,7 +237,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -249,7 +265,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -279,7 +295,7 @@ class TestFilePermissions:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clear_env():
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
