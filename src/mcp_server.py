@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 import mcp.server.stdio
 import mcp.types as types
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
+from mcp.types import CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams
 
 from auth import SynologyAuth
 from config import config
@@ -36,7 +37,6 @@ class SynologyMCPServer:
     """MCP Server for Synology NAS operations."""
 
     def __init__(self):
-        self.server = Server(config.server_name)
         self.auth_instances: Dict[str, SynologyAuth] = {}
         self.sessions: Dict[str, str] = {}  # base_url -> session_id
         self.syno_tokens: Dict[str, str] = {}  # base_url -> SynoToken (CSRF, DSM 7.3.2+)
@@ -47,7 +47,40 @@ class SynologyMCPServer:
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
-        self._setup_handlers()
+        self.server = self._create_server()
+
+    def _create_server(self) -> Server:
+        """Create the MCP server with mcp 2.0 constructor-style handlers.
+
+        mcp 2.0 removed the decorator API (`@server.list_tools()` /
+        `@server.call_tool()`); handlers are now passed as constructor
+        callbacks. The async wrappers below adapt the callback signatures
+        (`ctx, params`) to the existing handler methods.
+        """
+
+        async def on_list_tools(
+            ctx: ServerRequestContext, params: Optional[PaginatedRequestParams]
+        ) -> ListToolsResult:
+            return ListToolsResult(tools=self._get_tool_definitions())
+
+        async def on_call_tool(
+            ctx: ServerRequestContext, params: CallToolRequestParams
+        ) -> CallToolResult:
+            try:
+                content = await self._dispatch_tool(params.name, params.arguments or {})
+                return CallToolResult(content=content)
+            except Exception as e:
+                return CallToolResult(
+                    content=[types.TextContent(type="text", text=f"Error executing {params.name}: {e!s}")],
+                    is_error=True,
+                )
+
+        return Server(
+            config.server_name,
+            version=config.server_version,
+            on_list_tools=on_list_tools,
+            on_call_tool=on_call_tool,
+        )
 
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
@@ -231,199 +264,127 @@ class SynologyMCPServer:
             raise Exception("Auto-login failed for all configured NAS units — stopping server.")
         logger.info(f"Connected to {success_count}/{len(nas_names)} NAS unit(s)")
 
-    def _setup_handlers(self):
-        """Setup MCP server handlers."""
+    async def _dispatch_tool(
+        self, name: str, arguments: dict
+    ) -> list[types.TextContent]:
+        """Dispatch a tool call, raising on failure (caller handles isError)."""
+        logger.debug(f"Executing tool: {name}")
+        if name == "synology_login":
+            return await self._handle_login(arguments)
+        elif name == "synology_logout":
+            return await self._handle_logout(arguments)
+        elif name == "synology_status":
+            return await self._handle_status(arguments)
+        elif name == "synology_list_nas":
+            return await self._handle_list_nas(arguments)
+        elif name == "list_shares":
+            return await self._handle_list_shares(arguments)
+        elif name == "list_directory":
+            return await self._handle_list_directory(arguments)
+        elif name == "get_file_info":
+            return await self._handle_get_file_info(arguments)
+        elif name == "search_files":
+            return await self._handle_search_files(arguments)
+        elif name == "get_file_content":
+            return await self._handle_get_file_content(arguments)
+        elif name == "rename_file":
+            return await self._handle_rename_file(arguments)
+        elif name == "move_file":
+            return await self._handle_move_file(arguments)
+        elif name == "create_file":
+            return await self._handle_create_file(arguments)
+        elif name == "create_directory":
+            return await self._handle_create_directory(arguments)
+        elif name == "delete":
+            return await self._handle_delete(arguments)
+        # Download Station handlers
+        elif name == "ds_get_info":
+            return await self._handle_ds_get_info(arguments)
+        elif name == "ds_list_tasks":
+            return await self._handle_ds_list_tasks(arguments)
+        elif name == "ds_create_task":
+            return await self._handle_ds_create_task(arguments)
+        elif name == "ds_pause_tasks":
+            return await self._handle_ds_pause_tasks(arguments)
+        elif name == "ds_resume_tasks":
+            return await self._handle_ds_resume_tasks(arguments)
+        elif name == "ds_delete_tasks":
+            return await self._handle_ds_delete_tasks(arguments)
+        elif name == "ds_get_statistics":
+            return await self._handle_ds_get_statistics(arguments)
+        elif name == "ds_list_downloaded_files":
+            return await self._handle_ds_list_downloaded_files(arguments)
+        # Health monitoring handlers
+        elif name == "synology_system_info":
+            return await self._handle_health_call(arguments, "system_info")
+        elif name == "synology_utilization":
+            return await self._handle_health_call(arguments, "utilization")
+        elif name == "synology_disk_health":
+            return await self._handle_health_call(arguments, "disk_list")
+        elif name == "synology_disk_smart":
+            return await self._handle_disk_smart(arguments)
+        elif name == "synology_volume_status":
+            return await self._handle_health_call(arguments, "volume_list")
+        elif name == "synology_storage_pool":
+            return await self._handle_health_call(arguments, "storage_pool_list")
+        elif name == "synology_network":
+            return await self._handle_health_call(arguments, "network_info")
+        elif name == "synology_ups":
+            return await self._handle_health_call(arguments, "ups_info")
+        elif name == "synology_services":
+            return await self._handle_health_call(arguments, "package_list")
+        elif name == "synology_system_log":
+            return await self._handle_system_log(arguments)
+        elif name == "synology_health_summary":
+            return await self._handle_health_call(arguments, "health_summary")
+        # Container Manager handlers
+        elif name.startswith("synology_container_"):
+            return await self._handle_container_call(
+                arguments, name.removeprefix("synology_container_")
+            )
+        # NFS management handlers
+        elif name == "synology_nfs_status":
+            return await self._handle_nfs_call(arguments, "nfs_status")
+        elif name == "synology_nfs_enable":
+            return await self._handle_nfs_enable(arguments)
+        elif name == "synology_nfs_list_shares":
+            return await self._handle_nfs_call(arguments, "list_shares")
+        elif name == "synology_nfs_set_permission":
+            return await self._handle_nfs_set_permission(arguments)
+        elif name == "synology_create_share":
+            return await self._handle_create_share(arguments)
+        # User management handlers
+        elif name == "synology_list_users":
+            return await self._handle_usermgr_call(arguments, "list_users")
+        elif name == "synology_get_user":
+            return await self._handle_usermgr_get_user(arguments)
+        elif name == "synology_create_user":
+            return await self._handle_usermgr_create_user(arguments)
+        elif name == "synology_set_user":
+            return await self._handle_usermgr_set_user(arguments)
+        elif name == "synology_delete_user":
+            return await self._handle_usermgr_delete_user(arguments)
+        elif name == "synology_list_groups":
+            return await self._handle_usermgr_call(arguments, "list_groups")
+        elif name == "synology_list_group_members":
+            return await self._handle_usermgr_list_group_members(arguments)
+        elif name == "synology_add_user_to_group":
+            return await self._handle_usermgr_add_to_group(arguments)
+        elif name == "synology_remove_user_from_group":
+            return await self._handle_usermgr_remove_from_group(arguments)
+        elif name == "synology_get_user_permissions":
+            return await self._handle_usermgr_get_permissions(arguments)
+        elif name == "synology_set_user_permissions":
+            return await self._handle_usermgr_set_permissions(arguments)
+        else:
+            raise ValueError(f"Unknown tool: {name}")
 
-        @self.server.list_tools()
-        async def handle_list_tools() -> list[types.Tool]:
-            """List available Synology tools."""
-            tools = self._get_tool_definitions()
-
-            # Add login/logout tools only if not using auto-login or no credentials configured
-            if not config.auto_login or not config.has_synology_credentials():
-                tools.extend(
-                    [
-                        types.Tool(
-                            name="synology_login",
-                            description=(
-                                "Authenticate with Synology NAS and establish session.\n\n"
-                                "2FA/OTP accounts: pass `otp_code` on the first login only; "
-                                "DSM will issue a `device_id` in the response, which you can "
-                                "persist into settings.json to skip OTP on future logins. If "
-                                "you already have a `device_id`, pass it instead of `otp_code` "
-                                "— DSM treats trusted devices as already authenticated."
-                            ),
-                            inputSchema={
-                                "type": "object",
-                                "properties": {
-                                    "base_url": {
-                                        "type": "string",
-                                        "description": "Synology NAS base URL (e.g., https://192.168.1.100:5001)",
-                                    },
-                                    "username": {
-                                        "type": "string",
-                                        "description": "Username for authentication",
-                                    },
-                                    "password": {
-                                        "type": "string",
-                                        "description": "Password for authentication",
-                                    },
-                                    "otp_code": {
-                                        "type": "string",
-                                        "description": (
-                                            "One-time 6-digit code from the user's authenticator. "
-                                            "Required only on the first 2FA login for a new device. "
-                                            "Ignored when `device_id` is also given."
-                                        ),
-                                    },
-                                    "device_id": {
-                                        "type": "string",
-                                        "description": (
-                                            "Long-lived trusted-device token previously issued by DSM "
-                                            "(returned as `did` in a successful 2FA login). When "
-                                            "supplied, DSM skips the OTP step. Preferred over "
-                                            "`otp_code` for repeated logins."
-                                        ),
-                                    },
-                                },
-                                "required": ["base_url", "username", "password"],
-                            },
-                        ),
-                        types.Tool(
-                            name="synology_logout",
-                            description="Logout from Synology NAS session",
-                            inputSchema={
-                                "type": "object",
-                                "properties": {
-                                    "base_url": {
-                                        "type": "string",
-                                        "description": "Synology NAS base URL",
-                                    }
-                                },
-                                "required": ["base_url"],
-                            },
-                        ),
-                    ]
-                )
-
-            return tools
-
-        @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-            """Handle tool calls."""
-            try:
-                logger.debug(f"Executing tool: {name}")
-                if name == "synology_login":
-                    return await self._handle_login(arguments)
-                elif name == "synology_logout":
-                    return await self._handle_logout(arguments)
-                elif name == "synology_status":
-                    return await self._handle_status(arguments)
-                elif name == "synology_list_nas":
-                    return await self._handle_list_nas(arguments)
-                elif name == "list_shares":
-                    return await self._handle_list_shares(arguments)
-                elif name == "list_directory":
-                    return await self._handle_list_directory(arguments)
-                elif name == "get_file_info":
-                    return await self._handle_get_file_info(arguments)
-                elif name == "search_files":
-                    return await self._handle_search_files(arguments)
-                elif name == "get_file_content":
-                    return await self._handle_get_file_content(arguments)
-                elif name == "rename_file":
-                    return await self._handle_rename_file(arguments)
-                elif name == "move_file":
-                    return await self._handle_move_file(arguments)
-                elif name == "create_file":
-                    return await self._handle_create_file(arguments)
-                elif name == "create_directory":
-                    return await self._handle_create_directory(arguments)
-                elif name == "delete":
-                    return await self._handle_delete(arguments)
-                # Download Station handlers
-                elif name == "ds_get_info":
-                    return await self._handle_ds_get_info(arguments)
-                elif name == "ds_list_tasks":
-                    return await self._handle_ds_list_tasks(arguments)
-                elif name == "ds_create_task":
-                    return await self._handle_ds_create_task(arguments)
-                elif name == "ds_pause_tasks":
-                    return await self._handle_ds_pause_tasks(arguments)
-                elif name == "ds_resume_tasks":
-                    return await self._handle_ds_resume_tasks(arguments)
-                elif name == "ds_delete_tasks":
-                    return await self._handle_ds_delete_tasks(arguments)
-                elif name == "ds_get_statistics":
-                    return await self._handle_ds_get_statistics(arguments)
-                elif name == "ds_list_downloaded_files":
-                    return await self._handle_ds_list_downloaded_files(arguments)
-                # Health monitoring handlers
-                elif name == "synology_system_info":
-                    return await self._handle_health_call(arguments, "system_info")
-                elif name == "synology_utilization":
-                    return await self._handle_health_call(arguments, "utilization")
-                elif name == "synology_disk_health":
-                    return await self._handle_health_call(arguments, "disk_list")
-                elif name == "synology_disk_smart":
-                    return await self._handle_disk_smart(arguments)
-                elif name == "synology_volume_status":
-                    return await self._handle_health_call(arguments, "volume_list")
-                elif name == "synology_storage_pool":
-                    return await self._handle_health_call(arguments, "storage_pool_list")
-                elif name == "synology_network":
-                    return await self._handle_health_call(arguments, "network_info")
-                elif name == "synology_ups":
-                    return await self._handle_health_call(arguments, "ups_info")
-                elif name == "synology_services":
-                    return await self._handle_health_call(arguments, "package_list")
-                elif name == "synology_system_log":
-                    return await self._handle_system_log(arguments)
-                elif name == "synology_health_summary":
-                    return await self._handle_health_call(arguments, "health_summary")
-                # Container Manager handlers
-                elif name.startswith("synology_container_"):
-                    return await self._handle_container_call(
-                        arguments, name.removeprefix("synology_container_")
-                    )
-                # NFS management handlers
-                elif name == "synology_nfs_status":
-                    return await self._handle_nfs_call(arguments, "nfs_status")
-                elif name == "synology_nfs_enable":
-                    return await self._handle_nfs_enable(arguments)
-                elif name == "synology_nfs_list_shares":
-                    return await self._handle_nfs_call(arguments, "list_shares")
-                elif name == "synology_nfs_set_permission":
-                    return await self._handle_nfs_set_permission(arguments)
-                elif name == "synology_create_share":
-                    return await self._handle_create_share(arguments)
-                # User management handlers
-                elif name == "synology_list_users":
-                    return await self._handle_usermgr_call(arguments, "list_users")
-                elif name == "synology_get_user":
-                    return await self._handle_usermgr_get_user(arguments)
-                elif name == "synology_create_user":
-                    return await self._handle_usermgr_create_user(arguments)
-                elif name == "synology_set_user":
-                    return await self._handle_usermgr_set_user(arguments)
-                elif name == "synology_delete_user":
-                    return await self._handle_usermgr_delete_user(arguments)
-                elif name == "synology_list_groups":
-                    return await self._handle_usermgr_call(arguments, "list_groups")
-                elif name == "synology_list_group_members":
-                    return await self._handle_usermgr_list_group_members(arguments)
-                elif name == "synology_add_user_to_group":
-                    return await self._handle_usermgr_add_to_group(arguments)
-                elif name == "synology_remove_user_from_group":
-                    return await self._handle_usermgr_remove_from_group(arguments)
-                elif name == "synology_get_user_permissions":
-                    return await self._handle_usermgr_get_permissions(arguments)
-                elif name == "synology_set_user_permissions":
-                    return await self._handle_usermgr_set_permissions(arguments)
-                else:
-                    raise ValueError(f"Unknown tool: {name}")
-            except Exception as e:
-                return [types.TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
+    async def handle_call_tool(self, name: str, arguments: dict) -> list[types.TextContent]:
+        """Handle tool calls (for bridge use — wraps _dispatch_tool with error catch)."""
+        try:
+            return await self._dispatch_tool(name, arguments)
+        except Exception as e:
+            return [types.TextContent(type="text", text=f"Error executing {name}: {e!s}")]
 
     def _service_instance_dicts(self):
         """Canonical set of per-domain instance caches keyed by base_url.
@@ -1540,7 +1501,7 @@ class SynologyMCPServer:
 
     def _get_tool_definitions(self):
         """Get tool definitions shared between MCP handler and bridge."""
-        return [
+        tools = [
             types.Tool(
                 name="synology_status",
                 description="Check authentication status for Synology NAS instances",
@@ -2633,80 +2594,83 @@ class SynologyMCPServer:
             ),
         ]
 
+        # Add login/logout tools only if not using auto-login or no credentials configured
+        if not config.auto_login or not config.has_synology_credentials():
+            tools.extend(
+                [
+                    types.Tool(
+                        name="synology_login",
+                        description=(
+                            "Authenticate with Synology NAS and establish session.\n\n"
+                            "2FA/OTP accounts: pass `otp_code` on the first login only; "
+                            "DSM will issue a `device_id` in the response, which you can "
+                            "persist into settings.json to skip OTP on future logins. If "
+                            "you already have a `device_id`, pass it instead of `otp_code` "
+                            "— DSM treats trusted devices as already authenticated."
+                        ),
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "base_url": {
+                                    "type": "string",
+                                    "description": "Synology NAS base URL (e.g., https://192.168.1.100:5001)",
+                                },
+                                "username": {
+                                    "type": "string",
+                                    "description": "Username for authentication",
+                                },
+                                "password": {
+                                    "type": "string",
+                                    "description": "Password for authentication",
+                                },
+                                "otp_code": {
+                                    "type": "string",
+                                    "description": (
+                                        "One-time 6-digit code from the user's authenticator. "
+                                        "Required only on the first 2FA login for a new device. "
+                                        "Ignored when `device_id` is also given."
+                                    ),
+                                },
+                                "device_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "Long-lived trusted-device token previously issued by DSM "
+                                        "(returned as `did` in a successful 2FA login). When "
+                                        "supplied, DSM skips the OTP step. Preferred over "
+                                        "`otp_code` for repeated logins."
+                                    ),
+                                },
+                            },
+                            "required": ["base_url", "username", "password"],
+                        },
+                    ),
+                    types.Tool(
+                        name="synology_logout",
+                        description="Logout from Synology NAS session",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "base_url": {
+                                    "type": "string",
+                                    "description": "Synology NAS base URL",
+                                }
+                            },
+                            "required": ["base_url"],
+                        },
+                    ),
+                ]
+            )
+
+        return tools
+
     async def get_tools_list(self):
         """Get the list of available tools (for bridge use)."""
         return self._get_tool_definitions()
 
     async def call_tool_direct(self, name: str, arguments: dict):
         """Call a tool directly (for bridge use).
-        Delegates to the same handler used by handle_call_tool."""
-        try:
-            # Build a dispatch table from the tool name to its handler
-            dispatch = {
-                "synology_login": lambda a: self._handle_login(a),
-                "synology_logout": lambda a: self._handle_logout(a),
-                "synology_status": lambda a: self._handle_status(a),
-                "list_shares": lambda a: self._handle_list_shares(a),
-                "list_directory": lambda a: self._handle_list_directory(a),
-                "get_file_info": lambda a: self._handle_get_file_info(a),
-                "search_files": lambda a: self._handle_search_files(a),
-                "get_file_content": lambda a: self._handle_get_file_content(a),
-                "rename_file": lambda a: self._handle_rename_file(a),
-                "move_file": lambda a: self._handle_move_file(a),
-                "create_file": lambda a: self._handle_create_file(a),
-                "create_directory": lambda a: self._handle_create_directory(a),
-                "delete": lambda a: self._handle_delete(a),
-                "ds_get_info": lambda a: self._handle_ds_get_info(a),
-                "ds_list_tasks": lambda a: self._handle_ds_list_tasks(a),
-                "ds_create_task": lambda a: self._handle_ds_create_task(a),
-                "ds_pause_tasks": lambda a: self._handle_ds_pause_tasks(a),
-                "ds_resume_tasks": lambda a: self._handle_ds_resume_tasks(a),
-                "ds_delete_tasks": lambda a: self._handle_ds_delete_tasks(a),
-                "ds_get_statistics": lambda a: self._handle_ds_get_statistics(a),
-                "ds_list_downloaded_files": lambda a: self._handle_ds_list_downloaded_files(a),
-                # Health monitoring
-                "synology_system_info": lambda a: self._handle_health_call(a, "system_info"),
-                "synology_utilization": lambda a: self._handle_health_call(a, "utilization"),
-                "synology_disk_health": lambda a: self._handle_health_call(a, "disk_list"),
-                "synology_disk_smart": lambda a: self._handle_disk_smart(a),
-                "synology_volume_status": lambda a: self._handle_health_call(a, "volume_list"),
-                "synology_storage_pool": lambda a: self._handle_health_call(a, "storage_pool_list"),
-                "synology_network": lambda a: self._handle_health_call(a, "network_info"),
-                "synology_ups": lambda a: self._handle_health_call(a, "ups_info"),
-                "synology_services": lambda a: self._handle_health_call(a, "package_list"),
-                "synology_system_log": lambda a: self._handle_system_log(a),
-                "synology_health_summary": lambda a: self._handle_health_call(a, "health_summary"),
-                # NFS management
-                "synology_nfs_status": lambda a: self._handle_nfs_call(a, "nfs_status"),
-                "synology_nfs_enable": lambda a: self._handle_nfs_enable(a),
-                "synology_nfs_list_shares": lambda a: self._handle_nfs_call(a, "list_shares"),
-                "synology_nfs_set_permission": lambda a: self._handle_nfs_set_permission(a),
-                # User management
-                "synology_list_users": lambda a: self._handle_usermgr_call(a, "list_users"),
-                "synology_get_user": lambda a: self._handle_usermgr_get_user(a),
-                "synology_create_user": lambda a: self._handle_usermgr_create_user(a),
-                "synology_set_user": lambda a: self._handle_usermgr_set_user(a),
-                "synology_delete_user": lambda a: self._handle_usermgr_delete_user(a),
-                "synology_list_groups": lambda a: self._handle_usermgr_call(a, "list_groups"),
-                "synology_list_group_members": lambda a: self._handle_usermgr_list_group_members(a),
-                "synology_add_user_to_group": lambda a: self._handle_usermgr_add_to_group(a),
-                "synology_remove_user_from_group": lambda a: self._handle_usermgr_remove_from_group(
-                    a
-                ),
-                "synology_get_user_permissions": lambda a: self._handle_usermgr_get_permissions(a),
-                "synology_set_user_permissions": lambda a: self._handle_usermgr_set_permissions(a),
-            }
-
-            handler = dispatch.get(name)
-            if handler is None and name.startswith("synology_container_"):
-                return await self._handle_container_call(
-                    arguments, name.removeprefix("synology_container_")
-                )
-            if handler is None:
-                raise ValueError(f"Unknown tool: {name}")
-            return await handler(arguments)
-        except Exception as e:
-            return [types.TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
+        Delegates to handle_call_tool which uses the same routing as MCP."""
+        return await self.handle_call_tool(name, arguments)
 
     async def run(self):
         """Run the MCP server."""
