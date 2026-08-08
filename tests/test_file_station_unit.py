@@ -388,3 +388,15 @@ class TestMoveFileRename:
 
         with pytest.raises(Exception, match="Destination directory does not exist"):
             fs.move_file("/share/src/clip.mp4", "/share/gone/case_01.mp4")
+
+    def test_overwrite_false_and_target_exists_raises_before_mutation(self, monkeypatch):
+        """Pre-check catches the occupied target before any rename/move."""
+        fs, calls = self.build(
+            monkeypatch,
+            dirs={"/share/src", "/share/dst"},
+            files={"/share/dst/case_01.mp4"},
+        )
+
+        with pytest.raises(Exception, match="already exists"):
+            fs.move_file("/share/src/clip.mp4", "/share/dst/case_01.mp4")
+        assert calls == []  # nothing mutated before the pre-check
