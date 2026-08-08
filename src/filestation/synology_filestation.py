@@ -233,7 +233,7 @@ class SynologyFileStation:
 
         files = data.get("files", [])
         if not files:
-            raise Exception(f"File not found: {path}")
+            raise FileNotFoundError(f"File not found: {path}")
 
         file_info = files[0]
         # DSM does not fail the request for a path that doesn't exist. It answers
@@ -241,7 +241,7 @@ class SynologyFileStation:
         # and no `name`/`isdir`. Reporting that as a real file made every existence
         # check say yes, so surface it as the error it is.
         if "code" in file_info and "name" not in file_info:
-            raise Exception(f"File not found: {path} (Synology API error: {file_info['code']})")
+            raise FileNotFoundError(f"File not found: {path} (Synology API error: {file_info['code']})")
 
         result = {
             "name": file_info.get("name"),
@@ -764,7 +764,7 @@ class SynologyFileStation:
         """True if `path` exists and is a directory."""
         try:
             return self.get_file_info(path).get("type") == "directory"
-        except Exception:
+        except FileNotFoundError:
             return False
 
     def move_file(
@@ -808,6 +808,11 @@ class SynologyFileStation:
             if new_name == src_name:
                 return self._move_into_folder(formatted_source, dest_parent, overwrite)
 
+            # Pre-check: if overwrite is False and the target already exists, fail
+            # before any mutation so the source isn't left in a renamed state.
+            if not overwrite and self._path_exists(f"{dest_parent}/{new_name}"):
+                raise Exception(f"Destination path already exists: {dest_parent}/{new_name}")
+
             # Rename first so the move can't collide with a same-named file in the
             # destination; if that name is taken here, move first and rename after.
             staged = f"{src_parent}/{new_name}"
@@ -824,7 +829,7 @@ class SynologyFileStation:
         try:
             self.get_file_info(path)
             return True
-        except Exception:
+        except FileNotFoundError:
             return False
 
     def _move_into_folder(

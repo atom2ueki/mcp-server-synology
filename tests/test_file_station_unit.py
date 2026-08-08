@@ -320,7 +320,7 @@ class TestMoveFileRename:
                 return {"type": "directory", "path": path}
             if path in files:
                 return {"type": "file", "path": path}
-            raise Exception(f"File not found: {path}")
+            raise FileNotFoundError(f"File not found: {path}")
 
         calls = []
         monkeypatch.setattr(fs, "get_file_info", fake_info)
