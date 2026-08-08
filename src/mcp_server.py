@@ -1673,7 +1673,11 @@ class SynologyMCPServer:
                         },
                         "destination_path": {
                             "type": "string",
-                            "description": "Destination path - can be a directory or full path with new name (must start with /)",
+                            "description": (
+                                "Where to move it (must start with /): an existing "
+                                "directory to move into, or a full path whose last "
+                                "segment is the new name"
+                            ),
                         },
                         "overwrite": {
                             "type": "boolean",
