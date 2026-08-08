@@ -375,6 +375,14 @@ class TestMoveFileRename:
             ("rename", "/share/dst/clip.mp4", "case_01.mp4"),
         ]
 
+    def test_same_name_different_directory_is_a_plain_move(self, monkeypatch):
+        """Same basename in a different directory = plain move, no rename."""
+        fs, calls = self.build(monkeypatch, dirs={"/share/src", "/share/dst"})
+
+        fs.move_file("/share/src/clip.mp4", "/share/dst/clip.mp4")
+
+        assert calls == [("move", "/share/src/clip.mp4", "/share/dst")]
+
     def test_missing_destination_directory_raises(self, monkeypatch):
         fs, _ = self.build(monkeypatch, dirs={"/share/src"})
 

@@ -800,6 +800,14 @@ class SynologyFileStation:
             if src_parent == dest_parent:
                 return self.rename_file(formatted_source, new_name)
 
+            # Same basename, different directory — plain move, no rename needed.
+            # Without this guard, `staged` would equal `formatted_source` itself,
+            # making `_path_exists(staged)` trivially True and routing into the
+            # move→rename collision fallback, which then tries to rename the
+            # just-moved file to the name it already has.
+            if new_name == src_name:
+                return self._move_into_folder(formatted_source, dest_parent, overwrite)
+
             # Rename first so the move can't collide with a same-named file in the
             # destination; if that name is taken here, move first and rename after.
             staged = f"{src_parent}/{new_name}"
