@@ -1,9 +1,63 @@
 """Pytest configuration for real Synology Download Station testing."""
 
+import builtins
 import sys
 from pathlib import Path
 
 import pytest
+
+# This suite prints emoji in its session banners and in many test modules. On a
+# console using a legacy codepage (Windows cp1252 is the common case) that
+# raises UnicodeEncodeError, which pytest reports as INTERNALERROR and which
+# aborts the whole run before a single test executes -- decorative output
+# taking down the suite. Reconfiguring sys.stdout at import time does not help,
+# because pytest replaces the stream with its own capture object afterwards.
+#
+# Shadowing `print` inside conftest alone is not enough: each test module is a
+# separate module namespace, so `tests/test_nfs.py` etc. still resolve the
+# built-in function and hit the same cp1252 stream (pytest.ini enables `-s`).
+# Replacing `builtins.print` globally makes every module -- conftest and all
+# collected tests -- use the encoding-safe shim. Encode defensively at each
+# call instead of once at import time.
+_builtin_print = builtins.print
+
+
+def _safe_print(*args, **kwargs):
+    """print() that degrades unencodable characters instead of raising.
+
+    Handles explicit ``file=`` destinations, string-valued ``sep``/``end``,
+    and falsey explicit streams correctly — pre-sanitises before the first
+    write to avoid a partial-write-then-retry cycle.
+    """
+    # Only treat an absent or explicitly-None file= as the default stream; a
+    # falsey explicit stream (encoding attribute or __bool__ both exist) is
+    # still a valid destination and must not be replaced by sys.stdout.
+    if "file" in kwargs and kwargs["file"] is not None:
+        output = kwargs["file"]
+    else:
+        output = sys.stdout
+
+    encoding = getattr(output, "encoding", None)
+    if encoding is None:
+        # An encoding-less stream (e.g. io.StringIO) accepts Unicode directly,
+        # so bypass codec sanitization rather than corrupting text to ASCII.
+        _builtin_print(*args, **kwargs)
+        return
+
+    def _safe(val):
+        return str(val).encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+    safe_args = [_safe(a) for a in args]
+    safe_kwargs = dict(kwargs)
+    for key in ("sep", "end"):
+        val = safe_kwargs.get(key)
+        if isinstance(val, str):
+            safe_kwargs[key] = _safe(val)
+    _builtin_print(*safe_args, **safe_kwargs)
+
+
+builtins.print = _safe_print
+
 
 # Add src directory to Python path
 src_path = Path(__file__).parent.parent / "src"

@@ -93,7 +93,28 @@ class SynologyConfig:
 
         Returns True if permissions are safe, False otherwise.
         Prints warning if permissions are too open.
+
+        POSIX only. On Windows os.getuid() does not exist and st_mode carries
+        no meaningful group/other bits, so this check raised AttributeError and
+        took the whole settings load down with it.
+
+        On Windows the check is SKIPPED and this returns True so the settings
+        file still loads. Be clear about what that means: True here means
+        "not checked", not "verified safe". Windows access control lives in
+        ACLs, which this function cannot read. The alternative -- returning
+        False -- would make secrets.json unusable on Windows entirely, which is
+        a worse outcome than an unverified file, but it does mean a
+        world-readable secrets.json will load without complaint. The warning
+        below is deliberately not debug-level so the gap is visible in logs.
         """
+        if not hasattr(os, "getuid"):
+            logger.warning(
+                f"Permission check for {path} SKIPPED: this platform has no POSIX "
+                "file ownership. Treated as acceptable so the file still loads, but its "
+                "permissions were NOT verified. Confirm the ACLs restrict it to your user."
+            )
+            return True
+
         try:
             file_stat = path.stat()
             mode = file_stat.st_mode
