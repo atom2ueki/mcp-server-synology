@@ -23,16 +23,25 @@ _builtin_print = builtins.print
 
 
 def _safe_print(*args, **kwargs):
-    """print() that degrades unencodable characters instead of raising."""
-    try:
-        _builtin_print(*args, **kwargs)
-    except UnicodeEncodeError:
-        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
-        safe = [
-            str(a).encode(encoding, errors="replace").decode(encoding, errors="replace")
-            for a in args
-        ]
-        _builtin_print(*safe, **kwargs)
+    """print() that degrades unencodable characters instead of raising.
+
+    Handles explicit ``file=`` destinations, string-valued ``sep``/``end``,
+    and falsey explicit streams correctly — pre-sanitises before the first
+    write to avoid a partial-write-then-retry cycle.
+    """
+    output = kwargs.get("file") or sys.stdout
+    encoding = getattr(output, "encoding", None) or "ascii"
+
+    def _safe(val):
+        return str(val).encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+    safe_args = [_safe(a) for a in args]
+    safe_kwargs = dict(kwargs)
+    for key in ("sep", "end"):
+        val = safe_kwargs.get(key)
+        if isinstance(val, str):
+            safe_kwargs[key] = _safe(val)
+    _builtin_print(*safe_args, **safe_kwargs)
 
 
 builtins.print = _safe_print
