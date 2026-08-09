@@ -65,6 +65,9 @@ class MCPBridge:
 
         try:
             if method == "initialize":
+                # Xiaozhi WS clients speak the legacy MCP handshake
+                # (protocolVersion + serverInfo), so this stays hardcoded rather
+                # than using the SDK's MCP 2.0 InitializationOptions shape.
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
