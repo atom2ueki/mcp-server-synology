@@ -1,21 +1,28 @@
 """Pytest configuration for real Synology Download Station testing."""
 
+import builtins
 import sys
 from pathlib import Path
 
 import pytest
 
-# This file prints emoji in its session banners. On a console using a legacy
-# codepage (Windows cp1252 is the common case) that raises UnicodeEncodeError
-# inside pytest_sessionstart, which pytest reports as INTERNALERROR and which
-# aborts the whole run before a single test executes -- a decorative banner
+# This suite prints emoji in its session banners and in many test modules. On a
+# console using a legacy codepage (Windows cp1252 is the common case) that
+# raises UnicodeEncodeError, which pytest reports as INTERNALERROR and which
+# aborts the whole run before a single test executes -- decorative output
 # taking down the suite. Reconfiguring sys.stdout at import time does not help,
-# because pytest replaces the stream with its own capture object afterwards, so
-# encode defensively at each call instead.
-_builtin_print = print
+# because pytest replaces the stream with its own capture object afterwards.
+#
+# Shadowing `print` inside conftest alone is not enough: each test module is a
+# separate module namespace, so `tests/test_nfs.py` etc. still resolve the
+# built-in function and hit the same cp1252 stream (pytest.ini enables `-s`).
+# Replacing `builtins.print` globally makes every module -- conftest and all
+# collected tests -- use the encoding-safe shim. Encode defensively at each
+# call instead of once at import time.
+_builtin_print = builtins.print
 
 
-def print(*args, **kwargs):  # noqa: A001 - deliberately shadowing within conftest
+def _safe_print(*args, **kwargs):
     """print() that degrades unencodable characters instead of raising."""
     try:
         _builtin_print(*args, **kwargs)
@@ -26,6 +33,9 @@ def print(*args, **kwargs):  # noqa: A001 - deliberately shadowing within confte
             for a in args
         ]
         _builtin_print(*safe, **kwargs)
+
+
+builtins.print = _safe_print
 
 
 # Add src directory to Python path
