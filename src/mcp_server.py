@@ -379,13 +379,6 @@ class SynologyMCPServer:
         else:
             raise ValueError(f"Unknown tool: {name}")
 
-    async def handle_call_tool(self, name: str, arguments: dict) -> list[types.TextContent]:
-        """Handle tool calls (for bridge use — wraps _dispatch_tool with error catch)."""
-        try:
-            return await self._dispatch_tool(name, arguments)
-        except Exception as e:
-            return [types.TextContent(type="text", text=f"Error executing {name}: {e!s}")]
-
     def _service_instance_dicts(self):
         """Canonical set of per-domain instance caches keyed by base_url.
 
@@ -2667,14 +2660,22 @@ class SynologyMCPServer:
 
         return tools
 
-    async def get_tools_list(self):
-        """Get the list of available tools (for bridge use)."""
-        return self._get_tool_definitions()
-
-    async def call_tool_direct(self, name: str, arguments: dict):
-        """Call a tool directly (for bridge use).
-        Delegates to handle_call_tool which uses the same routing as MCP."""
-        return await self.handle_call_tool(name, arguments)
+    async def _run_stdio(self):
+        """Serve the MCP protocol over stdio until the client disconnects."""
+        logger.info("Starting MCP server on stdio...")
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await self.server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name=config.server_name,
+                    server_version=config.server_version,
+                    capabilities=self.server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                ),
+            )
 
     async def run(self):
         """Run the MCP server."""
@@ -2693,20 +2694,7 @@ class SynologyMCPServer:
 
         # Only start server if auto-login succeeded (or wasn't required)
         try:
-            logger.info("Starting MCP server on stdio...")
-            async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-                await self.server.run(
-                    read_stream,
-                    write_stream,
-                    InitializationOptions(
-                        server_name=config.server_name,
-                        server_version=config.server_version,
-                        capabilities=self.server.get_capabilities(
-                            notification_options=NotificationOptions(),
-                            experimental_capabilities={},
-                        ),
-                    ),
-                )
+            await self._run_stdio()
         except KeyboardInterrupt:
             logger.info("Received shutdown signal, cleaning up sessions...")
         except Exception as e:
