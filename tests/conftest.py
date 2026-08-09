@@ -27,6 +27,7 @@ def print(*args, **kwargs):  # noqa: A001 - deliberately shadowing within confte
         ]
         _builtin_print(*safe, **kwargs)
 
+
 # Add src directory to Python path
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
