@@ -1,6 +1,7 @@
 # src/synology_filestation.py - Synology FileStation API utilities
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -8,6 +9,8 @@ import unicodedata
 from typing import Any, Dict, List, Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 class SynologyFileStation:
@@ -46,14 +49,21 @@ class SynologyFileStation:
         the relogin fails, in which case the caller keeps the original error.
 
         Import is deferred to runtime to avoid a circular import
-        (auth -> filestation).
+        (auth -> filestation). `stale_session_id` is passed through to
+        `SynologyAuth.relogin()` so that concurrent recoveries collapse into a
+        single relogin (matching SynologyAPIClient's behavior).
         """
+        stale_session_id = self.session_id
         try:
             from auth.synology_auth import get_auth_for_url
-        except ImportError:
+        except ImportError as exc:
+            # Deferred to dodge a circular import; a real failure here (e.g. a
+            # syntax error introduced in synology_auth) would otherwise silently
+            # leave the caller stuck on the 119. Log it so it's observable.
+            logger.warning("Cannot recover from DSM error 119 — auth module unavailable: %s", exc)
             return False
         auth = get_auth_for_url(self.base_url)
-        if auth is None or not auth.relogin():
+        if auth is None or not auth.relogin(stale_session_id):
             return False
         self.session_id = auth.current_session_id
         self.syno_token = auth.current_syno_token
@@ -132,7 +142,15 @@ class SynologyFileStation:
     def _make_upload_request(
         self, api: str, version: str, method: str, files: Dict[str, Any], **params
     ) -> Dict[str, Any]:
-        """Make an upload request to Synology API."""
+        """Make an upload request to Synology API.
+
+        NOTE: this path deliberately does NOT recover from DSM error 119, unlike
+        `_make_request`. Uploads are multipart and `files` holds file streams
+        that have already been consumed by the first attempt; a blind replay
+        would send truncated content. Retrying safely needs stream rewinding or
+        re-opening the file, which is a larger change than this method should
+        take on. A 119 here surfaces to the caller as-is.
+        """
         request_params = {
             "api": api,
             "version": version,
