@@ -29,8 +29,20 @@ def _safe_print(*args, **kwargs):
     and falsey explicit streams correctly — pre-sanitises before the first
     write to avoid a partial-write-then-retry cycle.
     """
-    output = kwargs.get("file") or sys.stdout
-    encoding = getattr(output, "encoding", None) or "ascii"
+    # Only treat an absent or explicitly-None file= as the default stream; a
+    # falsey explicit stream (encoding attribute or __bool__ both exist) is
+    # still a valid destination and must not be replaced by sys.stdout.
+    if "file" in kwargs and kwargs["file"] is not None:
+        output = kwargs["file"]
+    else:
+        output = sys.stdout
+
+    encoding = getattr(output, "encoding", None)
+    if encoding is None:
+        # An encoding-less stream (e.g. io.StringIO) accepts Unicode directly,
+        # so bypass codec sanitization rather than corrupting text to ASCII.
+        _builtin_print(*args, **kwargs)
+        return
 
     def _safe(val):
         return str(val).encode(encoding, errors="replace").decode(encoding, errors="replace")
