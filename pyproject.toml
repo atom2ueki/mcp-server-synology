@@ -17,3 +17,9 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
 check_untyped_defs = true
+
+[project.scripts]
+synology-mcp = "mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
