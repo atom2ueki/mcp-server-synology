@@ -87,12 +87,16 @@ class SynologyConfig:
         # protection when binding to a non-loopback address. Defaults to the
         # loopback host:port. Operators behind a reverse proxy should add their
         # public domain here.
-        self.http_allowed_hosts = os.getenv(
-            "MCP_HTTP_ALLOWED_HOSTS", ""
-        ).split(",")
-        self.http_allowed_origins = os.getenv(
-            "MCP_HTTP_ALLOWED_ORIGINS", ""
-        ).split(",")
+        self.http_allowed_hosts = [
+            h.strip()
+            for h in os.getenv("MCP_HTTP_ALLOWED_HOSTS", "").split(",")
+            if h.strip()
+        ]
+        self.http_allowed_origins = [
+            o.strip()
+            for o in os.getenv("MCP_HTTP_ALLOWED_ORIGINS", "").split(",")
+            if o.strip()
+        ]
 
         # Legacy single-NAS env vars (still supported as fallback)
         self.synology_url = os.getenv("SYNOLOGY_URL")

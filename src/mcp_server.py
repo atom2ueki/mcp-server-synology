@@ -2766,12 +2766,12 @@ class SynologyMCPServer:
                 port = config.http_port
                 allowed_hosts = (
                     config.http_allowed_hosts
-                    if config.http_allowed_hosts != [""]
+                    if config.http_allowed_hosts
                     else [f"127.0.0.1:{port}", f"localhost:{port}"]
                 )
                 allowed_origins = (
                     config.http_allowed_origins
-                    if config.http_allowed_origins != [""]
+                    if config.http_allowed_origins
                     else [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
                 )
                 transport_security = TransportSecuritySettings(

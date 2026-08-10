@@ -36,6 +36,10 @@ services:
       - MCP_HTTP_HOST=0.0.0.0
       - MCP_HTTP_PORT=8765
       - MCP_HTTP_PATH=/mcp
+      # If you run behind a reverse proxy with a public domain, uncomment and
+      # set these to your expected Host and Origin headers:
+      # - MCP_HTTP_ALLOWED_HOSTS=synology-mcp.example.com
+      # - MCP_HTTP_ALLOWED_ORIGINS=https://synology-mcp.example.com
       - XDG_CONFIG_HOME=/home/mcpuser/.config
       # Required: Synology NAS connection
       - SYNOLOGY_URL=https://your-nas.example.com:5001
