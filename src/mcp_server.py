@@ -490,6 +490,10 @@ class SynologyMCPServer:
                         target_url = legacy_url
 
                 if target_url:
+                    # Normalize so the configured value (which may carry a
+                    # trailing slash) matches the stripped key under which
+                    # _login_nas / _handle_login store sessions.
+                    target_url = target_url.rstrip("/")
                     # A session may already exist for this URL without the name
                     # being mapped -- synology_login establishes one but does
                     # not touch nas_name_map. Logging in again would overwrite
