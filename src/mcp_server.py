@@ -2764,23 +2764,14 @@ class SynologyMCPServer:
             port = config.http_port
             transport_security = None
 
-            # Build allowlist from env if set, otherwise use loopback defaults
-            # when binding to a non-loopback address.
-            allowed_hosts = (
-                config.http_allowed_hosts
-                if config.http_allowed_hosts
-                else ([f"127.0.0.1:{port}", f"localhost:{port}"]
-                      if host not in ("127.0.0.1", "localhost", "::1")
-                      else [])
-            )
-            allowed_origins = (
-                config.http_allowed_origins
-                if config.http_allowed_origins
-                else ([f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
-                      if host not in ("127.0.0.1", "localhost", "::1")
-                      else [])
-            )
-            if allowed_hosts:
+            # Build allowlist from env if set, otherwise default to loopback
+            # host:port. Each side falls back independently so partial env var
+            # config behaves symmetrically.
+            loopback_default_hosts = [f"127.0.0.1:{port}", f"localhost:{port}"]
+            loopback_default_origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+            allowed_hosts = config.http_allowed_hosts or loopback_default_hosts
+            allowed_origins = config.http_allowed_origins or loopback_default_origins
+            if allowed_hosts or allowed_origins:
                 transport_security = TransportSecuritySettings(
                     enable_dns_rebinding_protection=True,
                     allowed_hosts=allowed_hosts,
