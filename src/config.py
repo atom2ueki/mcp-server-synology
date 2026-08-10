@@ -83,6 +83,16 @@ class SynologyConfig:
         self.http_host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
         self.http_port = int(os.getenv("MCP_HTTP_PORT", "8765"))
         self.http_path = os.getenv("MCP_HTTP_PATH", "/mcp")
+        # Comma-separated allowed Host/Origin values for DNS rebinding
+        # protection when binding to a non-loopback address. Defaults to the
+        # loopback host:port. Operators behind a reverse proxy should add their
+        # public domain here.
+        self.http_allowed_hosts = os.getenv(
+            "MCP_HTTP_ALLOWED_HOSTS", ""
+        ).split(",")
+        self.http_allowed_origins = os.getenv(
+            "MCP_HTTP_ALLOWED_ORIGINS", ""
+        ).split(",")
 
         # Legacy single-NAS env vars (still supported as fallback)
         self.synology_url = os.getenv("SYNOLOGY_URL")

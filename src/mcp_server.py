@@ -2763,10 +2763,21 @@ class SynologyMCPServer:
             host = config.http_host
             transport_security = None
             if host not in ("127.0.0.1", "localhost", "::1"):
+                port = config.http_port
+                allowed_hosts = (
+                    config.http_allowed_hosts
+                    if config.http_allowed_hosts != [""]
+                    else [f"127.0.0.1:{port}", f"localhost:{port}"]
+                )
+                allowed_origins = (
+                    config.http_allowed_origins
+                    if config.http_allowed_origins != [""]
+                    else [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+                )
                 transport_security = TransportSecuritySettings(
                     enable_dns_rebinding_protection=True,
-                    allowed_hosts=["127.0.0.1:8765", "localhost:8765"],
-                    allowed_origins=["http://127.0.0.1:8765", "http://localhost:8765"],
+                    allowed_hosts=allowed_hosts,
+                    allowed_origins=allowed_origins,
                 )
 
             app = self.server.streamable_http_app(
