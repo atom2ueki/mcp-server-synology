@@ -115,7 +115,10 @@ if __name__ == "__main__":
 
             asyncio.run(bridge_main())
         else:
-            logger.info("Client Support: Claude/Cursor (stdio)")
+            if config.http_enabled:
+                logger.info("Client Support: MCP over HTTP/SSE")
+            else:
+                logger.info("Client Support: Claude/Cursor (stdio)")
             logger.info("Starting MCP server... Press Ctrl+C to stop")
 
             # Import and run standard MCP server
