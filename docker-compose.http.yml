@@ -33,7 +33,7 @@ services:
       - "main.py"
     environment:
       - MCP_HTTP=true
-      - MCP_HTTP_HOST=127.0.0.1
+      - MCP_HTTP_HOST=0.0.0.0
       - MCP_HTTP_PORT=8765
       - MCP_HTTP_PATH=/mcp
       - XDG_CONFIG_HOME=/home/mcpuser/.config

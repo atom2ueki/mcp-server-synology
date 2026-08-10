@@ -2751,10 +2751,26 @@ class SynologyMCPServer:
 
         try:
             import uvicorn
+            from mcp.server.transport_security import TransportSecuritySettings
+
+            # When the server binds to a non-loopback address (e.g. 0.0.0.0 in
+            # Docker), the SDK's auto DNS rebinding protection does not engage.
+            # Pass explicit TransportSecuritySettings to allow reverse proxy
+            # traffic through the Docker bridge network.  Host-level exposure is
+            # restricted by the docker-compose port mapping (127.0.0.1:8765).
+            host = config.http_host
+            transport_security = None
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                transport_security = TransportSecuritySettings(
+                    enable_dns_rebinding_protection=True,
+                    allowed_hosts=["*"],
+                    allowed_origins=["*"],
+                )
 
             app = self.server.streamable_http_app(
                 streamable_http_path=config.http_path,
-                host=config.http_host,
+                host=host,
+                transport_security=transport_security,
             )
             logger.info(
                 f"Starting Streamable HTTP MCP server on http://{config.http_host}:{config.http_port}{config.http_path}"
