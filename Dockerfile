@@ -12,14 +12,12 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements first for better caching
 COPY requirements.txt requirements-http.txt ./
 
-# Install Python dependencies. The default image (stdio / Xiaozhi) installs only
-# requirements.txt. The HTTP/SSE image (docker-compose.http.yml) passes
-# INSTALL_HTTP=true to additionally install mcp-proxy from requirements-http.txt.
+# Install Python dependencies. mcp>=2.0.0 ships starlette, uvicorn, and
+# sse-starlette, so the same requirements.txt covers both stdio and Streamable
+# HTTP transports. The INSTALL_HTTP arg is kept for backward compatibility with
+# docker-compose.http.yml's build args, but is now a no-op.
 ARG INSTALL_HTTP=false
-RUN pip install --no-cache-dir -r requirements.txt \
-    && if [ "$INSTALL_HTTP" = "true" ] || [ "$INSTALL_HTTP" = "1" ]; then \
-        pip install --no-cache-dir -r requirements-http.txt; \
-    fi
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
 COPY src/ ./src/

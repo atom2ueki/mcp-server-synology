@@ -78,6 +78,26 @@ class SynologyConfig:
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
+        # Streamable HTTP transport settings
+        self.http_enabled = os.getenv("MCP_HTTP", "false").lower() == "true"
+        self.http_host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
+        self.http_port = int(os.getenv("MCP_HTTP_PORT", "8765"))
+        self.http_path = os.getenv("MCP_HTTP_PATH", "/mcp")
+        # Comma-separated allowed Host/Origin values for DNS rebinding
+        # protection when binding to a non-loopback address. Defaults to the
+        # loopback host:port. Operators behind a reverse proxy should add their
+        # public domain here.
+        self.http_allowed_hosts = [
+            h.strip()
+            for h in os.getenv("MCP_HTTP_ALLOWED_HOSTS", "").split(",")
+            if h.strip()
+        ]
+        self.http_allowed_origins = [
+            o.strip()
+            for o in os.getenv("MCP_HTTP_ALLOWED_ORIGINS", "").split(",")
+            if o.strip()
+        ]
+
         # Legacy single-NAS env vars (still supported as fallback)
         self.synology_url = os.getenv("SYNOLOGY_URL")
         self.synology_username = os.getenv("SYNOLOGY_USERNAME")
@@ -139,7 +159,9 @@ class SynologyConfig:
         """Load all settings from XDG config directory (~/.config/synology-mcp/settings.json)."""
         self.nas_configs: Dict[str, Dict[str, Any]] = {}
 
-        # Default values for xiaozhi and server settings
+        # Default values for xiaozhi and server settings.
+        # http_* values are already set from env vars in _load_env_settings;
+        # keep them and only override when server.http explicitly supplies a value.
         self.xiaozhi_enabled = False
         self.xiaozhi_token = ""
         self.xiaozhi_endpoint = "wss://api.xiaozhi.me/mcp/"
@@ -231,6 +253,16 @@ class SynologyConfig:
                         self.debug = server_section["debug"]
                     if "log_level" in server_section:
                         self.log_level = server_section["log_level"].upper()
+                    # HTTP transport settings
+                    http_section = server_section.get("http", {})
+                    if "enabled" in http_section:
+                        self.http_enabled = http_section["enabled"]
+                    if "host" in http_section:
+                        self.http_host = http_section["host"]
+                    if "port" in http_section:
+                        self.http_port = http_section["port"]
+                    if "path" in http_section:
+                        self.http_path = http_section["path"]
 
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse {SETTINGS_FILE}: {e}")

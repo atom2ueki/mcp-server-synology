@@ -2729,8 +2729,102 @@ class SynologyMCPServer:
                 ),
             )
 
+    async def run_http(self):
+        """Run the MCP server over Streamable HTTP (MCP 2.0 native).
+
+        Serves the same Synology tools over HTTP so remote MCP clients can
+        connect via a URL (Claude Desktop custom connectors, Claude.ai web,
+        Cursor, etc.) without requiring stdio/SSH access.
+        """
+        # Validate configuration first
+        config_errors = config.validate_config()
+        if config_errors and config.auto_login:
+            error_msg = f"Configuration errors: {', '.join(config_errors)}"
+            logger.error(error_msg)
+            raise Exception(f"Invalid configuration - stopping server. {error_msg}")
+        elif config.debug:
+            logger.debug(f"Configuration loaded: {config}")
+
+        # Attempt auto-login if configured (this will raise exception on failure and stop server)
+        logger.info("Attempting auto-login...")
+        await self._auto_login_if_configured()
+
+        try:
+            import uvicorn
+            from mcp.server.transport_security import TransportSecuritySettings
+
+            # When the server binds to a non-loopback address (e.g. 0.0.0.0 in
+            # Docker), the SDK's auto DNS rebinding protection does not engage.
+            # Pass explicit TransportSecuritySettings with the expected
+            # Host/Origin values from the reverse proxy perspective. The
+            # docker-compose port mapping (127.0.0.1:8765) restricts which
+            # host can reach the port, so the allowed values are the ones
+            # the reverse proxy sends.
+            host = config.http_host
+            port = config.http_port
+            transport_security = None
+
+            # Build allowlist from env if set, otherwise default to loopback
+            # host:port. Each side falls back independently so partial env var
+            # config behaves symmetrically.
+            loopback_default_hosts = [f"127.0.0.1:{port}", f"localhost:{port}"]
+            loopback_default_origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+            allowed_hosts = config.http_allowed_hosts or loopback_default_hosts
+            allowed_origins = config.http_allowed_origins or loopback_default_origins
+            if allowed_hosts or allowed_origins:
+                transport_security = TransportSecuritySettings(
+                    enable_dns_rebinding_protection=True,
+                    allowed_hosts=allowed_hosts,
+                    allowed_origins=allowed_origins,
+                )
+
+            app = self.server.streamable_http_app(
+                streamable_http_path=config.http_path,
+                host=host,
+                transport_security=transport_security,
+            )
+            logger.info(
+                f"Starting Streamable HTTP MCP server on http://{config.http_host}:{config.http_port}{config.http_path}"
+            )
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    app,
+                    host=config.http_host,
+                    port=config.http_port,
+                    log_level="info" if config.debug else "warning",
+                )
+            )
+            await server.serve()
+        except KeyboardInterrupt:
+            logger.info("Received shutdown signal, cleaning up sessions...")
+        except Exception as e:
+            logger.error(f"Server runtime error: {e}")
+            if config.debug:
+                logger.debug("Traceback:", exc_info=True)
+            raise
+        finally:
+            # Always attempt session cleanup on shutdown
+            if self.sessions:
+                logger.info("Cleaning up active sessions...")
+                cleanup_results = await self.cleanup_sessions()
+
+                if cleanup_results:
+                    logger.info("Session cleanup summary:")
+                    for result in cleanup_results:
+                        logger.info(f"  {result}")
+
+                logger.info("Session cleanup completed")
+            else:
+                logger.info("No active sessions to clean up")
+
     async def run(self):
-        """Run the MCP server."""
+        """Run the MCP server over the configured transport."""
+        if config.http_enabled:
+            return await self.run_http()
+        return await self.run_stdio()
+
+    async def run_stdio(self):
+        """Run the MCP server over stdio (default)."""
         # Validate configuration first
         config_errors = config.validate_config()
         if config_errors and config.auto_login:

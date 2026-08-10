@@ -1,7 +1,6 @@
-# HTTP/SSE transport dependencies — used only by docker-compose.http.yml.
-# These are NOT installed in the default stdio/Xiaozhi image; the Dockerfile
-# installs them only when built with INSTALL_HTTP=true.
+# HTTP transport dependencies — used only by docker-compose.http.yml.
 #
-# Upper bound: mcp-proxy is young and pre-1.0, so pin below the next major to
-# avoid a breaking change silently breaking HTTP deployments.
-mcp-proxy>=0.12.0,<1.0
+# mcp>=2.0.0 already pulls in starlette, uvicorn, and sse-starlette, so this
+# file is now empty by design. It exists so the Dockerfile's INSTALL_HTTP build
+# arg keeps working (the `pip install -r requirements-http.txt` step becomes a
+# no-op). If you add HTTP-only dependencies in the future, put them here.
