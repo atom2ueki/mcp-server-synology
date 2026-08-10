@@ -102,6 +102,15 @@ class SynologyAuth:
         # Try common API versions (start with newer versions)
         api_versions = ["7", "6", "3", "2"]
 
+        # Exception: the first-time 2FA bootstrap. Observed on DSM 7.3.2, a v7
+        # login with `enable_device_token=yes` succeeds but returns no `did`,
+        # so no trusted-device token is ever issued and every later start falls
+        # back to "OTP required" (403). v6 returns the token for the same
+        # request. Only reorder for the bootstrap; steady-state logins keep
+        # preferring v7.
+        if otp_code and not device_id:
+            api_versions = ["6", "7", "3", "2"]
+
         for version in api_versions:
             payload = {
                 "api": "SYNO.API.Auth",
