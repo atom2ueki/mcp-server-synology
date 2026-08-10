@@ -20,7 +20,7 @@ import sys
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
-    from src.mcp_server import SynologyMCPServer
+    from mcp_server import SynologyMCPServer
 from urllib.parse import urlparse
 
 from config import config
@@ -44,7 +44,7 @@ class MCPBridge:
     async def _initialize_mcp_server(self) -> bool:
         """Initialize the MCP server instance."""
         try:
-            from src.mcp_server import SynologyMCPServer
+            from mcp_server import SynologyMCPServer
 
             self.mcp_server = SynologyMCPServer()
             logger.info("✅ MCP server initialized")
@@ -443,9 +443,9 @@ class MCPBridge:
 
 async def main():
     """Main entry point."""
-    # Get config from environment
-    xiaozhi_endpoint = os.getenv("XIAOZHI_MCP_ENDPOINT", "wss://api.xiaozhi.me/mcp/")
-    xiaozhi_token = os.getenv("XIAOZHI_TOKEN")
+    # Get config from environment, falling back to the resolved settings.json config
+    xiaozhi_endpoint = os.getenv("XIAOZHI_MCP_ENDPOINT") or config.xiaozhi_endpoint
+    xiaozhi_token = os.getenv("XIAOZHI_TOKEN") or config.xiaozhi_token
 
     if not xiaozhi_token:
         logger.error("❌ XIAOZHI_TOKEN environment variable required")

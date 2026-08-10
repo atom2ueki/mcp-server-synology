@@ -1520,5 +1520,26 @@ async def main():
     await server.run()
 
 
+def cli():
+    """Synchronous CLI entry point for 'synology-mcp' console script."""
+    from config import config
+
+    logging.basicConfig(
+        level=getattr(logging, config.log_level.upper(), logging.INFO),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    logger = logging.getLogger("synology-mcp")
+
+    if config.xiaozhi_enabled:
+        logger.info("Starting Synology MCP Server with Xiaozhi Bridge")
+        from multiclient_bridge import main as bridge_main
+
+        return asyncio.run(bridge_main())
+    else:
+        logger.info("Starting Synology MCP Server")
+        return asyncio.run(main())
+
+
 if __name__ == "__main__":
     asyncio.run(main())
