@@ -166,6 +166,19 @@ class SynologyConfig:
                         )
                         continue
 
+                    # `url` wins over host/port when present. The host/port form
+                    # below can only ever build https://host:5001 or http://host:<port>,
+                    # so it cannot address a NAS sitting behind a reverse proxy on
+                    # the default 443 (no port in the URL at all). Reverse-proxied
+                    # setups set `url` directly.
+                    raw_url = nas_info.get("url")
+                    if raw_url is not None and not isinstance(raw_url, str):
+                        logger.warning(
+                            f"Invalid 'url' for NAS '{nas_name}' - expected string, "
+                            f"got {type(raw_url)}"
+                        )
+                        continue
+                    explicit_url = (raw_url or "").rstrip("/")
                     host = nas_info.get("host", "")
                     port = nas_info.get("port", 5000)
                     username = nas_info.get("username", "")
@@ -182,8 +195,10 @@ class SynologyConfig:
                     otp_code = nas_info.get("otp_code") or None
                     device_id = nas_info.get("device_id") or None
 
-                    if not host:
-                        logger.warning(f"Missing 'host' for NAS '{nas_name}' in {SETTINGS_FILE}")
+                    if not host and not explicit_url:
+                        logger.warning(
+                            f"Missing 'host' (or 'url') for NAS '{nas_name}' in {SETTINGS_FILE}"
+                        )
                         continue
                     if not username:
                         logger.warning(
@@ -196,8 +211,11 @@ class SynologyConfig:
                         )
                         continue
 
-                    scheme = "https" if port == 5001 else "http"
-                    base_url = f"{scheme}://{host}:{port}"
+                    if explicit_url:
+                        base_url = explicit_url
+                    else:
+                        scheme = "https" if port == 5001 else "http"
+                        base_url = f"{scheme}://{host}:{port}"
 
                     self.nas_configs[nas_name] = {
                         "base_url": base_url,
