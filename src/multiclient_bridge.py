@@ -121,7 +121,10 @@ class MCPBridge:
                     return {
                         "jsonrpc": "2.0",
                         "id": request_id,
-                        "error": {"code": -32603, "message": f"Error executing {tool_name}: {e!s}"},
+                        "result": {
+                            "isError": True,
+                            "content": [{"type": "text", "text": f"Error executing {tool_name}: {e!s}"}],
+                        },
                     }
 
                 return {
