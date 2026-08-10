@@ -81,7 +81,7 @@ if __name__ == "__main__":
         logger.info("Starting Synology MCP Server with Xiaozhi Bridge")
         logger.info("Supports BOTH Xiaozhi and Claude/Cursor simultaneously")
     elif config.http_enabled:
-        logger.info(f"Starting Synology MCP Server over Streamable HTTP")
+        logger.info("Starting Synology MCP Server over Streamable HTTP")
         logger.info(f"HTTP endpoint: http://{config.http_host}:{config.http_port}{config.http_path}")
     else:
         logger.info("Starting Synology MCP Server over stdio")
