@@ -145,14 +145,12 @@ class SynologyConfig:
         """Load all settings from XDG config directory (~/.config/synology-mcp/settings.json)."""
         self.nas_configs: Dict[str, Dict[str, Any]] = {}
 
-        # Default values for xiaozhi and server settings
+        # Default values for xiaozhi and server settings.
+        # http_* values are already set from env vars in _load_env_settings;
+        # keep them and only override when server.http explicitly supplies a value.
         self.xiaozhi_enabled = False
         self.xiaozhi_token = ""
         self.xiaozhi_endpoint = "wss://api.xiaozhi.me/mcp/"
-        self.http_enabled = False
-        self.http_host = "127.0.0.1"
-        self.http_port = 8765
-        self.http_path = "/mcp"
 
         if SETTINGS_FILE.exists():
             # Check file permissions - refuse to load if insecure
