@@ -102,12 +102,12 @@ class TestOnDemandLogin:
         with patch("mcp_server.config.nas_configs", {"admin": cfg}), \
              patch("mcp_server.config.get_synology_config", return_value=cfg), \
              patch("mcp_server.SynologyAuth", return_value=auth):
-            try:
+            # With an empty nas_name_map and allow_login=False, _get_base_url
+            # raises for the unmapped name rather than touching the NAS.
+            # Resolving it would trigger an on-demand login purely to tear the
+            # session down, which we must not do.
+            with pytest.raises(Exception):
                 asyncio.run(server._handle_logout({"nas_name": "admin"}))
-            except Exception:
-                # Refusing to resolve a name with no session is fine.
-                # Authenticating in order to log out would not be.
-                pass
         auth.login.assert_not_called()
 
     def test_logging_in_again_after_a_logout(self, server):
@@ -168,7 +168,9 @@ class TestOnDemandLogin:
             with pytest.raises(Exception) as exc:
                 server._get_base_url({"nas_name": "default"})
         assert "402" in str(exc.value)
-        assert "https://nas:5001" not in str(exc.value) or "402" in str(exc.value)
+        # The message identifies the NAS by label, not by URL.
+        assert "https://nas:5001" not in str(exc.value)
+        assert "default" in str(exc.value)
 
 
 class TestShareTimestamps:
@@ -224,4 +226,11 @@ class TestShareTimestamps:
                                    "additional": {"time": {"atime": 10 ** 20}}}]})
         share = fs.list_shares()[0]
         assert share["atime"] == 10 ** 20
+        assert "atime_iso" not in share
+
+    def test_non_numeric_epoch_does_not_break_the_listing(self):
+        fs = self._fs({"shares": [{"name": "x", "path": "/x",
+                                   "additional": {"time": {"atime": "not-an-epoch"}}}]})
+        share = fs.list_shares()[0]
+        assert share["atime"] == "not-an-epoch"
         assert "atime_iso" not in share

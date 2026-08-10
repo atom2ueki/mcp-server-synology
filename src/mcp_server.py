@@ -57,7 +57,7 @@ class SynologyMCPServer:
         error code on failure; callers decide whether that is fatal.
         """
         nas_cfg = config.get_synology_config(nas_name)
-        base_url = nas_cfg["base_url"]
+        base_url = nas_cfg["base_url"].rstrip("/")
         label = nas_name or "default"
 
         if base_url not in self.auth_instances:
@@ -554,7 +554,7 @@ class SynologyMCPServer:
 
     async def _handle_login(self, arguments: dict) -> list[types.TextContent]:
         """Handle Synology login."""
-        base_url = arguments["base_url"]
+        base_url = arguments["base_url"].rstrip("/")
         username = arguments["username"]
         password = arguments["password"]
         # Both 2FA fields are optional. When both are supplied, `device_id`

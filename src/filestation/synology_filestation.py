@@ -196,7 +196,7 @@ class SynologyFileStation:
                         .isoformat(timespec="seconds")
                         .replace("+00:00", "Z")
                     )
-                except (OverflowError, OSError, ValueError):
+                except (OverflowError, OSError, ValueError, TypeError):
                     # A nonsense epoch must not take down the whole listing.
                     pass
             result.append(entry)
