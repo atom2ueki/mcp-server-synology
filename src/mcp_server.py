@@ -506,7 +506,7 @@ class SynologyMCPServer:
         # Try explicit base_url
         base_url = arguments.get("base_url")
         if base_url:
-            return base_url
+            return base_url.rstrip("/")
 
         # Fall back to first connected session
         if self.sessions:

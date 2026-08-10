@@ -106,7 +106,7 @@ class TestOnDemandLogin:
             # raises for the unmapped name rather than touching the NAS.
             # Resolving it would trigger an on-demand login purely to tear the
             # session down, which we must not do.
-            with pytest.raises(Exception):
+            with pytest.raises(Exception, match="NAS 'admin' not found"):
                 asyncio.run(server._handle_logout({"nas_name": "admin"}))
         auth.login.assert_not_called()
 
