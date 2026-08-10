@@ -2755,16 +2755,18 @@ class SynologyMCPServer:
 
             # When the server binds to a non-loopback address (e.g. 0.0.0.0 in
             # Docker), the SDK's auto DNS rebinding protection does not engage.
-            # Pass explicit TransportSecuritySettings to allow reverse proxy
-            # traffic through the Docker bridge network.  Host-level exposure is
-            # restricted by the docker-compose port mapping (127.0.0.1:8765).
+            # Pass explicit TransportSecuritySettings with the expected
+            # Host/Origin values from the reverse proxy perspective. The
+            # docker-compose port mapping (127.0.0.1:8765) restricts which
+            # host can reach the port, so the allowed values are the ones
+            # the reverse proxy sends.
             host = config.http_host
             transport_security = None
             if host not in ("127.0.0.1", "localhost", "::1"):
                 transport_security = TransportSecuritySettings(
                     enable_dns_rebinding_protection=True,
-                    allowed_hosts=["*"],
-                    allowed_origins=["*"],
+                    allowed_hosts=["127.0.0.1:8765", "localhost:8765"],
+                    allowed_origins=["http://127.0.0.1:8765", "http://localhost:8765"],
                 )
 
             app = self.server.streamable_http_app(
