@@ -153,6 +153,25 @@ class SynologyConfig:
             try:
                 data = json.loads(SETTINGS_FILE.read_text())
 
+                # Load server settings FIRST (they override env vars).
+                # The NAS loop below falls back to `self.verify_ssl` for any
+                # entry that does not set its own, so `server.verify_ssl` has
+                # to be applied before that loop runs. Parsed afterwards, the
+                # fallback silently used the environment value instead and a
+                # `server.verify_ssl` in settings.json never reached a NAS.
+                server_section = data.get("server", {})
+                if server_section:
+                    if "auto_login" in server_section:
+                        self.auto_login = server_section["auto_login"]
+                    if "verify_ssl" in server_section:
+                        self.verify_ssl = server_section["verify_ssl"]
+                    if "session_timeout" in server_section:
+                        self.default_session_timeout = server_section["session_timeout"]
+                    if "debug" in server_section:
+                        self.debug = server_section["debug"]
+                    if "log_level" in server_section:
+                        self.log_level = server_section["log_level"].upper()
+
                 # Load Synology NAS credentials
                 synology_section = data.get("synology", {})
 
@@ -199,11 +218,25 @@ class SynologyConfig:
                     scheme = "https" if port == 5001 else "http"
                     base_url = f"{scheme}://{host}:{port}"
 
+                    # Per-NAS override, falling back to the global server
+                    # setting applied above. A single global flag cannot serve
+                    # both a NAS with a real certificate (verification on) and
+                    # one addressed by IP with DSM's self-signed certificate
+                    # (verification off) once more than one NAS is configured.
+                    nas_verify_ssl = nas_info.get("verify_ssl", self.verify_ssl)
+                    if not isinstance(nas_verify_ssl, bool):
+                        logger.warning(
+                            f"Invalid 'verify_ssl' for NAS '{nas_name}' - expected "
+                            f"boolean, got {type(nas_verify_ssl)}; "
+                            f"falling back to {self.verify_ssl}"
+                        )
+                        nas_verify_ssl = self.verify_ssl
+
                     self.nas_configs[nas_name] = {
                         "base_url": base_url,
                         "username": username,
                         "password": password,
-                        "verify_ssl": self.verify_ssl,
+                        "verify_ssl": nas_verify_ssl,
                         "note": nas_info.get("note", ""),
                         "otp_code": otp_code,
                         "device_id": device_id,
@@ -218,20 +251,6 @@ class SynologyConfig:
                         "endpoint", "wss://api.xiaozhi.me/mcp/"
                     )
 
-                # Load server settings (override env vars if present)
-                server_section = data.get("server", {})
-                if server_section:
-                    if "auto_login" in server_section:
-                        self.auto_login = server_section["auto_login"]
-                    if "verify_ssl" in server_section:
-                        self.verify_ssl = server_section["verify_ssl"]
-                    if "session_timeout" in server_section:
-                        self.default_session_timeout = server_section["session_timeout"]
-                    if "debug" in server_section:
-                        self.debug = server_section["debug"]
-                    if "log_level" in server_section:
-                        self.log_level = server_section["log_level"].upper()
-
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse {SETTINGS_FILE}: {e}")
             except OSError as e:
@@ -243,6 +262,19 @@ class SynologyConfig:
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
+
+    def verify_ssl_for(self, base_url: str) -> bool:
+        """Return the SSL verification policy for a NAS, by base URL.
+
+        Clients are created per base_url, which is the only NAS identity
+        available at those call sites. Falls back to the global setting for a
+        base_url that matches no configured NAS (legacy .env single-NAS mode,
+        or a session created by an explicit login tool call).
+        """
+        for cfg in self.nas_configs.values():
+            if cfg.get("base_url") == base_url:
+                return cfg.get("verify_ssl", self.verify_ssl)
+        return self.verify_ssl
 
     @staticmethod
     def get_config_dir() -> Path:

@@ -25,12 +25,25 @@ from health import SynologyHealth
 from nfs import SynologyNFS
 from usermanagement import SynologyUserManager
 
-# Suppress InsecureRequestWarning when verify_ssl is disabled (internal NAS devices)
-if not config.verify_ssl:
+# Suppress InsecureRequestWarning when verify_ssl is disabled (internal NAS devices).
+# urllib3's warning filter is process-global, so this has to consider any NAS that
+# turns verification off individually, not just the global setting.
+_unverified_nas = [
+    name
+    for name, cfg in config.nas_configs.items()
+    if not cfg.get("verify_ssl", config.verify_ssl)
+]
+if not config.verify_ssl or _unverified_nas:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    logger.warning(
-        "SSL verification is disabled. Set VERIFY_SSL=true if your NAS has a valid SSL certificate."
-    )
+    if not config.verify_ssl:
+        logger.warning(
+            "SSL verification is disabled. Set VERIFY_SSL=true if your NAS has a valid SSL certificate."
+        )
+    else:
+        logger.warning(
+            "SSL verification is disabled for: "
+            f"{', '.join(_unverified_nas)}. Certificate warnings are suppressed process-wide."
+        )
 
 
 class SynologyMCPServer:
@@ -92,7 +105,7 @@ class SynologyMCPServer:
             self.filestation_instances[base_url] = SynologyFileStation(
                 base_url,
                 session_id,
-                verify_ssl=config.verify_ssl,
+                verify_ssl=config.verify_ssl_for(base_url),
                 syno_token=self.syno_tokens.get(base_url),
             )
 
@@ -108,7 +121,7 @@ class SynologyMCPServer:
             self.downloadstation_instances[base_url] = SynologyDownloadStation(
                 base_url,
                 session_id,
-                verify_ssl=config.verify_ssl,
+                verify_ssl=config.verify_ssl_for(base_url),
                 syno_token=self.syno_tokens.get(base_url),
             )
 
@@ -124,7 +137,7 @@ class SynologyMCPServer:
             self.health_instances[base_url] = SynologyHealth(
                 base_url,
                 session_id,
-                verify_ssl=config.verify_ssl,
+                verify_ssl=config.verify_ssl_for(base_url),
                 syno_token=self.syno_tokens.get(base_url),
             )
 
@@ -140,7 +153,7 @@ class SynologyMCPServer:
             self.container_instances[base_url] = SynologyContainer(
                 base_url,
                 session_id,
-                verify_ssl=config.verify_ssl,
+                verify_ssl=config.verify_ssl_for(base_url),
                 syno_token=self.syno_tokens.get(base_url),
             )
 
@@ -156,7 +169,7 @@ class SynologyMCPServer:
             self.nfs_instances[base_url] = SynologyNFS(
                 base_url,
                 session_id,
-                verify_ssl=config.verify_ssl,
+                verify_ssl=config.verify_ssl_for(base_url),
                 syno_token=self.syno_tokens.get(base_url),
             )
 
@@ -172,7 +185,7 @@ class SynologyMCPServer:
             self.usermgr_instances[base_url] = SynologyUserManager(
                 base_url,
                 session_id,
-                verify_ssl=config.verify_ssl,
+                verify_ssl=config.verify_ssl_for(base_url),
                 syno_token=self.syno_tokens.get(base_url),
             )
 
@@ -205,7 +218,7 @@ class SynologyMCPServer:
 
                 if base_url not in self.auth_instances:
                     self.auth_instances[base_url] = SynologyAuth(
-                        base_url, verify_ssl=config.verify_ssl
+                        base_url, verify_ssl=config.verify_ssl_for(base_url)
                     )
 
                 auth = self.auth_instances[base_url]
@@ -491,7 +504,7 @@ class SynologyMCPServer:
 
         # Create or get auth instance
         if base_url not in self.auth_instances:
-            self.auth_instances[base_url] = SynologyAuth(base_url, verify_ssl=config.verify_ssl)
+            self.auth_instances[base_url] = SynologyAuth(base_url, verify_ssl=config.verify_ssl_for(base_url))
 
         auth = self.auth_instances[base_url]
         auth.on_relogin = self._resync_session_after_relogin
