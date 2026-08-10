@@ -138,6 +138,21 @@ class SynologyMCPServer:
             },
             "required": [],
         }
+        TN_PR = lambda props, required: {  # noqa: E731
+            "type": "object",
+            "properties": {
+                "nas_name": {
+                    "type": "string",
+                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                },
+                "base_url": {
+                    "type": "string",
+                    "description": "Synology NAS base URL (alternative to nas_name)",
+                },
+                **props,
+            },
+            "required": required,
+        }
 
         # Status & NAS listing
         self._register_tool("synology_status", "Check authentication status for Synology NAS instances", T, self._handle_status)
