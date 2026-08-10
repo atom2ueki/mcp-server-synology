@@ -29,8 +29,6 @@ import websockets
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
 
 
 class MCPBridge:
@@ -105,7 +103,7 @@ class MCPBridge:
                     "result": {"tools": [tool.model_dump() for tool in tools_list]},
                 }
 
-elif method == "tools/call":
+            elif method == "tools/call":
                 # Call tool
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
