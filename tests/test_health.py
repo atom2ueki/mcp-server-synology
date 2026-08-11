@@ -146,8 +146,7 @@ class TestSynologyHealth:
             return
         luns = listed.get("data", {}).get("luns", [])
         if not luns:
-            print("⚠️  No iSCSI LUNs configured on this NAS — nothing to fetch")
-            return
+            pytest.skip("No iSCSI LUNs configured on this NAS — nothing to fetch")
 
         result = health.lun_get(luns[0]["name"])
 
