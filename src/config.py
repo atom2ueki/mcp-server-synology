@@ -248,12 +248,18 @@ class SynologyConfig:
             # types, audit the trustee. For ANYTHING ELSE (callback, dynamic,
             # or future types), fail closed — we can't prove they don't widen.
             allow_type = ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE
+            # Fallback values per WinNT.h / MS-DTYP §2.4.4.1:
+            #   ACCESS_ALLOWED_OBJECT_ACE_TYPE = 5, ACCESS_DENIED_OBJECT_ACE_TYPE = 6,
+            #   ACCESS_DENIED_ACE_TYPE = 1, SYSTEM_AUDIT_ACE_TYPE = 2,
+            #   SYSTEM_ALARM_ACE_TYPE = 3.
+            # getattr() reads the real ntsecuritycon first; the literal is only
+            # a defensive default if an attribute is missing.
             allow_object_type = getattr(
-                ntsecuritycon, "ACCESS_ALLOWED_OBJECT_ACE_TYPE", 6
+                ntsecuritycon, "ACCESS_ALLOWED_OBJECT_ACE_TYPE", 5
             )
             deny_type = getattr(ntsecuritycon, "ACCESS_DENIED_ACE_TYPE", 1)
             deny_object_type = getattr(
-                ntsecuritycon, "ACCESS_DENIED_OBJECT_ACE_TYPE", 7
+                ntsecuritycon, "ACCESS_DENIED_OBJECT_ACE_TYPE", 6
             )
             # Types that provably don't widen access: deny types (narrow) and
             # SACL audit types (no access effect). Everything else must be

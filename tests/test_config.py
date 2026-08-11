@@ -338,15 +338,16 @@ class TestWindowsAclFallback:
           conventional: ((ace_type, ace_flags), mask, sid)
           object:       ((ace_type, ace_flags), mask, object_type,
                          inherited_object_type, sid)
-        ace_type 0 = ACCESS_ALLOWED_ACE_TYPE, 1 = ACCESS_DENIED_ACE_TYPE,
-        6 = ACCESS_ALLOWED_OBJECT_ACE_TYPE, 7 = ACCESS_DENIED_OBJECT_ACE_TYPE.
+        Per WinNT.h:
+          0 = ACCESS_ALLOWED_ACE_TYPE, 1 = ACCESS_DENIED_ACE_TYPE,
+          5 = ACCESS_ALLOWED_OBJECT_ACE_TYPE, 6 = ACCESS_DENIED_OBJECT_ACE_TYPE.
         ace_flags includes INHERITED_ACE (0x10) for ACEs inherited from a
         parent folder — the case Codex flagged as misclassified by the old
         ace[0][1] read.
         """
         header = (ace_type, ace_flags)
         mask = 0x1F01FF  # full control placeholder
-        if ace_type in (6, 7):
+        if ace_type in (5, 6):
             # Object ACE: ((type, flags), mask, obj_type, inh_obj_type, sid)
             return (header, mask, None, None, trustee_sid_str)
         return (header, mask, trustee_sid_str)
@@ -419,7 +420,8 @@ class TestWindowsAclFallback:
 
         fake_ntsecuritycon = types.ModuleType("ntsecuritycon")
         fake_ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE = 0
-        fake_ntsecuritycon.ACCESS_ALLOWED_OBJECT_ACE_TYPE = 6
+        # Real WinNT.h value is 5 (ACCESS_ALLOWED_OBJECT_ACE_TYPE).
+        fake_ntsecuritycon.ACCESS_ALLOWED_OBJECT_ACE_TYPE = 5
 
         return {
             "win32security": fake_win32security,
@@ -667,8 +669,9 @@ class TestWindowsAclFallback:
         """An ACCESS_ALLOWED_OBJECT_ACE_TYPE for Everyone must fail the check.
 
         Object ACEs carry the trustee SID at ace[-1] (not ace[2]). The audit
-        must treat type 6 as an allow ACE and read the trustee from the right
-        index, otherwise a foreign object-allow grant is silently skipped.
+        must treat type 5 (ACCESS_ALLOWED_OBJECT_ACE_TYPE per WinNT.h) as an
+        allow ACE and read the trustee from the right index, otherwise a
+        foreign object-allow grant is silently skipped.
         """
         import logging
         import sys
@@ -680,8 +683,8 @@ class TestWindowsAclFallback:
             owner_sid=self.CURRENT_SID,
             dacl_aces=[
                 self._ace(self.CURRENT_SID),
-                # 6 = ACCESS_ALLOWED_OBJECT_ACE_TYPE — widening, foreign trustee.
-                self._ace(self.EVERYONE_SID, ace_type=6),
+                # 5 = ACCESS_ALLOWED_OBJECT_ACE_TYPE — widening, foreign trustee.
+                self._ace(self.EVERYONE_SID, ace_type=5),
             ],
         )
 
@@ -709,7 +712,7 @@ class TestWindowsAclFallback:
             owner_sid=self.CURRENT_SID,
             dacl_aces=[
                 self._ace(self.CURRENT_SID),
-                self._ace(self.ADMINS_SID, ace_type=6),
+                self._ace(self.ADMINS_SID, ace_type=5),
             ],
         )
 
