@@ -115,9 +115,9 @@ class SynologyConfig:
         Prints warning if permissions are too open.
 
         POSIX: checks file ownership and group/other permission bits.
-        Windows: uses pywin32 (win32security) to verify the file owner SID
-        matches the current user. Falls back to a warning if pywin32 is not
-        installed.
+        Windows: full ACL audit via pywin32 (owner SID match + DACL allowlist).
+        Fails closed if pywin32 is missing; opt back in with
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true``.
         Other platforms without os.getuid(): skipped with a warning, returns
         True (unverified).
         """
@@ -156,25 +156,44 @@ class SynologyConfig:
     def _check_windows_file_permissions(self, path: Path) -> bool:
         """Check Windows ACL for settings.json.
 
-        Uses pywin32 (win32security) to verify the file owner SID matches the
-        current user. This is a simplified check — a full DACL audit is not
-        performed. The expected ACL grants access to the current user only.
+        Enforces the policy from issue #72: the file must grant access only to
+        the current user (plus a small system allowlist). Concretely:
 
-        pywin32 is an optional dependency. Without it the check is skipped with
-        a warning and the file is treated as acceptable (returns True).
+        1. The owner SID must match the current user.
+        2. The DACL must be present (a NULL DACL means "everyone full access"
+           and is rejected).
+        3. No allow-ACE may grant access to a principal outside the allowlist:
+           the current user, ``NT AUTHORITY\\SYSTEM``, and
+           ``BUILTIN\\Administrators``. Inherited ``Everyone`` /
+           ``BUILTIN\\Users`` / ``Authenticated Users`` grants fail the check.
+
+        pywin32 is an **optional** dependency. If it is not installed the check
+        **fails closed** (returns ``False``) so credentials are never loaded
+        unverified. Operators who accept the risk can opt back in to the old
+        unverified-load behaviour by setting
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true``.
         """
         try:
-            import win32file  # noqa: F401 - ensure win32file is available
+            import ntsecuritycon
+            import win32api
             import win32security
+        except ImportError:
+            return self._windows_acl_unavailable(path)
 
-            sd = win32security.GetFileSecurity(
-                str(path), win32security.OWNER_SECURITY_INFORMATION
+        try:
+            # OWNER + DACL: we need both to enforce the policy. OWNER alone is
+            # not enough — a file owned by the current user can still inherit
+            # an Everyone/BUILTIN\Users allow-ACE from its parent folder.
+            info = (
+                win32security.OWNER_SECURITY_INFORMATION
+                | win32security.DACL_SECURITY_INFORMATION
             )
+            sd = win32security.GetFileSecurity(str(path), info)
             owner_sid = sd.GetSecurityDescriptorOwner()
 
-            # Get the current user's SID
+            # Current user SID via the process token.
             token = win32security.OpenProcessToken(
-                win32security.GetCurrentProcess(),
+                win32api.GetCurrentProcess(),
                 win32security.TOKEN_QUERY,
             )
             token_info = win32security.GetTokenInformation(token, win32security.TokenUser)
@@ -187,21 +206,94 @@ class SynologyConfig:
                 )
                 return False
 
+            # Build the allowlist of trusted trustee SIDs. We compare SIDs as
+            # strings (sid.__str__) for stability against pywin32's PySID
+            # object identity quirks.
+            allowed_sid_strs = {str(current_sid)}
+            for well_known in ("SYSTEM", "Administrators"):
+                try:
+                    sid, _, _ = win32security.LookupAccountName(
+                        None,  # local machine
+                        well_known if well_known != "Administrators" else "BUILTIN\\Administrators",
+                    )
+                    allowed_sid_strs.add(str(sid))
+                except Exception:
+                    # Best-effort: if we can't resolve a well-known SID, skip it
+                    # rather than widening the check incorrectly.
+                    pass
+
+            dacl = sd.GetSecurityDescriptorDacl()
+            if dacl is None:
+                # NULL DACL: no access control — anyone can read/write. Reject.
+                logger.warning(
+                    f"{path} has a NULL DACL (no access control). "
+                    "Refusing to load. Restrict the file to your user; see README."
+                )
+                return False
+
+            for ace in dacl:
+                # Only allow-ACEs (ACCESS_ALLOWED_ACE_TYPE) widen access;
+                # deny-ACEs only narrow it, so leave them through.
+                try:
+                    ace_type = ace[0][1]
+                except Exception:
+                    ace_type = None
+                if ace_type != ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE:
+                    continue
+
+                try:
+                    trustee_sid = ace[2]
+                    trustee_sid_str = str(trustee_sid)
+                except Exception as e:
+                    logger.warning(
+                        f"{path} has an ACE whose trustee could not be read ({e}); "
+                        "failing closed."
+                    )
+                    return False
+
+                if trustee_sid_str not in allowed_sid_strs:
+                    logger.warning(
+                        f"{path} DACL grants access to a principal outside the "
+                        f"allowlist (SID={trustee_sid_str}). "
+                        "Restrict the file to your user; see README."
+                    )
+                    return False
+
             logger.info(
-                f"Windows ACL check passed for {path} (owner SID verified as current user)"
+                f"Windows ACL check passed for {path} "
+                "(owner verified, no foreign allow-ACE in DACL)"
             )
             return True
 
-        except ImportError:
-            logger.warning(
-                f"pywin32 not installed. Windows ACL check for {path} SKIPPED — "
-                "file permissions were NOT verified. "
-                "Install pywin32 to enable Windows ACL enforcement."
-            )
-            return True
         except Exception as e:
             logger.warning(f"Windows ACL check failed for {path}: {e}")
             return False
+
+    @staticmethod
+    def _windows_acl_unavailable(path: Path) -> bool:
+        """Handle pywin32 being unavailable on Windows.
+
+        Default is fail-closed: refuse to load credentials we can't verify.
+        Operators who accept the risk of an unverified settings.json can set
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true`` to restore the old
+        load-anyway behaviour.
+        """
+        allow_unverified = os.getenv(
+            "SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL", "false"
+        ).lower() == "true"
+        if allow_unverified:
+            logger.warning(
+                f"pywin32 not installed. Windows ACL check for {path} SKIPPED "
+                "(SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true). "
+                "File permissions were NOT verified — install pywin32 to enable enforcement."
+            )
+            return True
+        logger.error(
+            f"pywin32 not installed; cannot verify Windows ACL for {path}. "
+            "Refusing to load credentials. Either install pywin32 or set "
+            "SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true to accept the risk."
+        )
+        return False
 
     def _load_settings(self):
         """Load all settings from XDG config directory (~/.config/synology-mcp/settings.json)."""

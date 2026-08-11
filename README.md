@@ -581,19 +581,21 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 
 **settings.json File Permissions:**
 - **Linux/macOS (POSIX):** `chmod 600 ~/.config/synology-mcp/settings.json` is required. The server refuses to load the file if it is group- or world-readable/writable, or owned by another user.
-- **Windows:** Access control is enforced via NTFS ACLs, not POSIX mode bits. The server checks the file's owner SID against the current user's SID and refuses to load if they differ.
-  - Requires the optional [`pywin32`](https://pypi.org/project/pywin32/) package: `pip install pywin32`. Without it the ACL check is skipped with a warning and the file loads unverified.
-  - Expected ACL shape: only the current user should have access. Remove any grants to `BUILTIN\Users`, `Everyone`, or other principals.
-  - Lock down the file from an Administrator PowerShell prompt (replace `<YourUser>`):
+- **Windows:** Access control is enforced via NTFS ACLs, not POSIX mode bits. The server audits the file's security descriptor and refuses to load unless **all three** hold: (1) the owner SID matches the current user; (2) the DACL is present (a NULL DACL — "everyone full access" — is rejected); (3) no allow-ACE grants access to a principal outside the allowlist: the current user, `NT AUTHORITY\SYSTEM`, and `BUILTIN\Administrators`. Any inherited `Everyone` / `BUILTIN\Users` / `Authenticated Users` grant fails the check.
+  - Requires the optional [`pywin32`](https://pypi.org/project/pywin32/) package: `pip install pywin32`. **If pywin32 is not installed, the server fails closed and refuses to load `settings.json`.** Operators who accept the risk of an unverified file can opt back in by setting `SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true`.
+  - The server resolves the file via `XDG_CONFIG_HOME` (default `Path.home() / ".config"`), so on Windows it lives at `%USERPROFILE%\.config\synology-mcp\settings.json` unless `XDG_CONFIG_HOME` is set.
+  - Lock down the file from an elevated PowerShell prompt (uses the same path the server loads):
 
     ```powershell
+    # The server loads settings from here (matches src/config.py SETTINGS_FILE):
+    $f = "$env:USERPROFILE\.config\synology-mcp\settings.json"
     # Remove inheritance and strip all existing ACEs, then grant the
-    # current user full control and Administrators full control.
-    icacls "$env:APPDATA\synology-mcp\settings.json" /inheritance:r
-    icacls "$env:APPDATA\synology-mcp\settings.json" /grant:r "${env:USERNAME}:(F)"
-    icacls "$env:APPDATA\synology-mcp\settings.json" /grant:r "Administrators:(F)"
+    # current user and Administrators full control (no other principals).
+    icacls $f /inheritance:r
+    icacls $f /grant:r "${env:USERNAME}:(F)"
+    icacls $f /grant:r "Administrators:(F)"
     ```
-  - Verify: `icacls "$env:APPDATA\synology-mcp\settings.json"` — only your user and `Administrators` should appear.
+  - Verify: `icacls "$env:USERPROFILE\.config\synology-mcp\settings.json"` — only your user and `Administrators` should appear.
 
 **SSL Certificate Verification (VERIFY_SSL):**
 - Default is `false` to support self-signed certificates on internal NAS devices
