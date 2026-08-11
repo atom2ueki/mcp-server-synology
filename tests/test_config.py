@@ -722,6 +722,41 @@ class TestWindowsAclFallback:
 
         assert result is True
 
+    def test_unrecognised_ace_type_fails_closed(self, tmp_path, caplog):
+        """An ACE of unrecognised type fails closed (no silent bypass).
+
+        Covers callback/conditional/dynamic ACE types (9, 11, …) that could
+        widen access but whose shape we don't model. Rather than skip them
+        and risk a foreign grant slipping through, the check rejects the
+        file. Also covers a totally unknown type (e.g. 99).
+        """
+        import logging
+        import sys
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        for unknown_type in (9, 11, 99):
+            fakes = self._build_fakes(
+                owner_sid=self.CURRENT_SID,
+                dacl_aces=[
+                    self._ace(self.CURRENT_SID),
+                    self._ace(self.EVERYONE_SID, ace_type=unknown_type),
+                ],
+            )
+
+            config_mod = self._load_fresh_config()
+            cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+            with patch.dict(sys.modules, fakes):
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    result = cfg._check_windows_file_permissions(secrets_file)
+
+            assert result is False, f"type {unknown_type} should fail closed"
+            assert any(
+                "unrecognised" in rec.message.lower() for rec in caplog.records
+            )
+
     def test_win32_runtime_failure_returns_false(self, tmp_path, caplog):
         """A runtime error from win32security fails the check (fail-closed)."""
         import logging

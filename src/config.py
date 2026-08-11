@@ -234,10 +234,37 @@ class SynologyConfig:
 
             # PyACL: enumerate via GetAceCount()/GetAce(i) — it is NOT directly
             # iterable on real Windows (pywin32 returns a PyACL object).
+            #
+            # ACE type semantics (Win32):
+            #   0 ACCESS_ALLOWED_ACE_TYPE              — widens (grant)
+            #   1 ACCESS_DENIED_ACE_TYPE               — narrows (deny)
+            #   6 ACCESS_ALLOWED_OBJECT_ACE_TYPE       — widens (object grant)
+            #   7 ACCESS_DENIED_OBJECT_ACE_TYPE        — narrows (object deny)
+            #   9 ACCESS_ALLOWED_CALLBACK_ACE_TYPE     — widens (conditional)
+            #  11 ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE — widens (conditional obj)
+            #   2/3 SYSTEM_AUDIT / SYSTEM_ALARM         — audit, not access
+            #
+            # Strategy: explicitly enumerate the DENY and audit types we know
+            # are safe to skip (they don't widen access). For the known ALLOW
+            # types, audit the trustee. For ANYTHING ELSE (callback, dynamic,
+            # or future types), fail closed — we can't prove they don't widen.
             allow_type = ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE
             allow_object_type = getattr(
                 ntsecuritycon, "ACCESS_ALLOWED_OBJECT_ACE_TYPE", 6
             )
+            deny_type = getattr(ntsecuritycon, "ACCESS_DENIED_ACE_TYPE", 1)
+            deny_object_type = getattr(
+                ntsecuritycon, "ACCESS_DENIED_OBJECT_ACE_TYPE", 7
+            )
+            # Types that provably don't widen access: deny types (narrow) and
+            # SACL audit types (no access effect). Everything else must be
+            # audited or rejected.
+            safe_to_skip = {
+                deny_type,
+                deny_object_type,
+                getattr(ntsecuritycon, "SYSTEM_AUDIT_ACE_TYPE", 2),
+                getattr(ntsecuritycon, "SYSTEM_ALARM_ACE_TYPE", 3),
+            }
             # ACE tuple shapes returned by pywin32's PyACL.GetAce(i):
             #   conventional: ((ace_type, ace_flags), mask, sid)
             #   object:       ((ace_type, ace_flags), mask, object_type,
@@ -254,18 +281,29 @@ class SynologyConfig:
                 except Exception:
                     ace_type = None
 
-                # Only ALLOW-type ACEs widen access. DENY-type ACEs (and any
-                # allow-type we don't recognise) only narrow or preserve it.
-                # ACCESS_ALLOWED_ACE_TYPE (0) and ACCESS_ALLOWED_OBJECT_ACE_TYPE
-                # (6) are the two allow types; both must be audited.
-                is_allow = ace_type in (allow_type, allow_object_type)
-                if not is_allow:
+                # Known-safe non-widening types (deny / audit) narrow or have
+                # no access effect — skip them.
+                if ace_type in safe_to_skip:
                     continue
 
+                # Known allow types — audit the trustee against the allowlist.
+                if ace_type == allow_type:
+                    trustee_index = 2
+                elif ace_type == allow_object_type:
+                    trustee_index = -1
+                else:
+                    # Unrecognised type (callback, conditional, dynamic, or a
+                    # future type). We can't prove it doesn't widen access, so
+                    # fail closed rather than risk a silent bypass.
+                    logger.warning(
+                        f"{path} DACL contains an ACE of unrecognised type "
+                        f"({ace_type}); failing closed. "
+                        "Restrict the file to your user; see README."
+                    )
+                    return False
+
                 try:
-                    # Object ACEs carry extra fields before the SID; ace[-1]
-                    # is the trustee for both shapes.
-                    trustee_sid = ace[2] if ace_type == allow_type else ace[-1]
+                    trustee_sid = ace[trustee_index]
                     trustee_sid_str = str(trustee_sid)
                 except Exception as e:
                     logger.warning(
