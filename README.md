@@ -587,30 +587,39 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
   - Lock down the file from an elevated PowerShell prompt (uses the same path the server loads):
 
     ```powershell
-    # The server loads settings from here (matches src/config.py SETTINGS_FILE):
-    $f = "$env:USERPROFILE\.config\synology-mcp\settings.json"
-    # Reset inheritance, revoke every existing grant, then grant only the
-    # current user and Administrators full control.
+    # Resolve the path the SAME way the server does: $XDG_CONFIG_HOME if set,
+    # otherwise %USERPROFILE%\.config. This honors the override documented above.
+    $cfg = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { "$env:USERPROFILE\.config" }
+    $f = "$cfg\synology-mcp\settings.json"
+
+    # The server's ACL audit requires: owner == current user, no NULL DACL, and
+    # no allow-ACE outside {current user, SYSTEM, Administrators}. The steps
+    # below enforce all three.
     #
-    # Use the *<SID> form for built-in principals: account names like
-    # "Administrators" are localized on non-English Windows (e.g. German
-    # "Administratoren"), which breaks the recipe. S-1-5-32-544 is the
-    # locale-independent SID for BUILTIN\Administrators.
+    # Use the *<SID> form for every built-in principal: account names like
+    # "Administrators" / "Everyone" / "Users" are localized on non-English
+    # Windows (e.g. German "Administratoren") and won't resolve. The
+    # locale-independent SIDs:
+    #   *S-1-1-0            Everyone
+    #   *S-1-5-11           Authenticated Users
+    #   *S-1-5-32-545       BUILTIN\Users
+    #   *S-1-5-32-544       BUILTIN\Administrators
     #
-    # /inheritance:r removes inherited ACEs but leaves explicit ones, and
-    # /grant:r only replaces the named principal's grant, so first audit
-    # the current ACL and revoke any explicit grant that is NOT your user
-    # or Administrators. The common foreign principals are revoked below;
-    # if `icacls $f` shows any other trustee, remove it too before granting.
+    # 1. Ensure the file is owned by the current user (the audit rejects any
+    #    other owner). /setowner requires elevation.
+    icacls $f /setowner "${env:USERNAME}"
+    # 2. Drop inherited ACEs, then revoke the common foreign grants. /grant:r
+    #    only replaces the named principal, so revoke first.
     icacls $f /inheritance:r
-    icacls $f /remove:g "Everyone" "BUILTIN\Users" "Authenticated Users"
+    icacls $f /remove:g "*S-1-1-0" "*S-1-5-11" "*S-1-5-32-545"
     # Re-run `icacls $f` here; if any principal other than your user or
     # Administrators still appears, run: icacls $f /remove:g "<that principal>"
+    # 3. Grant the current user and Administrators full control.
     icacls $f /grant:r "${env:USERNAME}:(F)"
     icacls $f /grant:r "*S-1-5-32-544:(F)"   # BUILTIN\Administrators (locale-independent)
     ```
     If the file is brand new, the `/remove:g` step is a harmless no-op.
-  - Verify: `icacls "$env:USERPROFILE\.config\synology-mcp\settings.json"` — only your user and `Administrators` (or `*S-1-5-32-544`) should appear.
+  - Verify: `icacls "$f"` — only your user and `*S-1-5-32-544` (Administrators) should appear.
 
 **SSL Certificate Verification (VERIFY_SSL):**
 - Default is `false` to support self-signed certificates on internal NAS devices
