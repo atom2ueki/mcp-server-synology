@@ -579,6 +579,22 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 
 ### ⚠️ Security Recommendations
 
+**settings.json File Permissions:**
+- **Linux/macOS (POSIX):** `chmod 600 ~/.config/synology-mcp/settings.json` is required. The server refuses to load the file if it is group- or world-readable/writable, or owned by another user.
+- **Windows:** Access control is enforced via NTFS ACLs, not POSIX mode bits. The server checks the file's owner SID against the current user's SID and refuses to load if they differ.
+  - Requires the optional [`pywin32`](https://pypi.org/project/pywin32/) package: `pip install pywin32`. Without it the ACL check is skipped with a warning and the file loads unverified.
+  - Expected ACL shape: only the current user should have access. Remove any grants to `BUILTIN\Users`, `Everyone`, or other principals.
+  - Lock down the file from an Administrator PowerShell prompt (replace `<YourUser>`):
+
+    ```powershell
+    # Remove inheritance and strip all existing ACEs, then grant the
+    # current user full control and Administrators full control.
+    icacls "$env:APPDATA\synology-mcp\settings.json" /inheritance:r
+    icacls "$env:APPDATA\synology-mcp\settings.json" /grant:r "${env:USERNAME}:(F)"
+    icacls "$env:APPDATA\synology-mcp\settings.json" /grant:r "Administrators:(F)"
+    ```
+  - Verify: `icacls "$env:APPDATA\synology-mcp\settings.json"` — only your user and `Administrators` should appear.
+
 **SSL Certificate Verification (VERIFY_SSL):**
 - Default is `false` to support self-signed certificates on internal NAS devices
 - **If your NAS has a valid SSL certificate (e.g., from Let's Encrypt or a corporate CA), set `VERIFY_SSL=true`**

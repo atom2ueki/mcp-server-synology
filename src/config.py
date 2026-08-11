@@ -114,19 +114,16 @@ class SynologyConfig:
         Returns True if permissions are safe, False otherwise.
         Prints warning if permissions are too open.
 
-        POSIX only. On Windows os.getuid() does not exist and st_mode carries
-        no meaningful group/other bits, so this check raised AttributeError and
-        took the whole settings load down with it.
-
-        On Windows the check is SKIPPED and this returns True so the settings
-        file still loads. Be clear about what that means: True here means
-        "not checked", not "verified safe". Windows access control lives in
-        ACLs, which this function cannot read. The alternative -- returning
-        False -- would make secrets.json unusable on Windows entirely, which is
-        a worse outcome than an unverified file, but it does mean a
-        world-readable secrets.json will load without complaint. The warning
-        below is deliberately not debug-level so the gap is visible in logs.
+        POSIX: checks file ownership and group/other permission bits.
+        Windows: uses pywin32 (win32security) to verify the file owner SID
+        matches the current user. Falls back to a warning if pywin32 is not
+        installed.
+        Other platforms without os.getuid(): skipped with a warning, returns
+        True (unverified).
         """
+        if os.name == "nt":
+            return self._check_windows_file_permissions(path)
+
         if not hasattr(os, "getuid"):
             logger.warning(
                 f"Permission check for {path} SKIPPED: this platform has no POSIX "
@@ -135,6 +132,7 @@ class SynologyConfig:
             )
             return True
 
+        # POSIX fallback (original logic)
         try:
             file_stat = path.stat()
             mode = file_stat.st_mode
@@ -153,6 +151,56 @@ class SynologyConfig:
             return True
         except OSError as e:
             logger.warning(f"Could not check permissions for {path}: {e}")
+            return False
+
+    def _check_windows_file_permissions(self, path: Path) -> bool:
+        """Check Windows ACL for settings.json.
+
+        Uses pywin32 (win32security) to verify the file owner SID matches the
+        current user. This is a simplified check — a full DACL audit is not
+        performed. The expected ACL grants access to the current user only.
+
+        pywin32 is an optional dependency. Without it the check is skipped with
+        a warning and the file is treated as acceptable (returns True).
+        """
+        try:
+            import win32file  # noqa: F401 - ensure win32file is available
+            import win32security
+
+            sd = win32security.GetFileSecurity(
+                str(path), win32security.OWNER_SECURITY_INFORMATION
+            )
+            owner_sid = sd.GetSecurityDescriptorOwner()
+
+            # Get the current user's SID
+            token = win32security.OpenProcessToken(
+                win32security.GetCurrentProcess(),
+                win32security.TOKEN_QUERY,
+            )
+            token_info = win32security.GetTokenInformation(token, win32security.TokenUser)
+            current_sid = token_info["UserSid"]
+
+            if current_sid != owner_sid:
+                logger.warning(
+                    f"{path} owner SID does not match current user. "
+                    "Expected ACL to restrict access to the current user only."
+                )
+                return False
+
+            logger.info(
+                f"Windows ACL check passed for {path} (owner SID verified as current user)"
+            )
+            return True
+
+        except ImportError:
+            logger.warning(
+                f"pywin32 not installed. Windows ACL check for {path} SKIPPED — "
+                "file permissions were NOT verified. "
+                "Install pywin32 to enable Windows ACL enforcement."
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Windows ACL check failed for {path}: {e}")
             return False
 
     def _load_settings(self):

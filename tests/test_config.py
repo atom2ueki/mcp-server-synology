@@ -306,6 +306,212 @@ class TestFilePermissions:
                 assert any("permission" in rec.message.lower() for rec in caplog.records)
 
 
+class TestWindowsAclFallback:
+    """Test Windows ACL check fallback when pywin32 is unavailable.
+
+    pywin32 is Windows-only and not installed in CI/dev on macOS/Linux, so we
+    drive _check_windows_file_permissions() in isolation. Each test injects a
+    fake ``win32security`` / ``win32file`` module (or none) into sys.modules so
+    the method's optional-dependency import either succeeds with a stub or
+    raises ImportError, exercising both branches.
+    """
+
+    def _load_fresh_config(self):
+        """Import a fresh SynologyConfig class (avoids module-level caching)."""
+        reload_config()
+        import config as config_mod
+
+        return config_mod
+
+    def test_fallback_returns_true_without_pywin32(self, tmp_path, caplog):
+        """Without pywin32 the check is skipped and returns True (unverified)."""
+        import logging
+        import sys
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        # Ensure no pywin32 modules are importable
+        removed = {}
+        for mod_name in ("win32security", "win32file"):
+            if mod_name in sys.modules:
+                removed[mod_name] = sys.modules.pop(mod_name)
+
+        config_mod = self._load_fresh_config()
+        cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+        try:
+            with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                result = cfg._check_windows_file_permissions(secrets_file)
+
+            assert result is True
+            assert any(
+                "pywin32 not installed" in rec.message.lower()
+                or "pywin32" in rec.message.lower()
+                for rec in caplog.records
+            )
+        finally:
+            sys.modules.update(removed)
+
+    def test_owner_match_returns_true(self, tmp_path, caplog):
+        """When owner SID equals current user SID, the check passes."""
+        import logging
+        import sys
+        import types
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        same_sid = "S-1-5-21-currentuser"
+
+        # Build a fake win32security module with the constants/callables the
+        # method uses. Constants can be arbitrary ints; only equality matters.
+        fake_win32security = types.ModuleType("win32security")
+        fake_win32security.OWNER_SECURITY_INFORMATION = 1
+        fake_win32security.TOKEN_QUERY = 8
+        fake_win32security.TokenUser = 1
+
+        def _get_file_security(_path, _info):
+            sd = types.SimpleNamespace(GetSecurityDescriptorOwner=lambda: same_sid)
+            return sd
+
+        def _get_current_process():
+            return "fake-process-handle"
+
+        def _open_process_token(_proc, _access):
+            return "fake-token-handle"
+
+        def _get_token_information(_token, _class):
+            return {"UserSid": same_sid}
+
+        fake_win32security.GetFileSecurity = _get_file_security
+        fake_win32security.GetCurrentProcess = _get_current_process
+        fake_win32security.OpenProcessToken = _open_process_token
+        fake_win32security.GetTokenInformation = _get_token_information
+
+        fake_win32file = types.ModuleType("win32file")
+
+        config_mod = self._load_fresh_config()
+        cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+        with patch.dict(
+            sys.modules,
+            {"win32security": fake_win32security, "win32file": fake_win32file},
+        ):
+            with caplog.at_level(logging.INFO, logger="synology-mcp"):
+                result = cfg._check_windows_file_permissions(secrets_file)
+
+        assert result is True
+        assert any(
+            "windows acl check passed" in rec.message.lower() for rec in caplog.records
+        )
+
+    def test_owner_mismatch_returns_false(self, tmp_path, caplog):
+        """When owner SID differs from current user SID, the check fails."""
+        import logging
+        import sys
+        import types
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        owner_sid = "S-1-5-21-someone-else"
+        current_sid = "S-1-5-21-currentuser"
+
+        fake_win32security = types.ModuleType("win32security")
+        fake_win32security.OWNER_SECURITY_INFORMATION = 1
+        fake_win32security.TOKEN_QUERY = 8
+        fake_win32security.TokenUser = 1
+
+        def _get_file_security(_path, _info):
+            sd = types.SimpleNamespace(GetSecurityDescriptorOwner=lambda: owner_sid)
+            return sd
+
+        fake_win32security.GetFileSecurity = _get_file_security
+        fake_win32security.GetCurrentProcess = lambda: "proc"
+        fake_win32security.OpenProcessToken = lambda _p, _a: "token"
+        fake_win32security.GetTokenInformation = lambda _t, _c: {"UserSid": current_sid}
+
+        fake_win32file = types.ModuleType("win32file")
+
+        config_mod = self._load_fresh_config()
+        cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+        with patch.dict(
+            sys.modules,
+            {"win32security": fake_win32security, "win32file": fake_win32file},
+        ):
+            with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                result = cfg._check_windows_file_permissions(secrets_file)
+
+        assert result is False
+        assert any(
+            "owner sid does not match" in rec.message.lower() for rec in caplog.records
+        )
+
+    def test_win32_runtime_failure_returns_false(self, tmp_path, caplog):
+        """A runtime error from win32security fails the check (fail-closed)."""
+        import logging
+        import sys
+        import types
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        fake_win32security = types.ModuleType("win32security")
+        fake_win32security.OWNER_SECURITY_INFORMATION = 1
+        fake_win32security.TOKEN_QUERY = 8
+        fake_win32security.TokenUser = 1
+
+        def _boom(*_args, **_kwargs):
+            raise OSError("denied")
+
+        fake_win32security.GetFileSecurity = _boom
+        fake_win32security.GetCurrentProcess = _boom
+        fake_win32security.OpenProcessToken = _boom
+        fake_win32security.GetTokenInformation = _boom
+
+        fake_win32file = types.ModuleType("win32file")
+
+        config_mod = self._load_fresh_config()
+        cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+        with patch.dict(
+            sys.modules,
+            {"win32security": fake_win32security, "win32file": fake_win32file},
+        ):
+            with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                result = cfg._check_windows_file_permissions(secrets_file)
+
+        assert result is False
+        assert any(
+            "windows acl check failed" in rec.message.lower() for rec in caplog.records
+        )
+
+    def test_dispatch_on_nt_calls_windows_check(self, tmp_path):
+        """_check_file_permissions routes to the Windows check when os.name == 'nt'."""
+        import sys
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        config_mod = self._load_fresh_config()
+        cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+        called = {"count": 0}
+
+        def _stub(_path):
+            called["count"] += 1
+            return True
+
+        with patch.object(config_mod.os, "name", "nt"):
+            with patch.object(cfg, "_check_windows_file_permissions", _stub):
+                result = cfg._check_file_permissions(secrets_file)
+
+        assert result is True
+        assert called["count"] == 1
+
+
 def test_config_str_representation():
     """Test string representation of config."""
     reload_config()
