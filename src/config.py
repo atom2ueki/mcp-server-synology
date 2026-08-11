@@ -114,19 +114,16 @@ class SynologyConfig:
         Returns True if permissions are safe, False otherwise.
         Prints warning if permissions are too open.
 
-        POSIX only. On Windows os.getuid() does not exist and st_mode carries
-        no meaningful group/other bits, so this check raised AttributeError and
-        took the whole settings load down with it.
-
-        On Windows the check is SKIPPED and this returns True so the settings
-        file still loads. Be clear about what that means: True here means
-        "not checked", not "verified safe". Windows access control lives in
-        ACLs, which this function cannot read. The alternative -- returning
-        False -- would make secrets.json unusable on Windows entirely, which is
-        a worse outcome than an unverified file, but it does mean a
-        world-readable secrets.json will load without complaint. The warning
-        below is deliberately not debug-level so the gap is visible in logs.
+        POSIX: checks file ownership and group/other permission bits.
+        Windows: full ACL audit via pywin32 (owner SID match + DACL allowlist).
+        Fails closed if pywin32 is missing; opt back in with
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true``.
+        Other platforms without os.getuid(): skipped with a warning, returns
+        True (unverified).
         """
+        if os.name == "nt":
+            return self._check_windows_file_permissions(path)
+
         if not hasattr(os, "getuid"):
             logger.warning(
                 f"Permission check for {path} SKIPPED: this platform has no POSIX "
@@ -135,6 +132,7 @@ class SynologyConfig:
             )
             return True
 
+        # POSIX fallback (original logic)
         try:
             file_stat = path.stat()
             mode = file_stat.st_mode
@@ -154,6 +152,214 @@ class SynologyConfig:
         except OSError as e:
             logger.warning(f"Could not check permissions for {path}: {e}")
             return False
+
+    def _check_windows_file_permissions(self, path: Path) -> bool:
+        """Check Windows ACL for settings.json.
+
+        Enforces the policy from issue #72: the file must grant access only to
+        the current user (plus a small system allowlist). Concretely:
+
+        1. The owner SID must match the current user.
+        2. The DACL must be present (a NULL DACL means "everyone full access"
+           and is rejected).
+        3. No allow-ACE may grant access to a principal outside the allowlist:
+           the current user, ``NT AUTHORITY\\SYSTEM``, and
+           ``BUILTIN\\Administrators``. Inherited ``Everyone`` /
+           ``BUILTIN\\Users`` / ``Authenticated Users`` grants fail the check.
+
+        pywin32 is an **optional** dependency. If it is not installed the check
+        **fails closed** (returns ``False``) so credentials are never loaded
+        unverified. Operators who accept the risk can opt back in to the old
+        unverified-load behaviour by setting
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true``.
+        """
+        try:
+            import ntsecuritycon
+            import win32api
+            import win32security
+        except ImportError:
+            return self._windows_acl_unavailable(path)
+
+        try:
+            # OWNER + DACL: we need both to enforce the policy. OWNER alone is
+            # not enough — a file owned by the current user can still inherit
+            # an Everyone/BUILTIN\Users allow-ACE from its parent folder.
+            info = (
+                win32security.OWNER_SECURITY_INFORMATION
+                | win32security.DACL_SECURITY_INFORMATION
+            )
+            sd = win32security.GetFileSecurity(str(path), info)
+            owner_sid = sd.GetSecurityDescriptorOwner()
+
+            # Current user SID via the process token.
+            # GetTokenInformation(TokenUser) returns a (sid, attributes) tuple.
+            token = win32security.OpenProcessToken(
+                win32api.GetCurrentProcess(),
+                win32security.TOKEN_QUERY,
+            )
+            token_user = win32security.GetTokenInformation(token, win32security.TokenUser)
+            current_sid = token_user[0]
+
+            if current_sid != owner_sid:
+                logger.warning(
+                    f"{path} owner SID does not match current user. "
+                    "Expected ACL to restrict access to the current user only."
+                )
+                return False
+
+            # Build the allowlist of trusted trustee SIDs. We compare SIDs as
+            # strings (sid.__str__) for stability against pywin32's PySID
+            # object identity quirks.
+            #
+            # Use well-known SID *literals* rather than LookupAccountName:
+            # account names are localized on non-English Windows (e.g. German
+            # "Administratoren"), so LookupAccountName("Administrators") can
+            # fail and drop S-1-5-32-544 from the allowlist — rejecting a
+            # normal secured DACL. The SID strings are locale-independent.
+            allowed_sid_strs = {
+                str(current_sid),
+                "S-1-5-18",       # NT AUTHORITY\SYSTEM
+                "S-1-5-32-544",   # BUILTIN\Administrators
+            }
+
+            dacl = sd.GetSecurityDescriptorDacl()
+            if dacl is None:
+                # NULL DACL: no access control — anyone can read/write. Reject.
+                logger.warning(
+                    f"{path} has a NULL DACL (no access control). "
+                    "Refusing to load. Restrict the file to your user; see README."
+                )
+                return False
+
+            # PyACL: enumerate via GetAceCount()/GetAce(i) — it is NOT directly
+            # iterable on real Windows (pywin32 returns a PyACL object).
+            #
+            # ACE type semantics (Win32):
+            #   0 ACCESS_ALLOWED_ACE_TYPE              — widens (grant)
+            #   1 ACCESS_DENIED_ACE_TYPE               — narrows (deny)
+            #   6 ACCESS_ALLOWED_OBJECT_ACE_TYPE       — widens (object grant)
+            #   7 ACCESS_DENIED_OBJECT_ACE_TYPE        — narrows (object deny)
+            #   9 ACCESS_ALLOWED_CALLBACK_ACE_TYPE     — widens (conditional)
+            #  11 ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE — widens (conditional obj)
+            #   2/3 SYSTEM_AUDIT / SYSTEM_ALARM         — audit, not access
+            #
+            # Strategy: explicitly enumerate the DENY and audit types we know
+            # are safe to skip (they don't widen access). For the known ALLOW
+            # types, audit the trustee. For ANYTHING ELSE (callback, dynamic,
+            # or future types), fail closed — we can't prove they don't widen.
+            allow_type = ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE
+            # Fallback values per WinNT.h / MS-DTYP §2.4.4.1:
+            #   ACCESS_ALLOWED_OBJECT_ACE_TYPE = 5, ACCESS_DENIED_OBJECT_ACE_TYPE = 6,
+            #   ACCESS_DENIED_ACE_TYPE = 1, SYSTEM_AUDIT_ACE_TYPE = 2,
+            #   SYSTEM_ALARM_ACE_TYPE = 3.
+            # getattr() reads the real ntsecuritycon first; the literal is only
+            # a defensive default if an attribute is missing.
+            allow_object_type = getattr(
+                ntsecuritycon, "ACCESS_ALLOWED_OBJECT_ACE_TYPE", 5
+            )
+            deny_type = getattr(ntsecuritycon, "ACCESS_DENIED_ACE_TYPE", 1)
+            deny_object_type = getattr(
+                ntsecuritycon, "ACCESS_DENIED_OBJECT_ACE_TYPE", 6
+            )
+            # Types that provably don't widen access: deny types (narrow) and
+            # SACL audit types (no access effect). Everything else must be
+            # audited or rejected.
+            safe_to_skip = {
+                deny_type,
+                deny_object_type,
+                getattr(ntsecuritycon, "SYSTEM_AUDIT_ACE_TYPE", 2),
+                getattr(ntsecuritycon, "SYSTEM_ALARM_ACE_TYPE", 3),
+            }
+            # ACE tuple shapes returned by pywin32's PyACL.GetAce(i):
+            #   conventional: ((ace_type, ace_flags), mask, sid)
+            #   object:       ((ace_type, ace_flags), mask, object_type,
+            #                  inherited_object_type, sid)
+            # Conventional trustee SID is ace[2]; object ACE trustee is ace[-1].
+            ace_count = dacl.GetAceCount()
+            for i in range(ace_count):
+                ace = dacl.GetAce(i)
+                # ace_type is ace[0][0] — ace[0][1] is the *flags* (e.g.
+                # INHERITED_ACE), which would misclassify an inherited
+                # allow-ACE as a deny and let it through.
+                try:
+                    ace_type = ace[0][0]
+                except Exception:
+                    ace_type = None
+
+                # Known-safe non-widening types (deny / audit) narrow or have
+                # no access effect — skip them.
+                if ace_type in safe_to_skip:
+                    continue
+
+                # Known allow types — audit the trustee against the allowlist.
+                if ace_type == allow_type:
+                    trustee_index = 2
+                elif ace_type == allow_object_type:
+                    trustee_index = -1
+                else:
+                    # Unrecognised type (callback, conditional, dynamic, or a
+                    # future type). We can't prove it doesn't widen access, so
+                    # fail closed rather than risk a silent bypass.
+                    logger.warning(
+                        f"{path} DACL contains an ACE of unrecognised type "
+                        f"({ace_type}); failing closed. "
+                        "Restrict the file to your user; see README."
+                    )
+                    return False
+
+                try:
+                    trustee_sid = ace[trustee_index]
+                    trustee_sid_str = str(trustee_sid)
+                except Exception as e:
+                    logger.warning(
+                        f"{path} has an ACE whose trustee could not be read ({e}); "
+                        "failing closed."
+                    )
+                    return False
+
+                if trustee_sid_str not in allowed_sid_strs:
+                    logger.warning(
+                        f"{path} DACL grants access to a principal outside the "
+                        f"allowlist (SID={trustee_sid_str}, ace_type={ace_type}). "
+                        "Restrict the file to your user; see README."
+                    )
+                    return False
+
+            logger.info(
+                f"Windows ACL check passed for {path} "
+                "(owner verified, no foreign allow-ACE in DACL)"
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(f"Windows ACL check failed for {path}: {e}")
+            return False
+
+    @staticmethod
+    def _windows_acl_unavailable(path: Path) -> bool:
+        """Handle pywin32 being unavailable on Windows.
+
+        Default is fail-closed: refuse to load credentials we can't verify.
+        Operators who accept the risk of an unverified settings.json can set
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true`` to restore the old
+        load-anyway behaviour.
+        """
+        allow_unverified = os.getenv(
+            "SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL", "false"
+        ).lower() == "true"
+        if allow_unverified:
+            logger.warning(
+                f"pywin32 not installed. Windows ACL check for {path} SKIPPED "
+                "(SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true). "
+                "File permissions were NOT verified — install pywin32 to enable enforcement."
+            )
+            return True
+        logger.error(
+            f"pywin32 not installed; cannot verify Windows ACL for {path}. "
+            "Refusing to load credentials. Either install pywin32 or set "
+            "SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true to accept the risk."
+        )
+        return False
 
     def _load_settings(self):
         """Load all settings from XDG config directory (~/.config/synology-mcp/settings.json)."""

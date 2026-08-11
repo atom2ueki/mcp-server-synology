@@ -579,6 +579,48 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 
 ### ⚠️ Security Recommendations
 
+**settings.json File Permissions:**
+- **Linux/macOS (POSIX):** `chmod 600 ~/.config/synology-mcp/settings.json` is required. The server refuses to load the file if it is group- or world-readable/writable, or owned by another user.
+- **Windows:** Access control is enforced via NTFS ACLs, not POSIX mode bits. The server audits the file's security descriptor and refuses to load unless **all three** hold: (1) the owner SID matches the current user; (2) the DACL is present (a NULL DACL — "everyone full access" — is rejected); (3) no allow-ACE grants access to a principal outside the allowlist: the current user, `NT AUTHORITY\SYSTEM`, and `BUILTIN\Administrators`. Any inherited `Everyone` / `BUILTIN\Users` / `Authenticated Users` grant fails the check.
+  - Requires the optional [`pywin32`](https://pypi.org/project/pywin32/) package: `pip install pywin32`. **If pywin32 is not installed, the server fails closed and refuses to load `settings.json`.** Operators who accept the risk of an unverified file can opt back in by setting `SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true`.
+  - The server resolves the file via `XDG_CONFIG_HOME` (default `Path.home() / ".config"`), so on Windows it lives at `%USERPROFILE%\.config\synology-mcp\settings.json` unless `XDG_CONFIG_HOME` is set.
+  - Lock down the file from an elevated PowerShell prompt (uses the same path the server loads):
+
+    ```powershell
+    # Resolve the path the SAME way the server does: $XDG_CONFIG_HOME if set,
+    # otherwise %USERPROFILE%\.config. This honors the override documented above.
+    $cfg = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { "$env:USERPROFILE\.config" }
+    $f = "$cfg\synology-mcp\settings.json"
+
+    # The server's ACL audit requires: owner == current user, no NULL DACL, and
+    # no allow-ACE outside {current user, SYSTEM, Administrators}. The steps
+    # below enforce all three.
+    #
+    # Use the *<SID> form for every built-in principal: account names like
+    # "Administrators" / "Everyone" / "Users" are localized on non-English
+    # Windows (e.g. German "Administratoren") and won't resolve. The
+    # locale-independent SIDs:
+    #   *S-1-1-0            Everyone
+    #   *S-1-5-11           Authenticated Users
+    #   *S-1-5-32-545       BUILTIN\Users
+    #   *S-1-5-32-544       BUILTIN\Administrators
+    #
+    # 1. Ensure the file is owned by the current user (the audit rejects any
+    #    other owner). /setowner requires elevation.
+    icacls $f /setowner "${env:USERNAME}"
+    # 2. Drop inherited ACEs, then revoke the common foreign grants. /grant:r
+    #    only replaces the named principal, so revoke first.
+    icacls $f /inheritance:r
+    icacls $f /remove:g "*S-1-1-0" "*S-1-5-11" "*S-1-5-32-545"
+    # Re-run `icacls $f` here; if any principal other than your user or
+    # Administrators still appears, run: icacls $f /remove:g "<that principal>"
+    # 3. Grant the current user and Administrators full control.
+    icacls $f /grant:r "${env:USERNAME}:(F)"
+    icacls $f /grant:r "*S-1-5-32-544:(F)"   # BUILTIN\Administrators (locale-independent)
+    ```
+    If the file is brand new, the `/remove:g` step is a harmless no-op.
+  - Verify: `icacls "$f"` — only your user and `*S-1-5-32-544` (Administrators) should appear.
+
 **SSL Certificate Verification (VERIFY_SSL):**
 - Default is `false` to support self-signed certificates on internal NAS devices
 - **If your NAS has a valid SSL certificate (e.g., from Let's Encrypt or a corporate CA), set `VERIFY_SSL=true`**
