@@ -589,12 +589,16 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
     ```powershell
     # The server loads settings from here (matches src/config.py SETTINGS_FILE):
     $f = "$env:USERPROFILE\.config\synology-mcp\settings.json"
-    # Remove inheritance and strip all existing ACEs, then grant the
-    # current user and Administrators full control (no other principals).
+    # /inheritance:r removes inherited ACEs but leaves explicit ones in place,
+    # and /grant:r only replaces the explicit ACE for the named principal — so
+    # revoke every existing explicit grant first, then grant the current user
+    # and Administrators full control (no other principals).
     icacls $f /inheritance:r
+    icacls $f /remove:g "Everyone" "BUILTIN\Users" "Authenticated Users"
     icacls $f /grant:r "${env:USERNAME}:(F)"
     icacls $f /grant:r "Administrators:(F)"
     ```
+    If the file is brand new, the `/remove:g` step is a harmless no-op.
   - Verify: `icacls "$env:USERPROFILE\.config\synology-mcp\settings.json"` — only your user and `Administrators` should appear.
 
 **SSL Certificate Verification (VERIFY_SSL):**
