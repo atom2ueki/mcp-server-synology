@@ -331,22 +331,43 @@ class TestWindowsAclFallback:
         return config_mod
 
     @staticmethod
-    def _ace(trustee_sid_str, ace_type=0):
-        """Build a fake ACE tuple matching the (header, mask, trustee) layout."""
-        # ace[0][1] is the ACE type (0 = ACCESS_ALLOWED_ACE_TYPE)
-        header = (0, ace_type, 0)
+    def _ace(trustee_sid_str, ace_type=0, ace_flags=0):
+        """Build a fake ACE tuple matching pywin32's real shape.
+
+        Real pywin32 ACE: ((ace_type, ace_flags), mask, trustee_sid).
+        ace_type 0 = ACCESS_ALLOWED_ACE_TYPE, 1 = ACCESS_DENIED_ACE_TYPE.
+        ace_flags includes INHERITED_ACE (0x10) for ACEs inherited from a
+        parent folder — the case Codex flagged as misclassified by the old
+        ace[0][1] read.
+        """
+        header = (ace_type, ace_flags)
         mask = 0x1F01FF  # full control placeholder
         return (header, mask, trustee_sid_str)
 
     def _build_fakes(self, *, owner_sid, dacl_aces=None, dacl_is_null=False):
         """Build fake win32security/win32api/ntsecuritycon modules.
 
-        ``dacl_aces`` is a list of ACE tuples; ``dacl_is_null`` simulates a
-        NULL DACL (GetSecurityDescriptorDacl returns None).
+        The fakes mirror pywin32's real API shape so the tests exercise the
+        same code paths that run on Windows:
+
+        - GetTokenInformation(TokenUser) returns a (sid, attributes) tuple.
+        - GetSecurityDescriptorDacl() returns a PyACL-like object exposing
+          GetAceCount() and GetAce(i) (NOT direct iteration).
+        - ACE tuples are ((ace_type, ace_flags), mask, trustee_sid).
         """
         import types
 
-        same_sid = owner_sid
+        class _FakeAcl:
+            """Minimal PyACL stand-in: GetAceCount + GetAce(i)."""
+
+            def __init__(self, aces):
+                self._aces = list(aces or [])
+
+            def GetAceCount(self):
+                return len(self._aces)
+
+            def GetAce(self, i):
+                return self._aces[i]
 
         fake_win32security = types.ModuleType("win32security")
         fake_win32security.OWNER_SECURITY_INFORMATION = 1
@@ -361,7 +382,7 @@ class TestWindowsAclFallback:
             def _dacl():
                 if dacl_is_null:
                     return None
-                return list(dacl_aces or [])
+                return _FakeAcl(dacl_aces or [])
 
             return types.SimpleNamespace(
                 GetSecurityDescriptorOwner=_owner,
@@ -370,7 +391,11 @@ class TestWindowsAclFallback:
 
         fake_win32security.GetFileSecurity = _get_file_security
         fake_win32security.OpenProcessToken = lambda _p, _a: "token"
-        fake_win32security.GetTokenInformation = lambda _t, _c: {"UserSid": self.CURRENT_SID}
+        # Real pywin32: GetTokenInformation(TokenUser) -> (sid, attributes).
+        fake_win32security.GetTokenInformation = lambda _t, _c: (
+            self.CURRENT_SID,
+            0,
+        )
 
         def _lookup(_sys, name):
             # Map well-known names back to their SIDs.
@@ -552,6 +577,43 @@ class TestWindowsAclFallback:
             dacl_aces=[
                 self._ace(self.CURRENT_SID),
                 self._ace(self.EVERYONE_SID),
+            ],
+        )
+
+        config_mod = self._load_fresh_config()
+        cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+        with patch.dict(sys.modules, fakes):
+            with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                result = cfg._check_windows_file_permissions(secrets_file)
+
+        assert result is False
+        assert any(
+            "outside the allowlist" in rec.message.lower() for rec in caplog.records
+        )
+
+    def test_inherited_foreign_allow_ace_returns_false(self, tmp_path, caplog):
+        """An INHERITED allow-ACE for Everyone must still fail the check.
+
+        Regression guard: the old code read ace[0][1] (flags) instead of
+        ace[0][0] (type), so an inherited allow-ACE (type=0, flags=0x10
+        INHERITED_ACE) was misclassified as "not allowed" and skipped —
+        letting an inherited Everyone grant through. This test fails under
+        that bug and passes with the correct ace[0][0] read.
+        """
+        import logging
+        import sys
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        fakes = self._build_fakes(
+            owner_sid=self.CURRENT_SID,
+            dacl_aces=[
+                self._ace(self.CURRENT_SID),
+                # type=0 (ALLOWED), flags=0x10 (INHERITED_ACE) → real shape of
+                # an ACE inherited from a parent folder granting Everyone read.
+                self._ace(self.EVERYONE_SID, ace_type=0, ace_flags=0x10),
             ],
         )
 

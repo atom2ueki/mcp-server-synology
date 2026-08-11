@@ -192,12 +192,13 @@ class SynologyConfig:
             owner_sid = sd.GetSecurityDescriptorOwner()
 
             # Current user SID via the process token.
+            # GetTokenInformation(TokenUser) returns a (sid, attributes) tuple.
             token = win32security.OpenProcessToken(
                 win32api.GetCurrentProcess(),
                 win32security.TOKEN_QUERY,
             )
-            token_info = win32security.GetTokenInformation(token, win32security.TokenUser)
-            current_sid = token_info["UserSid"]
+            token_user = win32security.GetTokenInformation(token, win32security.TokenUser)
+            current_sid = token_user[0]
 
             if current_sid != owner_sid:
                 logger.warning(
@@ -231,17 +232,26 @@ class SynologyConfig:
                 )
                 return False
 
-            for ace in dacl:
-                # Only allow-ACEs (ACCESS_ALLOWED_ACE_TYPE) widen access;
-                # deny-ACEs only narrow it, so leave them through.
+            # PyACL: enumerate via GetAceCount()/GetAce(i) — it is NOT directly
+            # iterable on real Windows (pywin32 returns a PyACL object).
+            ace_count = dacl.GetAceCount()
+            for i in range(ace_count):
+                ace = dacl.GetAce(i)
+                # ACE tuple shape: ((ace_type, ace_flags), mask, (sid,)).
+                # ace_type is ace[0][0] — ace[0][1] is the *flags* (e.g.
+                # INHERITED_ACE), which would misclassify an inherited
+                # allow-ACE as a deny and let it through. Only allow-ACEs
+                # (ACCESS_ALLOWED_ACE_TYPE) widen access; deny-ACEs only
+                # narrow it, so leave them through.
                 try:
-                    ace_type = ace[0][1]
+                    ace_type = ace[0][0]
                 except Exception:
                     ace_type = None
                 if ace_type != ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE:
                     continue
 
                 try:
+                    # Trustee SID is ace[2] (a PySID tuple on real Windows).
                     trustee_sid = ace[2]
                     trustee_sid_str = str(trustee_sid)
                 except Exception as e:
