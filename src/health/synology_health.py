@@ -140,6 +140,36 @@ class SynologyHealth:
         return storage
 
     # ------------------------------------------------------------------
+    # iSCSI LUNs
+    # ------------------------------------------------------------------
+
+    def lun_list(self) -> Dict[str, Any]:
+        """List all iSCSI LUNs with name, UUID, size, usage, status, target mappings."""
+        return self._api_call("SYNO.Core.ISCSI.LUN", "list")
+
+    def lun_get(self, name_or_uuid: str) -> Dict[str, Any]:
+        """Get a single iSCSI LUN by name or UUID.
+
+        The LUN list response already carries the full LUN objects, so a
+        single LUN is resolved client-side by matching either the `name` or
+        `uuid` field — no extra API round-trip beyond the list call.
+        """
+        result = self.lun_list()
+        if not result.get("success"):
+            return result
+        luns = result.get("data", {}).get("luns", []) or []
+        for lun in luns:
+            if name_or_uuid in (lun.get("name"), lun.get("uuid")):
+                return {"success": True, "data": lun}
+        return {
+            "success": False,
+            "error": {
+                "code": "lun_not_found",
+                "message": f"No iSCSI LUN found matching '{name_or_uuid}'",
+            },
+        }
+
+    # ------------------------------------------------------------------
     # Network
     # ------------------------------------------------------------------
 

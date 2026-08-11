@@ -366,6 +366,9 @@ docker-compose up
 - **`synology_disk_smart`** - Get detailed SMART attributes for a specific disk
 - **`synology_volume_status`** - List all volumes with status, size, usage, filesystem type
 - **`synology_storage_pool`** - List RAID/storage pools with level, status, member disks
+- **`synology_lun_list`** - List all iSCSI LUNs with name, UUID, size, usage, status, mapped targets, and backing volume
+- **`synology_lun_get`** - Get details for a single iSCSI LUN
+  - `name` (required): LUN name or UUID from `synology_lun_list` output
 - **`synology_network`** - Get network interface status and transfer rates
 - **`synology_ups`** - Get UPS status, battery level, power readings
 - **`synology_services`** - List installed packages and their running status

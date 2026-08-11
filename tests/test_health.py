@@ -108,6 +108,55 @@ class TestSynologyHealth:
         else:
             print(f"⚠️  Storage pool list failed: {result.get('error')}")
 
+    def test_lun_list(self, session_info):
+        """Test listing iSCSI LUNs."""
+        from health.synology_health import SynologyHealth
+
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
+
+        result = health.lun_list()
+
+        assert isinstance(result, dict)
+        if result.get("success"):
+            luns = result.get("data", {}).get("luns", [])
+            print(f"✅ Found {len(luns)} iSCSI LUN(s)")
+            for lun in luns:
+                print(f"   - {lun.get('name', 'unknown')}: {lun.get('status', 'unknown')}")
+        else:
+            print(f"⚠️  LUN list failed: {result.get('error')}")
+
+    def test_lun_get(self, session_info):
+        """Test getting a single iSCSI LUN by name (uses the live LUN list)."""
+        from health.synology_health import SynologyHealth
+
+        health = SynologyHealth(
+            session_info["base_url"],
+            session_info["session_id"],
+            syno_token=session_info.get("syno_token"),
+        )
+
+        listed = health.lun_list()
+        assert isinstance(listed, dict)
+        if not listed.get("success"):
+            print(f"⚠️  LUN list failed: {listed.get('error')}")
+            return
+        luns = listed.get("data", {}).get("luns", [])
+        if not luns:
+            pytest.skip("No iSCSI LUNs configured on this NAS — nothing to fetch")
+
+        result = health.lun_get(luns[0]["name"])
+
+        assert isinstance(result, dict)
+        if result.get("success"):
+            print(f"✅ LUN detail retrieved for {luns[0]['name']}")
+            assert result["data"].get("name") == luns[0]["name"]
+        else:
+            print(f"⚠️  LUN get failed: {result.get('error')}")
+
     def test_network_info(self, session_info):
         """Test getting network information."""
         from health.synology_health import SynologyHealth
@@ -327,6 +376,93 @@ class TestDiskSmartInfo:
         with patch.object(health._api, "get", side_effect=side_effect):
             result = health.disk_smart_info("usb1")
         assert result == retry_fail
+
+
+class TestLunList:
+    """Unit tests for lun_list API coordinates (no live NAS required)."""
+
+    LUN_LIST_OK = {
+        "success": True,
+        "data": {
+            "luns": [
+                {"name": "LUN-1", "uuid": "abc-123", "size": 107374182400, "status": "normal"},
+                {"name": "LUN-2", "uuid": "def-456", "size": 214748364800, "status": "normal"},
+            ],
+            "total": 2,
+        },
+    }
+
+    def _make_health(self):
+        from health.synology_health import SynologyHealth
+
+        return SynologyHealth("http://nas:5000", "fake-sid", verify_ssl=False)
+
+    def test_queries_iscsi_lun_api(self):
+        """Uses SYNO.Core.ISCSI.LUN/list."""
+        health = self._make_health()
+        with patch.object(health._api, "get", return_value=self.LUN_LIST_OK) as mock_get:
+            result = health.lun_list()
+        assert result == self.LUN_LIST_OK
+        mock_get.assert_called_once_with("SYNO.Core.ISCSI.LUN", "list", 1, None)
+
+    def test_failure_propagates(self):
+        """A failed list call is returned unchanged."""
+        health = self._make_health()
+        fail = {"success": False, "error": {"code": 105}}
+        with patch.object(health._api, "get", return_value=fail):
+            result = health.lun_list()
+        assert result == fail
+
+
+class TestLunGet:
+    """Unit tests for lun_get name/UUID resolution (no live NAS required)."""
+
+    LUN_LIST_OK = TestLunList.LUN_LIST_OK
+
+    def _make_health(self):
+        from health.synology_health import SynologyHealth
+
+        return SynologyHealth("http://nas:5000", "fake-sid", verify_ssl=False)
+
+    def test_matches_by_name(self):
+        """Returns the single LUN object when the name matches."""
+        health = self._make_health()
+        with patch.object(health._api, "get", return_value=self.LUN_LIST_OK):
+            result = health.lun_get("LUN-2")
+        assert result == {"success": True, "data": self.LUN_LIST_OK["data"]["luns"][1]}
+
+    def test_matches_by_uuid(self):
+        """The same lookup works on the UUID field."""
+        health = self._make_health()
+        with patch.object(health._api, "get", return_value=self.LUN_LIST_OK):
+            result = health.lun_get("abc-123")
+        assert result == {"success": True, "data": self.LUN_LIST_OK["data"]["luns"][0]}
+
+    def test_not_found(self):
+        """An unknown name/UUID yields a lun_not_found error."""
+        health = self._make_health()
+        with patch.object(health._api, "get", return_value=self.LUN_LIST_OK):
+            result = health.lun_get("no-such-lun")
+        assert not result.get("success")
+        assert result["error"]["code"] == "lun_not_found"
+
+    def test_list_failure_propagates(self):
+        """When the underlying list call fails, its error is the answer."""
+        health = self._make_health()
+        fail = {"success": False, "error": {"code": 119}}
+        with patch.object(health._api, "get", return_value=fail):
+            result = health.lun_get("LUN-1")
+        assert result == fail
+
+    def test_empty_lun_list(self):
+        """A successful list with no LUNs resolves to lun_not_found."""
+        health = self._make_health()
+        with patch.object(
+            health._api, "get", return_value={"success": True, "data": {"luns": [], "total": 0}}
+        ):
+            result = health.lun_get("LUN-1")
+        assert not result.get("success")
+        assert result["error"]["code"] == "lun_not_found"
 
 
 def test_health_url_construction():
