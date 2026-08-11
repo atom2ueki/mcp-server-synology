@@ -234,25 +234,38 @@ class SynologyConfig:
 
             # PyACL: enumerate via GetAceCount()/GetAce(i) — it is NOT directly
             # iterable on real Windows (pywin32 returns a PyACL object).
+            allow_type = ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE
+            allow_object_type = getattr(
+                ntsecuritycon, "ACCESS_ALLOWED_OBJECT_ACE_TYPE", 6
+            )
+            # ACE tuple shapes returned by pywin32's PyACL.GetAce(i):
+            #   conventional: ((ace_type, ace_flags), mask, sid)
+            #   object:       ((ace_type, ace_flags), mask, object_type,
+            #                  inherited_object_type, sid)
+            # Conventional trustee SID is ace[2]; object ACE trustee is ace[-1].
             ace_count = dacl.GetAceCount()
             for i in range(ace_count):
                 ace = dacl.GetAce(i)
-                # ACE tuple shape: ((ace_type, ace_flags), mask, (sid,)).
                 # ace_type is ace[0][0] — ace[0][1] is the *flags* (e.g.
                 # INHERITED_ACE), which would misclassify an inherited
-                # allow-ACE as a deny and let it through. Only allow-ACEs
-                # (ACCESS_ALLOWED_ACE_TYPE) widen access; deny-ACEs only
-                # narrow it, so leave them through.
+                # allow-ACE as a deny and let it through.
                 try:
                     ace_type = ace[0][0]
                 except Exception:
                     ace_type = None
-                if ace_type != ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE:
+
+                # Only ALLOW-type ACEs widen access. DENY-type ACEs (and any
+                # allow-type we don't recognise) only narrow or preserve it.
+                # ACCESS_ALLOWED_ACE_TYPE (0) and ACCESS_ALLOWED_OBJECT_ACE_TYPE
+                # (6) are the two allow types; both must be audited.
+                is_allow = ace_type in (allow_type, allow_object_type)
+                if not is_allow:
                     continue
 
                 try:
-                    # Trustee SID is ace[2] (a PySID tuple on real Windows).
-                    trustee_sid = ace[2]
+                    # Object ACEs carry extra fields before the SID; ace[-1]
+                    # is the trustee for both shapes.
+                    trustee_sid = ace[2] if ace_type == allow_type else ace[-1]
                     trustee_sid_str = str(trustee_sid)
                 except Exception as e:
                     logger.warning(
@@ -264,7 +277,7 @@ class SynologyConfig:
                 if trustee_sid_str not in allowed_sid_strs:
                     logger.warning(
                         f"{path} DACL grants access to a principal outside the "
-                        f"allowlist (SID={trustee_sid_str}). "
+                        f"allowlist (SID={trustee_sid_str}, ace_type={ace_type}). "
                         "Restrict the file to your user; see README."
                     )
                     return False

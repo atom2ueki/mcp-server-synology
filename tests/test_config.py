@@ -334,14 +334,21 @@ class TestWindowsAclFallback:
     def _ace(trustee_sid_str, ace_type=0, ace_flags=0):
         """Build a fake ACE tuple matching pywin32's real shape.
 
-        Real pywin32 ACE: ((ace_type, ace_flags), mask, trustee_sid).
-        ace_type 0 = ACCESS_ALLOWED_ACE_TYPE, 1 = ACCESS_DENIED_ACE_TYPE.
+        Real pywin32 ACE shapes returned by PyACL.GetAce(i):
+          conventional: ((ace_type, ace_flags), mask, sid)
+          object:       ((ace_type, ace_flags), mask, object_type,
+                         inherited_object_type, sid)
+        ace_type 0 = ACCESS_ALLOWED_ACE_TYPE, 1 = ACCESS_DENIED_ACE_TYPE,
+        6 = ACCESS_ALLOWED_OBJECT_ACE_TYPE, 7 = ACCESS_DENIED_OBJECT_ACE_TYPE.
         ace_flags includes INHERITED_ACE (0x10) for ACEs inherited from a
         parent folder — the case Codex flagged as misclassified by the old
         ace[0][1] read.
         """
         header = (ace_type, ace_flags)
         mask = 0x1F01FF  # full control placeholder
+        if ace_type in (6, 7):
+            # Object ACE: ((type, flags), mask, obj_type, inh_obj_type, sid)
+            return (header, mask, None, None, trustee_sid_str)
         return (header, mask, trustee_sid_str)
 
     def _build_fakes(self, *, owner_sid, dacl_aces=None, dacl_is_null=False):
@@ -412,6 +419,7 @@ class TestWindowsAclFallback:
 
         fake_ntsecuritycon = types.ModuleType("ntsecuritycon")
         fake_ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE = 0
+        fake_ntsecuritycon.ACCESS_ALLOWED_OBJECT_ACE_TYPE = 6
 
         return {
             "win32security": fake_win32security,
@@ -643,6 +651,65 @@ class TestWindowsAclFallback:
                 self._ace(self.CURRENT_SID),
                 # 1 = ACCESS_DENIED_ACE_TYPE — narrowing, should be ignored.
                 self._ace(self.EVERYONE_SID, ace_type=1),
+            ],
+        )
+
+        config_mod = self._load_fresh_config()
+        cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+        with patch.dict(sys.modules, fakes):
+            with caplog.at_level(logging.INFO, logger="synology-mcp"):
+                result = cfg._check_windows_file_permissions(secrets_file)
+
+        assert result is True
+
+    def test_foreign_object_allow_ace_returns_false(self, tmp_path, caplog):
+        """An ACCESS_ALLOWED_OBJECT_ACE_TYPE for Everyone must fail the check.
+
+        Object ACEs carry the trustee SID at ace[-1] (not ace[2]). The audit
+        must treat type 6 as an allow ACE and read the trustee from the right
+        index, otherwise a foreign object-allow grant is silently skipped.
+        """
+        import logging
+        import sys
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        fakes = self._build_fakes(
+            owner_sid=self.CURRENT_SID,
+            dacl_aces=[
+                self._ace(self.CURRENT_SID),
+                # 6 = ACCESS_ALLOWED_OBJECT_ACE_TYPE — widening, foreign trustee.
+                self._ace(self.EVERYONE_SID, ace_type=6),
+            ],
+        )
+
+        config_mod = self._load_fresh_config()
+        cfg = config_mod.SynologyConfig.__new__(config_mod.SynologyConfig)
+
+        with patch.dict(sys.modules, fakes):
+            with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                result = cfg._check_windows_file_permissions(secrets_file)
+
+        assert result is False
+        assert any(
+            "outside the allowlist" in rec.message.lower() for rec in caplog.records
+        )
+
+    def test_allowlisted_object_ace_passes(self, tmp_path, caplog):
+        """An object-allow ACE for an allowlisted principal passes."""
+        import logging
+        import sys
+
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text("{}")
+
+        fakes = self._build_fakes(
+            owner_sid=self.CURRENT_SID,
+            dacl_aces=[
+                self._ace(self.CURRENT_SID),
+                self._ace(self.ADMINS_SID, ace_type=6),
             ],
         )
 
