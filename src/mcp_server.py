@@ -187,6 +187,8 @@ class SynologyMCPServer:
         self._register_tool("synology_disk_smart", "Get detailed S.M.A.R.T. attributes for a specific physical disk", TN_PR({"disk_id": {"type": "string", "description": "Disk identifier from synology_disk_health output — either the disk id (e.g. \'sata1\', \'sda\', \'nvme0n1\') or its device path (e.g. \'/dev/sata1\')"}}, ["disk_id"]), self._handle_disk_smart)
         self._register_tool("synology_volume_status", "List all volumes/filesystems with status, total size, used space, and RAID info", TN, partial(self._handle_health_call, method_name="volume_list"))
         self._register_tool("synology_storage_pool", "List RAID/storage pools with RAID level, status, and member disks", TN, partial(self._handle_health_call, method_name="storage_pool_list"))
+        self._register_tool("synology_lun_list", "List all iSCSI LUNs with name, UUID, size, used space, status, mapped targets, and backing volume", TN, partial(self._handle_health_call, method_name="lun_list"))
+        self._register_tool("synology_lun_get", "Get details for a single iSCSI LUN by name or UUID", TN_PR({"name": {"type": "string", "description": "LUN name or UUID from synology_lun_list output"}}, ["name"]), self._handle_lun_get)
         self._register_tool("synology_network", "Get network interface status and transfer rates", TN, partial(self._handle_health_call, method_name="network_info"))
         self._register_tool("synology_ups", "Get UPS (uninterruptible power supply) status, battery level, and power info", TN, partial(self._handle_health_call, method_name="ups_info"))
         self._register_tool("synology_services", "List installed packages/services and their running status", TN, partial(self._handle_health_call, method_name="package_list"))
@@ -1057,6 +1059,14 @@ class SynologyMCPServer:
         disk_id = arguments["disk_id"]
         health = self._get_health(base_url)
         result = health.disk_smart_info(disk_id)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_lun_get(self, arguments: dict) -> list[types.TextContent]:
+        """Handle getting details for a single iSCSI LUN."""
+        base_url = self._get_base_url(arguments)
+        name = arguments["name"]
+        health = self._get_health(base_url)
+        result = health.lun_get(name)
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
