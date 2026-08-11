@@ -210,18 +210,17 @@ class SynologyConfig:
             # Build the allowlist of trusted trustee SIDs. We compare SIDs as
             # strings (sid.__str__) for stability against pywin32's PySID
             # object identity quirks.
-            allowed_sid_strs = {str(current_sid)}
-            for well_known in ("SYSTEM", "Administrators"):
-                try:
-                    sid, _, _ = win32security.LookupAccountName(
-                        None,  # local machine
-                        well_known if well_known != "Administrators" else "BUILTIN\\Administrators",
-                    )
-                    allowed_sid_strs.add(str(sid))
-                except Exception:
-                    # Best-effort: if we can't resolve a well-known SID, skip it
-                    # rather than widening the check incorrectly.
-                    pass
+            #
+            # Use well-known SID *literals* rather than LookupAccountName:
+            # account names are localized on non-English Windows (e.g. German
+            # "Administratoren"), so LookupAccountName("Administrators") can
+            # fail and drop S-1-5-32-544 from the allowlist — rejecting a
+            # normal secured DACL. The SID strings are locale-independent.
+            allowed_sid_strs = {
+                str(current_sid),
+                "S-1-5-18",       # NT AUTHORITY\SYSTEM
+                "S-1-5-32-544",   # BUILTIN\Administrators
+            }
 
             dacl = sd.GetSecurityDescriptorDacl()
             if dacl is None:
