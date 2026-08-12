@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Per-NAS `url` key in `settings.json`: when present it is used verbatim (trailing slash stripped) and wins over `host`/`port`, so a NAS published through a reverse proxy on the default 443 — whose URL carries no port — can finally be addressed. Non-string values are rejected with a warning and skip only that entry. (#76)
+
 ### Fixed
 - `list_directory` and `get_file_info` reported **every file as 0 bytes**. DSM returns the byte count inside the entry's `additional` block (which is where we ask for the `size` field), but both handlers only read a top-level `size` key that DSM never populates. Sizes are now read from `additional.size`, falling back to the top-level key for API versions that inline it.
 - `search_files` always failed with `Synology API error: 103` ("no such method"). It polled `SYNO.FileStation.Search`'s `status` method, which does not exist on DSM 7.3.2 — the `list` method reports completion via its own `finished` flag. Polling now goes through `list`, and cleanup calls `clean` as well as `stop` to release the task slot.
