@@ -957,3 +957,118 @@ def test_config_str_representation():
 
                 assert "SynologyConfig" in cfg_str
                 assert "auto_login" in cfg_str
+
+
+class TestVerifySslFor:
+    """Per-NAS SSL policy resolution (verify_ssl_for), incl. URL normalization."""
+
+    @staticmethod
+    def _bare_config(nas_configs, global_verify):
+        """SynologyConfig without __init__ — verify_ssl_for needs no I/O."""
+        reload_config()
+        from config import SynologyConfig
+
+        cfg = SynologyConfig.__new__(SynologyConfig)
+        cfg.nas_configs = nas_configs
+        cfg.verify_ssl = global_verify
+        return cfg
+
+    def test_exact_match_returns_per_nas_policy(self):
+        cfg = self._bare_config(
+            {"nas1": {"base_url": "https://192.168.1.100:5001", "verify_ssl": True}},
+            global_verify=False,
+        )
+        assert cfg.verify_ssl_for("https://192.168.1.100:5001") is True
+
+    def test_hostname_case_does_not_downgrade_verification(self):
+        """A case-variant explicit-login URL must keep the NAS's own policy.
+
+        Regression test: raw string equality fell back to the global policy,
+        so global=False + per-NAS=True silently disabled verification for a
+        NAS that asked for it.
+        """
+        cfg = self._bare_config(
+            {"nas1": {"base_url": "https://MyNAS.example:5001", "verify_ssl": True}},
+            global_verify=False,
+        )
+        assert cfg.verify_ssl_for("https://mynas.example:5001") is True
+
+    def test_scheme_case_and_trailing_slash_match(self):
+        cfg = self._bare_config(
+            {"nas1": {"base_url": "http://nas.example:5000", "verify_ssl": True}},
+            global_verify=False,
+        )
+        assert cfg.verify_ssl_for("HTTP://nas.example:5000/") is True
+
+    def test_default_port_matches_omitted_form(self):
+        cfg = self._bare_config(
+            {"nas1": {"base_url": "https://nas.example:443", "verify_ssl": True}},
+            global_verify=False,
+        )
+        assert cfg.verify_ssl_for("https://nas.example") is True
+
+    def test_unknown_url_falls_back_to_global(self):
+        cfg = self._bare_config(
+            {"nas1": {"base_url": "https://nas.example:5001", "verify_ssl": True}},
+            global_verify=False,
+        )
+        assert cfg.verify_ssl_for("https://other.example:5001") is False
+
+    def test_nas_without_own_policy_uses_global(self):
+        cfg = self._bare_config(
+            {"nas1": {"base_url": "https://nas.example:5001"}},
+            global_verify=True,
+        )
+        assert cfg.verify_ssl_for("https://nas.example:5001") is True
+
+    def test_per_nas_policy_end_to_end_via_settings(self, tmp_path):
+        """settings.json per-NAS verify_ssl flows through to verify_ssl_for."""
+        secrets_data = {
+            "synology": {
+                "ip-nas": {
+                    "host": "192.168.1.8",
+                    "port": 5000,
+                    "username": "a",
+                    "password": "b",
+                    "verify_ssl": False,
+                },
+                "cert-nas": {
+                    "host": "nas.example",
+                    "port": 5001,
+                    "username": "c",
+                    "password": "d",
+                    "verify_ssl": True,
+                },
+                # No verify_ssl of its own: must inherit the server value,
+                # which only happens if server settings load before the NAS
+                # loop. Under the old ordering this NAS got the env default
+                # (False) even with server.verify_ssl: true.
+                "plain-nas": {
+                    "host": "192.168.1.9",
+                    "port": 5000,
+                    "username": "e",
+                    "password": "f",
+                },
+            },
+            "server": {"verify_ssl": True},
+        }
+        secrets_file = tmp_path / "settings.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
+
+        reload_config()
+
+        with clear_env():
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+
+                # server.verify_ssl applied before the NAS loop (PR #78 fix)
+                assert cfg.verify_ssl is True
+                assert cfg.verify_ssl_for("http://192.168.1.8:5000") is False
+                assert cfg.verify_ssl_for("https://NAS.example:5001") is True
+                # Ordering path: NAS without its own key inherits the server
+                # value, not the env default (False)
+                assert cfg.nas_configs["plain-nas"]["verify_ssl"] is True
+                assert cfg.verify_ssl_for("http://192.168.1.9:5000") is True
