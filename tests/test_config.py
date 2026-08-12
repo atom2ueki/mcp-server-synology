@@ -1039,6 +1039,16 @@ class TestVerifySslFor:
                     "password": "d",
                     "verify_ssl": True,
                 },
+                # No verify_ssl of its own: must inherit the server value,
+                # which only happens if server settings load before the NAS
+                # loop. Under the old ordering this NAS got the env default
+                # (False) even with server.verify_ssl: true.
+                "plain-nas": {
+                    "host": "192.168.1.9",
+                    "port": 5000,
+                    "username": "e",
+                    "password": "f",
+                },
             },
             "server": {"verify_ssl": True},
         }
@@ -1058,3 +1068,7 @@ class TestVerifySslFor:
                 assert cfg.verify_ssl is True
                 assert cfg.verify_ssl_for("http://192.168.1.8:5000") is False
                 assert cfg.verify_ssl_for("https://NAS.example:5001") is True
+                # Ordering path: NAS without its own key inherits the server
+                # value, not the env default (False)
+                assert cfg.nas_configs["plain-nas"]["verify_ssl"] is True
+                assert cfg.verify_ssl_for("http://192.168.1.9:5000") is True
