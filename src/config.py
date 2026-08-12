@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import stat
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -544,6 +545,66 @@ class SynologyConfig:
             "otp_code": self.synology_otp_code,
             "device_id": None,
         }
+
+    def save_device_id(self, nas_name: str, device_id: str) -> bool:
+        """Persist a DSM trusted-device token back to settings.json.
+
+        DSM can hand back a fresh `did` on a login that already presented one.
+        The old token stops working at that point, so a token kept only in
+        memory survives exactly one process. MCP servers are restarted every
+        session, which turns that into "2FA works once, then 403 forever".
+
+        Rewrites only this NAS's `device_id`, preserving everything else in the
+        file, and clears any spent `otp_code` alongside it. Returns True on a
+        successful write.
+        """
+        if not isinstance(device_id, str) or not device_id.strip():
+            return False
+        if not SETTINGS_FILE.exists():
+            return False
+
+        try:
+            data = json.loads(SETTINGS_FILE.read_text())
+            synology = data.get("synology") if isinstance(data, dict) else None
+            entry = synology.get(nas_name) if isinstance(synology, dict) else None
+            if not isinstance(entry, dict):
+                logger.warning(f"Cannot persist device_id: NAS '{nas_name}' not in settings")
+                return False
+            token_changed = entry.get("device_id") != device_id
+            otp_present = "otp_code" in entry
+            if not token_changed and not otp_present:
+                return False  # unchanged, nothing to write
+
+            entry["device_id"] = device_id
+            # A one-shot OTP is spent once DSM has issued a device token.
+            # Leaving it behind makes the next start look like a first-time
+            # 2FA login and fail on a stale code.
+            entry.pop("otp_code", None)
+
+            # Write via a temp file in the same directory created with 0600
+            # from the start (mkstemp), then rename, so the secrets never
+            # briefly exist world-readable and a crash mid-write cannot
+            # truncate the real file.
+            fd, tmp_name = tempfile.mkstemp(
+                dir=SETTINGS_FILE.parent,
+                prefix=f".{SETTINGS_FILE.name}.",
+                suffix=".tmp",
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                json.dump(data, tmp_file, indent=2)
+                tmp_file.write("\n")
+            os.replace(tmp_name, SETTINGS_FILE)
+
+            # Keep the in-memory copy in step with disk.
+            if nas_name in self.nas_configs:
+                self.nas_configs[nas_name]["device_id"] = device_id
+                self.nas_configs[nas_name]["otp_code"] = None
+
+            logger.info(f"Persisted refreshed device_id for '{nas_name}'")
+            return True
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to persist device_id for '{nas_name}': {e}")
+            return False
 
     def resolve_base_url(self, nas_name: str) -> Optional[str]:
         """Get the base_url for a NAS name, or None if not found."""

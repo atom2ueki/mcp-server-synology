@@ -339,11 +339,23 @@ class SynologyMCPServer:
         if nas_name is None:
             self.nas_name_map[base_url] = base_url
 
-        # Surface the DSM device token so users can copy it into settings.json
-        # (`device_id`) to skip OTP on future starts. Only present on the
-        # first-time OTP login.
+        # Persist the DSM device token rather than asking the user to copy it
+        # by hand. DSM may return a *refreshed* `did` on a login that already
+        # presented one, which retires the old value; keeping it only in
+        # memory means the token in settings.json is dead as soon as this
+        # process exits, and every later start falls back to "OTP required"
+        # (403). Only present when DSM issued one — i.e. the first-time OTP
+        # login (the steady-state `device_id` path doesn't echo it back).
         did = result["data"].get("did")
-        if did:
+        if did and nas_name:
+            if config.save_device_id(nas_name, did):
+                logger.info(f"{label}: stored refreshed device_id")
+        elif did:
+            # Legacy .env single-NAS mode has no settings.json entry to write
+            # into, so fall back to telling the user. Logged in full because
+            # (a) the value is destined for settings.json anyway and (b) it's
+            # useless without the password, so truncation provides no
+            # meaningful protection.
             logger.warning(
                 f"{label}: 2FA bootstrap - copy this device_id into "
                 f"settings.json to skip OTP on future starts: {did}"
