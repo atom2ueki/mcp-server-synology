@@ -581,4 +581,4 @@ async def test_legacy_single_nas_auto_login_registers_default_name():
 
         await server._auto_login_if_configured()
 
-    assert server.nas_name_map["default"] == "http://nas.example.com:5000/"
+    assert server.nas_name_map["default"] == "http://nas.example.com:5000"

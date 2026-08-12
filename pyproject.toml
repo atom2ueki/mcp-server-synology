@@ -17,3 +17,30 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
 check_untyped_defs = true
+
+[build-system]
+requires = ["setuptools>=84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synology-mcp"
+version = "0.1.0"
+description = "MCP server for Synology NAS"
+requires-python = ">=3.10"
+dependencies = [
+    "pycryptodome",
+    "requests",
+    "mcp>=2.0.0",
+    "python-dotenv",
+    "websockets>=17.0.1",
+]
+
+[project.scripts]
+synology-mcp = "mcp_server:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["mcp_server", "config", "multiclient_bridge"]

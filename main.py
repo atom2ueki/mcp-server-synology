@@ -80,8 +80,11 @@ if __name__ == "__main__":
     if enable_xiaozhi:
         logger.info("Starting Synology MCP Server with Xiaozhi Bridge")
         logger.info("Supports BOTH Xiaozhi and Claude/Cursor simultaneously")
+    elif config.http_enabled:
+        logger.info("Starting Synology MCP Server over Streamable HTTP")
+        logger.info(f"HTTP endpoint: http://{config.http_host}:{config.http_port}{config.http_path}")
     else:
-        logger.info("Starting Synology MCP Server")
+        logger.info("Starting Synology MCP Server over stdio")
         logger.info("Claude/Cursor only mode")
 
     # Check requirements
@@ -112,7 +115,10 @@ if __name__ == "__main__":
 
             asyncio.run(bridge_main())
         else:
-            logger.info("Client Support: Claude/Cursor (stdio)")
+            if config.http_enabled:
+                logger.info("Client Support: MCP over HTTP/SSE")
+            else:
+                logger.info("Client Support: Claude/Cursor (stdio)")
             logger.info("Starting MCP server... Press Ctrl+C to stop")
 
             # Import and run standard MCP server

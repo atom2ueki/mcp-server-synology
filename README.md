@@ -366,6 +366,9 @@ docker-compose up
 - **`synology_disk_smart`** - Get detailed SMART attributes for a specific disk
 - **`synology_volume_status`** - List all volumes with status, size, usage, filesystem type
 - **`synology_storage_pool`** - List RAID/storage pools with level, status, member disks
+- **`synology_lun_list`** - List all iSCSI LUNs with name, UUID, size, usage, status, mapped targets, and backing volume
+- **`synology_lun_get`** - Get details for a single iSCSI LUN
+  - `name` (required): LUN name or UUID from `synology_lun_list` output
 - **`synology_network`** - Get network interface status and transfer rates
 - **`synology_ups`** - Get UPS status, battery level, power readings
 - **`synology_services`** - List installed packages and their running status
@@ -543,6 +546,12 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
       "username": "admin",
       "password": "your_password",
       "note": "Backup NAS"
+    },
+    "nas3": {
+      "url": "https://nas.example.com",
+      "username": "admin",
+      "password": "your_password",
+      "note": "NAS behind a reverse proxy"
     }
   },
   "xiaozhi": {
@@ -563,21 +572,67 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 **Configuration fields:**
 | Field | Required | Description |
 |-------|----------|-------------|
-| `host` | Yes | NAS hostname or IP address |
+| `host` | Yes* | NAS hostname or IP address |
 | `port` | No | API port (default: 5000 for HTTP, 5001 for HTTPS) |
+| `url` | Yes* | Full base URL (e.g., `https://nas.example.com`); wins over `host`/`port` — use for a NAS behind a reverse proxy |
 | `username` | Yes | NAS username |
 | `password` | Yes | NAS password |
 | `otp_code` | No | One-shot 6-digit 2FA code (first login only, then remove) |
 | `device_id` | No | Long-lived trusted-device token from DSM (`did`); skip OTP on all future logins |
 | `note` | No | Optional description for your reference |
 
+*Either `host` or `url` is required per NAS entry.
+
 **Notes:**
 - The server will use port 5001 (HTTPS) if port is 5001, otherwise defaults to HTTP (5000)
+- The `host`/`port` form always appends a port and derives the scheme from it, so it cannot express `https://nas.example.com` on the default 443 — set `url` directly for reverse-proxied setups
 - File permissions: `chmod 600 ~/.config/synology-mcp/settings.json` is required for security
 - The server will refuse to load settings if permissions are too open
 - Both .env and settings.json can be used together (settings.json takes priority)
 
 ### ⚠️ Security Recommendations
+
+**settings.json File Permissions:**
+- **Linux/macOS (POSIX):** `chmod 600 ~/.config/synology-mcp/settings.json` is required. The server refuses to load the file if it is group- or world-readable/writable, or owned by another user.
+- **Windows:** Access control is enforced via NTFS ACLs, not POSIX mode bits. The server audits the file's security descriptor and refuses to load unless **all three** hold: (1) the owner SID matches the current user; (2) the DACL is present (a NULL DACL — "everyone full access" — is rejected); (3) no allow-ACE grants access to a principal outside the allowlist: the current user, `NT AUTHORITY\SYSTEM`, and `BUILTIN\Administrators`. Any inherited `Everyone` / `BUILTIN\Users` / `Authenticated Users` grant fails the check.
+  - Requires the optional [`pywin32`](https://pypi.org/project/pywin32/) package: `pip install pywin32`. **If pywin32 is not installed, the server fails closed and refuses to load `settings.json`.** Operators who accept the risk of an unverified file can opt back in by setting `SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true`.
+  - The server resolves the file via `XDG_CONFIG_HOME` (default `Path.home() / ".config"`), so on Windows it lives at `%USERPROFILE%\.config\synology-mcp\settings.json` unless `XDG_CONFIG_HOME` is set.
+  - Lock down the file from an elevated PowerShell prompt (uses the same path the server loads):
+
+    ```powershell
+    # Resolve the path the SAME way the server does: $XDG_CONFIG_HOME if set,
+    # otherwise %USERPROFILE%\.config. This honors the override documented above.
+    $cfg = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { "$env:USERPROFILE\.config" }
+    $f = "$cfg\synology-mcp\settings.json"
+
+    # The server's ACL audit requires: owner == current user, no NULL DACL, and
+    # no allow-ACE outside {current user, SYSTEM, Administrators}. The steps
+    # below enforce all three.
+    #
+    # Use the *<SID> form for every built-in principal: account names like
+    # "Administrators" / "Everyone" / "Users" are localized on non-English
+    # Windows (e.g. German "Administratoren") and won't resolve. The
+    # locale-independent SIDs:
+    #   *S-1-1-0            Everyone
+    #   *S-1-5-11           Authenticated Users
+    #   *S-1-5-32-545       BUILTIN\Users
+    #   *S-1-5-32-544       BUILTIN\Administrators
+    #
+    # 1. Ensure the file is owned by the current user (the audit rejects any
+    #    other owner). /setowner requires elevation.
+    icacls $f /setowner "${env:USERNAME}"
+    # 2. Drop inherited ACEs, then revoke the common foreign grants. /grant:r
+    #    only replaces the named principal, so revoke first.
+    icacls $f /inheritance:r
+    icacls $f /remove:g "*S-1-1-0" "*S-1-5-11" "*S-1-5-32-545"
+    # Re-run `icacls $f` here; if any principal other than your user or
+    # Administrators still appears, run: icacls $f /remove:g "<that principal>"
+    # 3. Grant the current user and Administrators full control.
+    icacls $f /grant:r "${env:USERNAME}:(F)"
+    icacls $f /grant:r "*S-1-5-32-544:(F)"   # BUILTIN\Administrators (locale-independent)
+    ```
+    If the file is brand new, the `/remove:g` step is a harmless no-op.
+  - Verify: `icacls "$f"` — only your user and `*S-1-5-32-544` (Administrators) should appear.
 
 **SSL Certificate Verification (VERIFY_SSL):**
 - Default is `false` to support self-signed certificates on internal NAS devices

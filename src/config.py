@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import stat
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -78,6 +79,26 @@ class SynologyConfig:
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
+        # Streamable HTTP transport settings
+        self.http_enabled = os.getenv("MCP_HTTP", "false").lower() == "true"
+        self.http_host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
+        self.http_port = int(os.getenv("MCP_HTTP_PORT", "8765"))
+        self.http_path = os.getenv("MCP_HTTP_PATH", "/mcp")
+        # Comma-separated allowed Host/Origin values for DNS rebinding
+        # protection when binding to a non-loopback address. Defaults to the
+        # loopback host:port. Operators behind a reverse proxy should add their
+        # public domain here.
+        self.http_allowed_hosts = [
+            h.strip()
+            for h in os.getenv("MCP_HTTP_ALLOWED_HOSTS", "").split(",")
+            if h.strip()
+        ]
+        self.http_allowed_origins = [
+            o.strip()
+            for o in os.getenv("MCP_HTTP_ALLOWED_ORIGINS", "").split(",")
+            if o.strip()
+        ]
+
         # Legacy single-NAS env vars (still supported as fallback)
         self.synology_url = os.getenv("SYNOLOGY_URL")
         self.synology_username = os.getenv("SYNOLOGY_USERNAME")
@@ -94,19 +115,16 @@ class SynologyConfig:
         Returns True if permissions are safe, False otherwise.
         Prints warning if permissions are too open.
 
-        POSIX only. On Windows os.getuid() does not exist and st_mode carries
-        no meaningful group/other bits, so this check raised AttributeError and
-        took the whole settings load down with it.
-
-        On Windows the check is SKIPPED and this returns True so the settings
-        file still loads. Be clear about what that means: True here means
-        "not checked", not "verified safe". Windows access control lives in
-        ACLs, which this function cannot read. The alternative -- returning
-        False -- would make secrets.json unusable on Windows entirely, which is
-        a worse outcome than an unverified file, but it does mean a
-        world-readable secrets.json will load without complaint. The warning
-        below is deliberately not debug-level so the gap is visible in logs.
+        POSIX: checks file ownership and group/other permission bits.
+        Windows: full ACL audit via pywin32 (owner SID match + DACL allowlist).
+        Fails closed if pywin32 is missing; opt back in with
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true``.
+        Other platforms without os.getuid(): skipped with a warning, returns
+        True (unverified).
         """
+        if os.name == "nt":
+            return self._check_windows_file_permissions(path)
+
         if not hasattr(os, "getuid"):
             logger.warning(
                 f"Permission check for {path} SKIPPED: this platform has no POSIX "
@@ -115,6 +133,7 @@ class SynologyConfig:
             )
             return True
 
+        # POSIX fallback (original logic)
         try:
             file_stat = path.stat()
             mode = file_stat.st_mode
@@ -135,11 +154,221 @@ class SynologyConfig:
             logger.warning(f"Could not check permissions for {path}: {e}")
             return False
 
+    def _check_windows_file_permissions(self, path: Path) -> bool:
+        """Check Windows ACL for settings.json.
+
+        Enforces the policy from issue #72: the file must grant access only to
+        the current user (plus a small system allowlist). Concretely:
+
+        1. The owner SID must match the current user.
+        2. The DACL must be present (a NULL DACL means "everyone full access"
+           and is rejected).
+        3. No allow-ACE may grant access to a principal outside the allowlist:
+           the current user, ``NT AUTHORITY\\SYSTEM``, and
+           ``BUILTIN\\Administrators``. Inherited ``Everyone`` /
+           ``BUILTIN\\Users`` / ``Authenticated Users`` grants fail the check.
+
+        pywin32 is an **optional** dependency. If it is not installed the check
+        **fails closed** (returns ``False``) so credentials are never loaded
+        unverified. Operators who accept the risk can opt back in to the old
+        unverified-load behaviour by setting
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true``.
+        """
+        try:
+            import ntsecuritycon
+            import win32api
+            import win32security
+        except ImportError:
+            return self._windows_acl_unavailable(path)
+
+        try:
+            # OWNER + DACL: we need both to enforce the policy. OWNER alone is
+            # not enough — a file owned by the current user can still inherit
+            # an Everyone/BUILTIN\Users allow-ACE from its parent folder.
+            info = (
+                win32security.OWNER_SECURITY_INFORMATION
+                | win32security.DACL_SECURITY_INFORMATION
+            )
+            sd = win32security.GetFileSecurity(str(path), info)
+            owner_sid = sd.GetSecurityDescriptorOwner()
+
+            # Current user SID via the process token.
+            # GetTokenInformation(TokenUser) returns a (sid, attributes) tuple.
+            token = win32security.OpenProcessToken(
+                win32api.GetCurrentProcess(),
+                win32security.TOKEN_QUERY,
+            )
+            token_user = win32security.GetTokenInformation(token, win32security.TokenUser)
+            current_sid = token_user[0]
+
+            if current_sid != owner_sid:
+                logger.warning(
+                    f"{path} owner SID does not match current user. "
+                    "Expected ACL to restrict access to the current user only."
+                )
+                return False
+
+            # Build the allowlist of trusted trustee SIDs. We compare SIDs as
+            # strings (sid.__str__) for stability against pywin32's PySID
+            # object identity quirks.
+            #
+            # Use well-known SID *literals* rather than LookupAccountName:
+            # account names are localized on non-English Windows (e.g. German
+            # "Administratoren"), so LookupAccountName("Administrators") can
+            # fail and drop S-1-5-32-544 from the allowlist — rejecting a
+            # normal secured DACL. The SID strings are locale-independent.
+            allowed_sid_strs = {
+                str(current_sid),
+                "S-1-5-18",       # NT AUTHORITY\SYSTEM
+                "S-1-5-32-544",   # BUILTIN\Administrators
+            }
+
+            dacl = sd.GetSecurityDescriptorDacl()
+            if dacl is None:
+                # NULL DACL: no access control — anyone can read/write. Reject.
+                logger.warning(
+                    f"{path} has a NULL DACL (no access control). "
+                    "Refusing to load. Restrict the file to your user; see README."
+                )
+                return False
+
+            # PyACL: enumerate via GetAceCount()/GetAce(i) — it is NOT directly
+            # iterable on real Windows (pywin32 returns a PyACL object).
+            #
+            # ACE type semantics (Win32):
+            #   0 ACCESS_ALLOWED_ACE_TYPE              — widens (grant)
+            #   1 ACCESS_DENIED_ACE_TYPE               — narrows (deny)
+            #   6 ACCESS_ALLOWED_OBJECT_ACE_TYPE       — widens (object grant)
+            #   7 ACCESS_DENIED_OBJECT_ACE_TYPE        — narrows (object deny)
+            #   9 ACCESS_ALLOWED_CALLBACK_ACE_TYPE     — widens (conditional)
+            #  11 ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE — widens (conditional obj)
+            #   2/3 SYSTEM_AUDIT / SYSTEM_ALARM         — audit, not access
+            #
+            # Strategy: explicitly enumerate the DENY and audit types we know
+            # are safe to skip (they don't widen access). For the known ALLOW
+            # types, audit the trustee. For ANYTHING ELSE (callback, dynamic,
+            # or future types), fail closed — we can't prove they don't widen.
+            allow_type = ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE
+            # Fallback values per WinNT.h / MS-DTYP §2.4.4.1:
+            #   ACCESS_ALLOWED_OBJECT_ACE_TYPE = 5, ACCESS_DENIED_OBJECT_ACE_TYPE = 6,
+            #   ACCESS_DENIED_ACE_TYPE = 1, SYSTEM_AUDIT_ACE_TYPE = 2,
+            #   SYSTEM_ALARM_ACE_TYPE = 3.
+            # getattr() reads the real ntsecuritycon first; the literal is only
+            # a defensive default if an attribute is missing.
+            allow_object_type = getattr(
+                ntsecuritycon, "ACCESS_ALLOWED_OBJECT_ACE_TYPE", 5
+            )
+            deny_type = getattr(ntsecuritycon, "ACCESS_DENIED_ACE_TYPE", 1)
+            deny_object_type = getattr(
+                ntsecuritycon, "ACCESS_DENIED_OBJECT_ACE_TYPE", 6
+            )
+            # Types that provably don't widen access: deny types (narrow) and
+            # SACL audit types (no access effect). Everything else must be
+            # audited or rejected.
+            safe_to_skip = {
+                deny_type,
+                deny_object_type,
+                getattr(ntsecuritycon, "SYSTEM_AUDIT_ACE_TYPE", 2),
+                getattr(ntsecuritycon, "SYSTEM_ALARM_ACE_TYPE", 3),
+            }
+            # ACE tuple shapes returned by pywin32's PyACL.GetAce(i):
+            #   conventional: ((ace_type, ace_flags), mask, sid)
+            #   object:       ((ace_type, ace_flags), mask, object_type,
+            #                  inherited_object_type, sid)
+            # Conventional trustee SID is ace[2]; object ACE trustee is ace[-1].
+            ace_count = dacl.GetAceCount()
+            for i in range(ace_count):
+                ace = dacl.GetAce(i)
+                # ace_type is ace[0][0] — ace[0][1] is the *flags* (e.g.
+                # INHERITED_ACE), which would misclassify an inherited
+                # allow-ACE as a deny and let it through.
+                try:
+                    ace_type = ace[0][0]
+                except Exception:
+                    ace_type = None
+
+                # Known-safe non-widening types (deny / audit) narrow or have
+                # no access effect — skip them.
+                if ace_type in safe_to_skip:
+                    continue
+
+                # Known allow types — audit the trustee against the allowlist.
+                if ace_type == allow_type:
+                    trustee_index = 2
+                elif ace_type == allow_object_type:
+                    trustee_index = -1
+                else:
+                    # Unrecognised type (callback, conditional, dynamic, or a
+                    # future type). We can't prove it doesn't widen access, so
+                    # fail closed rather than risk a silent bypass.
+                    logger.warning(
+                        f"{path} DACL contains an ACE of unrecognised type "
+                        f"({ace_type}); failing closed. "
+                        "Restrict the file to your user; see README."
+                    )
+                    return False
+
+                try:
+                    trustee_sid = ace[trustee_index]
+                    trustee_sid_str = str(trustee_sid)
+                except Exception as e:
+                    logger.warning(
+                        f"{path} has an ACE whose trustee could not be read ({e}); "
+                        "failing closed."
+                    )
+                    return False
+
+                if trustee_sid_str not in allowed_sid_strs:
+                    logger.warning(
+                        f"{path} DACL grants access to a principal outside the "
+                        f"allowlist (SID={trustee_sid_str}, ace_type={ace_type}). "
+                        "Restrict the file to your user; see README."
+                    )
+                    return False
+
+            logger.info(
+                f"Windows ACL check passed for {path} "
+                "(owner verified, no foreign allow-ACE in DACL)"
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(f"Windows ACL check failed for {path}: {e}")
+            return False
+
+    @staticmethod
+    def _windows_acl_unavailable(path: Path) -> bool:
+        """Handle pywin32 being unavailable on Windows.
+
+        Default is fail-closed: refuse to load credentials we can't verify.
+        Operators who accept the risk of an unverified settings.json can set
+        ``SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true`` to restore the old
+        load-anyway behaviour.
+        """
+        allow_unverified = os.getenv(
+            "SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL", "false"
+        ).lower() == "true"
+        if allow_unverified:
+            logger.warning(
+                f"pywin32 not installed. Windows ACL check for {path} SKIPPED "
+                "(SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true). "
+                "File permissions were NOT verified — install pywin32 to enable enforcement."
+            )
+            return True
+        logger.error(
+            f"pywin32 not installed; cannot verify Windows ACL for {path}. "
+            "Refusing to load credentials. Either install pywin32 or set "
+            "SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true to accept the risk."
+        )
+        return False
+
     def _load_settings(self):
         """Load all settings from XDG config directory (~/.config/synology-mcp/settings.json)."""
         self.nas_configs: Dict[str, Dict[str, Any]] = {}
 
-        # Default values for xiaozhi and server settings
+        # Default values for xiaozhi and server settings.
+        # http_* values are already set from env vars in _load_env_settings;
+        # keep them and only override when server.http explicitly supplies a value.
         self.xiaozhi_enabled = False
         self.xiaozhi_token = ""
         self.xiaozhi_endpoint = "wss://api.xiaozhi.me/mcp/"
@@ -171,6 +400,16 @@ class SynologyConfig:
                         self.debug = server_section["debug"]
                     if "log_level" in server_section:
                         self.log_level = server_section["log_level"].upper()
+                    # HTTP transport settings
+                    http_section = server_section.get("http", {})
+                    if "enabled" in http_section:
+                        self.http_enabled = http_section["enabled"]
+                    if "host" in http_section:
+                        self.http_host = http_section["host"]
+                    if "port" in http_section:
+                        self.http_port = http_section["port"]
+                    if "path" in http_section:
+                        self.http_path = http_section["path"]
 
                 # Load Synology NAS credentials
                 synology_section = data.get("synology", {})
@@ -185,6 +424,19 @@ class SynologyConfig:
                         )
                         continue
 
+                    # `url` wins over host/port when present. The host/port form
+                    # below can only ever build https://host:5001 or http://host:<port>,
+                    # so it cannot address a NAS sitting behind a reverse proxy on
+                    # the default 443 (no port in the URL at all). Reverse-proxied
+                    # setups set `url` directly.
+                    raw_url = nas_info.get("url")
+                    if raw_url is not None and not isinstance(raw_url, str):
+                        logger.warning(
+                            f"Invalid 'url' for NAS '{nas_name}' - expected string, "
+                            f"got {type(raw_url)}"
+                        )
+                        continue
+                    explicit_url = (raw_url or "").rstrip("/")
                     host = nas_info.get("host", "")
                     port = nas_info.get("port", 5000)
                     username = nas_info.get("username", "")
@@ -201,8 +453,10 @@ class SynologyConfig:
                     otp_code = nas_info.get("otp_code") or None
                     device_id = nas_info.get("device_id") or None
 
-                    if not host:
-                        logger.warning(f"Missing 'host' for NAS '{nas_name}' in {SETTINGS_FILE}")
+                    if not host and not explicit_url:
+                        logger.warning(
+                            f"Missing 'host' (or 'url') for NAS '{nas_name}' in {SETTINGS_FILE}"
+                        )
                         continue
                     if not username:
                         logger.warning(
@@ -215,8 +469,11 @@ class SynologyConfig:
                         )
                         continue
 
-                    scheme = "https" if port == 5001 else "http"
-                    base_url = f"{scheme}://{host}:{port}"
+                    if explicit_url:
+                        base_url = explicit_url
+                    else:
+                        scheme = "https" if port == 5001 else "http"
+                        base_url = f"{scheme}://{host}:{port}"
 
                     # Per-NAS override, falling back to the global server
                     # setting applied above. A single global flag cannot serve
@@ -320,6 +577,66 @@ class SynologyConfig:
             "otp_code": self.synology_otp_code,
             "device_id": None,
         }
+
+    def save_device_id(self, nas_name: str, device_id: str) -> bool:
+        """Persist a DSM trusted-device token back to settings.json.
+
+        DSM can hand back a fresh `did` on a login that already presented one.
+        The old token stops working at that point, so a token kept only in
+        memory survives exactly one process. MCP servers are restarted every
+        session, which turns that into "2FA works once, then 403 forever".
+
+        Rewrites only this NAS's `device_id`, preserving everything else in the
+        file, and clears any spent `otp_code` alongside it. Returns True on a
+        successful write.
+        """
+        if not isinstance(device_id, str) or not device_id.strip():
+            return False
+        if not SETTINGS_FILE.exists():
+            return False
+
+        try:
+            data = json.loads(SETTINGS_FILE.read_text())
+            synology = data.get("synology") if isinstance(data, dict) else None
+            entry = synology.get(nas_name) if isinstance(synology, dict) else None
+            if not isinstance(entry, dict):
+                logger.warning(f"Cannot persist device_id: NAS '{nas_name}' not in settings")
+                return False
+            token_changed = entry.get("device_id") != device_id
+            otp_present = "otp_code" in entry
+            if not token_changed and not otp_present:
+                return False  # unchanged, nothing to write
+
+            entry["device_id"] = device_id
+            # A one-shot OTP is spent once DSM has issued a device token.
+            # Leaving it behind makes the next start look like a first-time
+            # 2FA login and fail on a stale code.
+            entry.pop("otp_code", None)
+
+            # Write via a temp file in the same directory created with 0600
+            # from the start (mkstemp), then rename, so the secrets never
+            # briefly exist world-readable and a crash mid-write cannot
+            # truncate the real file.
+            fd, tmp_name = tempfile.mkstemp(
+                dir=SETTINGS_FILE.parent,
+                prefix=f".{SETTINGS_FILE.name}.",
+                suffix=".tmp",
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                json.dump(data, tmp_file, indent=2)
+                tmp_file.write("\n")
+            os.replace(tmp_name, SETTINGS_FILE)
+
+            # Keep the in-memory copy in step with disk.
+            if nas_name in self.nas_configs:
+                self.nas_configs[nas_name]["device_id"] = device_id
+                self.nas_configs[nas_name]["otp_code"] = None
+
+            logger.info(f"Persisted refreshed device_id for '{nas_name}'")
+            return True
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to persist device_id for '{nas_name}': {e}")
+            return False
 
     def resolve_base_url(self, nas_name: str) -> Optional[str]:
         """Get the base_url for a NAS name, or None if not found."""

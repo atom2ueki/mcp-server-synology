@@ -17,12 +17,13 @@ import logging
 import os
 import signal
 import sys
-from typing import TYPE_CHECKING, Any, Dict, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
-    from src.mcp_server import SynologyMCPServer
+    from mcp_server import SynologyMCPServer
 from urllib.parse import urlparse
 
+from config import config
 import websockets
 
 # Configure logging
@@ -37,14 +38,13 @@ class MCPBridge:
         self.xiaozhi_endpoint = xiaozhi_endpoint
         self.xiaozhi_token = xiaozhi_token
         self.mcp_server: "SynologyMCPServer | None" = None
-        self.websocket_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.running = False
         self.shutdown_event = asyncio.Event()
 
     async def _initialize_mcp_server(self) -> bool:
         """Initialize the MCP server instance."""
         try:
-            from src.mcp_server import SynologyMCPServer
+            from mcp_server import SynologyMCPServer
 
             self.mcp_server = SynologyMCPServer()
             logger.info("✅ MCP server initialized")
@@ -65,6 +65,9 @@ class MCPBridge:
 
         try:
             if method == "initialize":
+                # Xiaozhi WS clients speak the legacy MCP handshake
+                # (protocolVersion + serverInfo), so this stays hardcoded rather
+                # than using the SDK's MCP 2.0 InitializationOptions shape.
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
@@ -76,7 +79,10 @@ class MCPBridge:
                             "prompts": {},
                             "resources": {},
                         },
-                        "serverInfo": {"name": "synology-mcp-server", "version": "1.0.0"},
+                        "serverInfo": {
+                            "name": config.server_name,
+                            "version": config.server_version,
+                        },
                     },
                 }
 
@@ -92,7 +98,7 @@ class MCPBridge:
                         "id": request_id,
                         "error": {"code": -32000, "message": "MCP server not initialized"},
                     }
-                tools_list = await self.mcp_server.get_tools_list()
+                tools_list = self.mcp_server._get_tool_definitions()
 
                 return {
                     "jsonrpc": "2.0",
@@ -112,7 +118,17 @@ class MCPBridge:
                         "id": request_id,
                         "error": {"code": -32000, "message": "MCP server not initialized"},
                     }
-                result = await self.mcp_server.call_tool_direct(tool_name, arguments)
+                try:
+                    result = await self.mcp_server._dispatch_tool(tool_name, arguments)
+                except Exception as e:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "isError": True,
+                            "content": [{"type": "text", "text": f"Error executing {tool_name}: {e!s}"}],
+                        },
+                    }
 
                 return {
                     "jsonrpc": "2.0",
@@ -172,58 +188,18 @@ class MCPBridge:
             logger.error(f"❌ {client_type}: error handling message: {e}")
             return None
 
-    async def _websocket_handler(self, websocket, path):
-        """Handle individual WebSocket connection."""
-        client_addr = websocket.remote_address
-        logger.info(f"🔗 WebSocket connected: {client_addr}")
-
-        self.websocket_clients.add(websocket)
-
-        try:
-            async for message in websocket:
-                if self.shutdown_event.is_set():
-                    break
-
-                response = await self._handle_message(message, f"WS[{client_addr}]")
-                if response:
-                    await websocket.send(response)
-
-        except websockets.exceptions.ConnectionClosed:
-            logger.info(f"🔌 WebSocket disconnected: {client_addr}")
-        except Exception as e:
-            logger.error(f"❌ WebSocket error [{client_addr}]: {e}")
-        finally:
-            self.websocket_clients.discard(websocket)
-
     async def _stdio_handler(self):
-        """Handle stdio communication using proper MCP stdio server."""
+        """Handle stdio communication using shared MCP stdio server."""
         logger.info("📟 Starting stdio handler")
 
         try:
-            import mcp.server.stdio
-            from mcp.server.lowlevel import NotificationOptions
-            from mcp.server.models import InitializationOptions
-
             # Use the same server instance that handles Xiaozhi requests
-            if not self.mcp_server or not self.mcp_server.server:
+            if not self.mcp_server:
                 logger.error("❌ MCP server not available for stdio")
                 return
 
-            # Run the stdio server with proper MCP protocol handling
-            async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-                logger.info("📟 MCP stdio server started")
-                await self.mcp_server.server.run(
-                    read_stream,
-                    write_stream,
-                    InitializationOptions(
-                        server_name="synology-mcp-server",
-                        server_version="1.0.0",
-                        capabilities=self.mcp_server.server.get_capabilities(
-                            notification_options=NotificationOptions(),
-                            experimental_capabilities={},
-                        ),
-                    ),
-                )
+            # Delegates to the shared _run_stdio() method on mcp_server
+            await self.mcp_server._run_stdio()
 
         except Exception as e:
             logger.error(f"❌ Stdio handler error: {e}")
@@ -452,24 +428,6 @@ class MCPBridge:
         self.running = False
         self.shutdown_event.set()
 
-        # Close WebSocket connections with timeout
-        close_tasks = []
-        for ws in list(self.websocket_clients):
-            try:
-                close_tasks.append(asyncio.create_task(ws.close()))
-            except Exception:
-                pass
-
-        if close_tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*close_tasks, return_exceptions=True), timeout=2.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning("⚠️ WebSocket close timeout")
-
-        self.websocket_clients.clear()
-
         # Clean up MCP server
         if self.mcp_server:
             try:
@@ -485,9 +443,9 @@ class MCPBridge:
 
 async def main():
     """Main entry point."""
-    # Get config from environment
-    xiaozhi_endpoint = os.getenv("XIAOZHI_MCP_ENDPOINT", "wss://api.xiaozhi.me/mcp/")
-    xiaozhi_token = os.getenv("XIAOZHI_TOKEN")
+    # Get config from environment, falling back to the resolved settings.json config
+    xiaozhi_endpoint = os.getenv("XIAOZHI_MCP_ENDPOINT") or config.xiaozhi_endpoint
+    xiaozhi_token = os.getenv("XIAOZHI_TOKEN") or config.xiaozhi_token
 
     if not xiaozhi_token:
         logger.error("❌ XIAOZHI_TOKEN environment variable required")
