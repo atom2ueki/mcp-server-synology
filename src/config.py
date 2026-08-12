@@ -558,13 +558,16 @@ class SynologyConfig:
         file, and clears any spent `otp_code` alongside it. Returns True on a
         successful write.
         """
-        if not device_id or not SETTINGS_FILE.exists():
+        if not isinstance(device_id, str) or not device_id.strip():
+            return False
+        if not SETTINGS_FILE.exists():
             return False
 
         try:
             data = json.loads(SETTINGS_FILE.read_text())
-            entry = data.get("synology", {}).get(nas_name)
-            if entry is None:
+            synology = data.get("synology") if isinstance(data, dict) else None
+            entry = synology.get(nas_name) if isinstance(synology, dict) else None
+            if not isinstance(entry, dict):
                 logger.warning(f"Cannot persist device_id: NAS '{nas_name}' not in settings")
                 return False
             token_changed = entry.get("device_id") != device_id
