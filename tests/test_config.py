@@ -278,6 +278,113 @@ class TestSynologyConfig:
                 url = cfg.resolve_base_url("nonexistent")
                 assert url is None
 
+    def test_explicit_url_overrides_host_port(self, tmp_path):
+        """Test that an explicit url wins over host/port (reverse-proxy setups)."""
+        secrets_data = {
+            "synology": {
+                "proxied": {
+                    "url": "https://nas.example.com/",
+                    "host": "ignored.example.com",
+                    "port": 5000,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            }
+        }
+
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
+
+        reload_config()
+
+        with clear_env():
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+
+                # url is used verbatim (trailing slash stripped); host/port ignored
+                assert cfg.nas_configs["proxied"]["base_url"] == "https://nas.example.com"
+
+    def test_non_string_url_entry_skipped(self, tmp_path, caplog):
+        """Test that a non-string url skips just that entry, not the whole file."""
+        import logging
+
+        secrets_data = {
+            "synology": {
+                "bad": {"url": 123, "username": "a", "password": "b"},
+                "good": {"host": "192.168.1.1", "port": 5000, "username": "a", "password": "b"},
+            }
+        }
+
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
+
+        reload_config()
+
+        with clear_env():
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert "bad" not in cfg.nas_configs
+                assert "good" in cfg.nas_configs
+                assert any("Invalid 'url'" in rec.message for rec in caplog.records)
+
+    def test_empty_url_falls_back_to_host_port(self, tmp_path):
+        """Test that an empty url is ignored and host/port builds the base URL."""
+        secrets_data = {
+            "synology": {
+                "nas": {
+                    "url": "",
+                    "host": "192.168.1.5",
+                    "port": 5001,
+                    "username": "a",
+                    "password": "b",
+                }
+            }
+        }
+
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
+
+        reload_config()
+
+        with clear_env():
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+
+                assert cfg.nas_configs["nas"]["base_url"] == "https://192.168.1.5:5001"
+
+    def test_missing_host_and_url_skipped(self, tmp_path, caplog):
+        """Test that an entry with neither host nor url is skipped with a warning."""
+        import logging
+
+        secrets_data = {"synology": {"noaddr": {"username": "a", "password": "b"}}}
+
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
+
+        reload_config()
+
+        with clear_env():
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert "noaddr" not in cfg.nas_configs
+                assert any("Missing 'host' (or 'url')" in rec.message for rec in caplog.records)
+
 
 class TestFilePermissions:
     """Test file permission checking."""

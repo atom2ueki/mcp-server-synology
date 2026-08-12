@@ -543,6 +543,12 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
       "username": "admin",
       "password": "your_password",
       "note": "Backup NAS"
+    },
+    "nas3": {
+      "url": "https://nas.example.com",
+      "username": "admin",
+      "password": "your_password",
+      "note": "NAS behind a reverse proxy"
     }
   },
   "xiaozhi": {
@@ -563,16 +569,20 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 **Configuration fields:**
 | Field | Required | Description |
 |-------|----------|-------------|
-| `host` | Yes | NAS hostname or IP address |
+| `host` | Yes* | NAS hostname or IP address |
 | `port` | No | API port (default: 5000 for HTTP, 5001 for HTTPS) |
+| `url` | Yes* | Full base URL (e.g., `https://nas.example.com`); wins over `host`/`port` — use for a NAS behind a reverse proxy |
 | `username` | Yes | NAS username |
 | `password` | Yes | NAS password |
 | `otp_code` | No | One-shot 6-digit 2FA code (first login only, then remove) |
 | `device_id` | No | Long-lived trusted-device token from DSM (`did`); skip OTP on all future logins |
 | `note` | No | Optional description for your reference |
 
+*Either `host` or `url` is required per NAS entry.
+
 **Notes:**
 - The server will use port 5001 (HTTPS) if port is 5001, otherwise defaults to HTTP (5000)
+- The `host`/`port` form always appends a port and derives the scheme from it, so it cannot express `https://nas.example.com` on the default 443 — set `url` directly for reverse-proxied setups
 - File permissions: `chmod 600 ~/.config/synology-mcp/settings.json` is required for security
 - The server will refuse to load settings if permissions are too open
 - Both .env and settings.json can be used together (settings.json takes priority)
