@@ -320,6 +320,8 @@ def test_login_with_otp_code_adds_otp_and_device_token_request(monkeypatch):
 
     assert len(calls) == 1
     params = calls[0]["params"]
+    # Bootstrap prefers v6: v7 succeeds but returns no `did` on DSM 7.x.
+    assert params["version"] == "6"
     assert params["otp_code"] == "123456"
     assert params["enable_device_token"] == "yes"
     # Device-id path must NOT be taken when we're sending an OTP.
@@ -340,6 +342,8 @@ def test_login_with_device_id_trusted_device_path(monkeypatch):
 
     assert len(calls) == 1
     params = calls[0]["params"]
+    # Steady-state logins keep preferring v7; only the OTP bootstrap reorders.
+    assert params["version"] == "7"
     assert params["device_id"] == "DID_abc"
     assert "otp_code" not in params
     assert "enable_device_token" not in params
