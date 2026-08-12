@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import stat
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -566,7 +567,9 @@ class SynologyConfig:
             if entry is None:
                 logger.warning(f"Cannot persist device_id: NAS '{nas_name}' not in settings")
                 return False
-            if entry.get("device_id") == device_id:
+            token_changed = entry.get("device_id") != device_id
+            otp_present = "otp_code" in entry
+            if not token_changed and not otp_present:
                 return False  # unchanged, nothing to write
 
             entry["device_id"] = device_id
@@ -575,13 +578,19 @@ class SynologyConfig:
             # 2FA login and fail on a stale code.
             entry.pop("otp_code", None)
 
-            # Write via a 0600 temp file in the same directory, then rename, so
-            # the secrets never briefly exist world-readable and a crash
-            # mid-write cannot truncate the real file.
-            tmp = SETTINGS_FILE.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data, indent=2) + "\n")
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, SETTINGS_FILE)
+            # Write via a temp file in the same directory created with 0600
+            # from the start (mkstemp), then rename, so the secrets never
+            # briefly exist world-readable and a crash mid-write cannot
+            # truncate the real file.
+            fd, tmp_name = tempfile.mkstemp(
+                dir=SETTINGS_FILE.parent,
+                prefix=f".{SETTINGS_FILE.name}.",
+                suffix=".tmp",
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                json.dump(data, tmp_file, indent=2)
+                tmp_file.write("\n")
+            os.replace(tmp_name, SETTINGS_FILE)
 
             # Keep the in-memory copy in step with disk.
             if nas_name in self.nas_configs:
