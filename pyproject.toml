@@ -19,7 +19,7 @@ ignore_missing_imports = true
 check_untyped_defs = true
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
