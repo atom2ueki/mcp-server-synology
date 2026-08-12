@@ -9,6 +9,7 @@ import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -527,11 +528,47 @@ class SynologyConfig:
         available at those call sites. Falls back to the global setting for a
         base_url that matches no configured NAS (legacy .env single-NAS mode,
         or a session created by an explicit login tool call).
+
+        Both sides go through `_normalize_base_url` before matching: an
+        explicit login to `https://NAS.example` must still resolve the policy
+        of a NAS configured as `https://nas.example` — otherwise the global
+        fallback could silently *downgrade* verification for a NAS that asked
+        for it.
         """
+        target = self._normalize_base_url(base_url)
         for cfg in self.nas_configs.values():
-            if cfg.get("base_url") == base_url:
+            configured = cfg.get("base_url")
+            if configured and self._normalize_base_url(configured) == target:
                 return cfg.get("verify_ssl", self.verify_ssl)
         return self.verify_ssl
+
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        """Canonicalize a base URL for identity comparison.
+
+        URL identity is not string identity: scheme and hostname are
+        case-insensitive, an explicit default port (443/https, 80/http) is
+        equivalent to its omitted form, and a trailing slash on the path
+        carries no meaning here. The path itself is case-sensitive, so it is
+        preserved verbatim. Input without a parseable hostname is returned
+        as-is (minus trailing slash) and simply never matches a configured
+        URL, preserving the previous raw-equality behavior for it.
+        """
+        stripped = url.strip().rstrip("/")
+        parts = urlsplit(stripped)
+        if not parts.hostname:
+            return stripped
+        scheme = parts.scheme.lower()
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        host = parts.hostname.lower()
+        if port is None or (scheme, port) in (("https", 443), ("http", 80)):
+            netloc = host
+        else:
+            netloc = f"{host}:{port}"
+        return urlunsplit((scheme, netloc, parts.path, "", ""))
 
     @staticmethod
     def get_config_dir() -> Path:
