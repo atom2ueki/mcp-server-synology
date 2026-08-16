@@ -76,6 +76,20 @@ class SynologyContainer:
             type=container_type,
         )
 
+    def health_summary(self) -> Dict[str, Any]:
+        """Return a compact health summary for every container."""
+        result = self.list_containers(offset=0, limit=-1, container_type="all")
+        if not result.get("success"):
+            return result
+        data = result.get("data", {})
+        items = data.get("containers", []) if isinstance(data, dict) else []
+        summary = [{"name": i.get("name"), "status": i.get("status", i.get("state")), "health": i.get("health"), "restart_count": i.get("restartCount", i.get("restart_count", 0)), "image": i.get("image")} for i in items if isinstance(i, dict)]
+        return {"success": True, "data": {"containers": summary, "count": len(summary)}}
+
+    def disk_usage(self) -> Dict[str, Any]:
+        """Return Docker disk usage using the read-only SSH CLI."""
+        return self._ssh_docker_command("system df", "docker_disk_usage_failed", "Docker disk usage timed out")
+
     def get_container(self, name: str) -> Dict[str, Any]:
         """Get one Container Manager container by name."""
         return self._container_name_request("get", name)
@@ -414,6 +428,10 @@ class SynologyContainer:
 
     def _ssh_docker_prune(self) -> Dict[str, Any]:
         """Run Docker's image-only prune through the authorized SSH account."""
+        return self._ssh_docker_command("image prune --all --force", "ssh_prune_failed", "Docker prune timed out")
+
+    def _ssh_docker_command(self, docker_command: str, error_code: str, timeout_message: str) -> Dict[str, Any]:
+        """Run a fixed Docker command through the explicitly configured SSH account."""
         host = urlsplit(self._api.base_url).hostname
         if not host:
             return {"success": False, "error": {"code": "invalid_host", "message": "NAS URL has no hostname"}}
@@ -422,6 +440,9 @@ class SynologyContainer:
         if not self._ssh_known_hosts:
             return {"success": False, "error": {"code": "ssh_known_hosts_unavailable", "message": "A provisioned SSH known_hosts file is required"}}
 
+
+        if docker_command not in {"image prune --all --force", "system df"}:
+            return {"success": False, "error": {"code": "unsupported_ssh_command", "message": "Unsupported Docker command"}}
 
         askpass_fd, askpass = tempfile.mkstemp(prefix="synology-mcp-askpass-")
         os.close(askpass_fd)
@@ -436,10 +457,7 @@ class SynologyContainer:
                 "SSH_ASKPASS_REQUIRE": "force",
                 "DISPLAY": "synology-mcp",
             })
-            command = (
-                "sudo -n /var/packages/ContainerManager/target/usr/bin/docker "
-                "image prune --all --force"
-            )
+            command = "sudo -n /var/packages/ContainerManager/target/usr/bin/docker " + docker_command
             result = subprocess.run(
                 [
                     "/usr/bin/setsid", "/usr/bin/ssh", "-o", "BatchMode=no", "-o", "ConnectTimeout=20",
@@ -451,7 +469,7 @@ class SynologyContainer:
         except FileNotFoundError as exc:
             return {"success": False, "error": {"code": "ssh_unavailable", "message": str(exc)}}
         except subprocess.TimeoutExpired:
-            return {"success": False, "error": {"code": "ssh_timeout", "message": "Docker prune timed out"}}
+            return {"success": False, "error": {"code": "ssh_timeout", "message": timeout_message}}
         finally:
             try:
                 os.unlink(askpass)
@@ -460,8 +478,11 @@ class SynologyContainer:
 
         output = (result.stdout or "").strip()
         if result.returncode:
-            return {"success": False, "error": {"code": "ssh_prune_failed", "message": (result.stderr or output).strip()[-2000:]}}
-        return {"success": True, "data": {"mode": "ssh", "output": output}}
+            return {"success": False, "error": {"code": error_code, "message": (result.stderr or output).strip()[-2000:]}}
+        data = {"mode": "ssh", "output": output}
+        if docker_command == "system df":
+            data["command"] = docker_command
+        return {"success": True, "data": data}
 
     def pull_image(self, repository: str, tag: str = "latest") -> Dict[str, Any]:
         """Pull a Container Manager image from a registry."""

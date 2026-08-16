@@ -731,3 +731,19 @@ async def test_legacy_single_nas_auto_login_registers_default_name():
         await server._auto_login_if_configured()
 
     assert server.nas_name_map["default"] == "http://nas.example.com:5000"
+
+
+def test_container_health_summary_is_compact_and_read_only():
+    container = _container()
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {"containers": [{"name": "plex", "status": "running", "health": "healthy", "restartCount": 2, "image": "plex:latest"}]}}):
+        assert container.health_summary() == {"success": True, "data": {"count": 1, "containers": [{"name": "plex", "status": "running", "health": "healthy", "restart_count": 2, "image": "plex:latest"}]}}
+
+
+def test_container_disk_usage_uses_read_only_docker_command():
+    container = _container()
+    completed = MagicMock(returncode=0, stdout="Images space usage:\n", stderr="")
+    with patch("container.synology_container.subprocess.run", return_value=completed) as run:
+        result = container.disk_usage()
+    assert result["success"] is True
+    assert result["data"]["command"] == "system df"
+    assert "prune" not in run.call_args.args[0][-1]

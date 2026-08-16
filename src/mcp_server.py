@@ -216,6 +216,8 @@ class SynologyMCPServer:
             "required": [],
         }
         self._register_tool("synology_container_list", "List Container Manager containers", CI | {"properties": {**CI["properties"], "offset": {"type": "integer", "description": "Pagination offset"}, "limit": {"type": "integer", "description": "Maximum containers to return"}, "container_type": {"type": "string", "description": "Container filter (default: all)"}}}, partial(self._handle_container_call, method_name="list"))
+        self._register_tool("synology_container_health_summary", "Summarize container status, health, restart counts, and images", CI, partial(self._handle_container_call, method_name="health_summary"))
+        self._register_tool("synology_container_disk_usage", "Show Docker disk usage without changing anything", CI, partial(self._handle_container_call, method_name="disk_usage"))
         self._register_tool("synology_container_get", "Get detailed information about a specific container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="get"))
         self._register_tool("synology_container_start", "Start a container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="start"))
         self._register_tool("synology_container_stop", "Stop a running container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="stop"))
@@ -1171,6 +1173,10 @@ class SynologyMCPServer:
                 limit=arguments.get("limit", -1),
                 container_type=arguments.get("container_type", "all"),
             )
+        elif method_name == "health_summary":
+            result = container.health_summary()
+        elif method_name == "disk_usage":
+            result = container.disk_usage()
         elif method_name == "project_list":
             result = container.list_projects()
         elif method_name == "project_create":

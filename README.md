@@ -377,6 +377,8 @@ docker-compose up
 
 ### 🐳 Container Manager
 - **`synology_container_list`** - List Container Manager containers
+- **`synology_container_health_summary`** - Summarize container status, health, restart counts, and images
+- **`synology_container_disk_usage`** - Show Docker disk usage through the read-only SSH CLI
   - `offset` (optional): Pagination offset
   - `limit` (optional): Maximum containers to return
   - `container_type` (optional): Container filter (default: `all`)
