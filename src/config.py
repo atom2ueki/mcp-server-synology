@@ -104,9 +104,7 @@ class SynologyConfig:
         self.synology_url = os.getenv("SYNOLOGY_URL")
         self.synology_username = os.getenv("SYNOLOGY_USERNAME")
         self.synology_password = os.getenv("SYNOLOGY_PASSWORD")
-        self.synology_ssh_username = os.getenv("SYNOLOGY_SSH_USERNAME")
-        self.synology_ssh_password = os.getenv("SYNOLOGY_SSH_PASSWORD")
-        self.synology_ssh_known_hosts = os.getenv("SYNOLOGY_SSH_KNOWN_HOSTS")
+
         # One-shot 2FA code for legacy .env single-NAS users on first login.
         # Settings.json users store `device_id` per-NAS for ongoing reuse and
         # don't need this. Read-only here; auto-login consumes it but does
@@ -445,9 +443,7 @@ class SynologyConfig:
                     port = nas_info.get("port", 5000)
                     username = nas_info.get("username", "")
                     password = nas_info.get("password", "")
-                    ssh_username = nas_info.get("ssh_username")
-                    ssh_password = nas_info.get("ssh_password")
-                    ssh_known_hosts = nas_info.get("ssh_known_hosts")
+
                     # Optional 2FA/OTP support (DSM Login Web API Guide):
                     #   - `otp_code`: one-shot code from authenticator. Needed
                     #     only on the FIRST login after enabling 2FA on the
@@ -500,9 +496,7 @@ class SynologyConfig:
                         "base_url": base_url,
                         "username": username,
                         "password": password,
-                        "ssh_username": ssh_username,
-                        "ssh_password": ssh_password,
-                        "ssh_known_hosts": ssh_known_hosts,
+
                         "verify_ssl": nas_verify_ssl,
                         "note": nas_info.get("note", ""),
                         "otp_code": otp_code,
@@ -561,15 +555,7 @@ class SynologyConfig:
             return self.synology_username, self.synology_password
         return None, None
 
-    def ssh_credentials_for(self, base_url: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """Return explicit SSH credentials and known-hosts path for a NAS URL."""
-        target = self._normalize_base_url(base_url)
-        for cfg in self.nas_configs.values():
-            if cfg.get("base_url") and self._normalize_base_url(cfg["base_url"]) == target:
-                return cfg.get("ssh_username"), cfg.get("ssh_password"), cfg.get("ssh_known_hosts")
-        if self.synology_url and self._normalize_base_url(self.synology_url) == target:
-            return self.synology_ssh_username, self.synology_ssh_password, self.synology_ssh_known_hosts
-        return None, None, None
+
 
     @staticmethod
     def _normalize_base_url(url: str) -> str:
@@ -639,9 +625,7 @@ class SynologyConfig:
             "base_url": self.synology_url,
             "username": self.synology_username,
             "password": self.synology_password,
-            "ssh_username": self.synology_ssh_username,
-            "ssh_password": self.synology_ssh_password,
-            "ssh_known_hosts": self.synology_ssh_known_hosts,
+
             "verify_ssl": self.verify_ssl,
             "otp_code": self.synology_otp_code,
             "device_id": None,
