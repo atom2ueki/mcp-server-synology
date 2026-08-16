@@ -442,8 +442,9 @@ class SynologyMCPServer:
                 session_id,
                 verify_ssl=config.verify_ssl_for(base_url),
                 syno_token=self.syno_tokens.get(base_url),
-                ssh_username=config.credentials_for(base_url)[0],
-                ssh_password=config.credentials_for(base_url)[1],
+                ssh_username=config.ssh_credentials_for(base_url)[0],
+                ssh_password=config.ssh_credentials_for(base_url)[1],
+                ssh_known_hosts=config.ssh_credentials_for(base_url)[2],
             )
 
         return self.container_instances[base_url]

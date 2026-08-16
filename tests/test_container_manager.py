@@ -359,6 +359,7 @@ def test_image_prune_ssh_fallback_uses_image_only_command():
         "sid_xyz",
         ssh_username="sshuser",
         ssh_password="sshpass",
+        ssh_known_hosts="/tmp/known_hosts",
     )
     completed = MagicMock(returncode=0, stdout="Total reclaimed space: 1GB", stderr="")
 
@@ -372,6 +373,8 @@ def test_image_prune_ssh_fallback_uses_image_only_command():
     command = run.call_args.args[0]
     assert command[-1] == "sudo -n /var/packages/ContainerManager/target/usr/bin/docker image prune --all --force"
     assert "system prune" not in command[-1]
+    assert "StrictHostKeyChecking=yes" in command
+    assert "UserKnownHostsFile=/tmp/known_hosts" in command
 
 
 def test_image_prune_preview_is_read_only_and_reports_candidates():
@@ -406,6 +409,36 @@ def test_image_prune_preview_is_read_only_and_reports_candidates():
     list_containers.assert_called_once()
     list_images.assert_called_once()
     request.assert_not_called()
+
+
+def test_image_prune_protects_digest_referenced_repository():
+    from container.synology_container import SynologyContainer
+
+    container = SynologyContainer("https://nas.example.com:5001", "sid_xyz")
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {"containers": [{"image": "nginx@sha256:abc"}]}}), patch.object(
+        container, "list_images", return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": ["latest", "old"]}]}}
+    ):
+        result = container.preview_image_prune()
+    assert result["data"]["candidates"] == []
+
+
+def test_image_prune_fails_closed_on_malformed_container_inventory():
+    from container.synology_container import SynologyContainer
+
+    container = SynologyContainer("https://nas.example.com:5001", "sid_xyz")
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {}}), patch.object(container, "list_images") as images:
+        result = container.preview_image_prune()
+    assert result["success"] is False
+    assert result["error"]["code"] == "unsafe_prune"
+    images.assert_not_called()
+
+
+def test_image_prune_ssh_requires_explicit_known_hosts():
+    from container.synology_container import SynologyContainer
+
+    container = SynologyContainer("https://nas.example.com:5001", "sid_xyz", ssh_username="user", ssh_password="pass")
+    result = container.prune_images()
+    assert result["error"]["code"] == "ssh_known_hosts_unavailable"
 
 
 def test_image_prune_fails_closed_when_container_references_are_missing():

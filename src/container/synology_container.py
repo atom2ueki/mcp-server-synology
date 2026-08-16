@@ -22,10 +22,12 @@ class SynologyContainer:
         syno_token: Optional[str] = None,
         ssh_username: Optional[str] = None,
         ssh_password: Optional[str] = None,
+        ssh_known_hosts: Optional[str] = None,
     ):
         self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)
         self._ssh_username = ssh_username
         self._ssh_password = ssh_password
+        self._ssh_known_hosts = ssh_known_hosts
         self.container_api = "SYNO.Docker.Container"
         self.container_version = 1
         self.project_api = "SYNO.Docker.Project"
@@ -327,9 +329,12 @@ class SynologyContainer:
         containers = self.list_containers(offset=0, limit=-1, container_type="all")
         if not containers.get("success"):
             return containers
-        container_data = containers.get("data", {})
-        container_items = container_data.get("containers", []) if isinstance(container_data, dict) else []
+        container_data = containers.get("data")
+        if not isinstance(container_data, dict) or not isinstance(container_data.get("containers"), list):
+            return {"success": False, "error": {"code": "unsafe_prune", "message": "Unexpected container inventory; no images were deleted"}}
+        container_items = container_data["containers"]
         references = set()
+        digest_repositories = set()
         for item in container_items:
             if not isinstance(item, dict) or not item.get("image"):
                 return {
@@ -342,7 +347,7 @@ class SynologyContainer:
             image = str(item["image"])
             references.add(image)
             if "@" in image:
-                references.add(image.split("@", 1)[0])
+                digest_repositories.add(image.split("@", 1)[0])
 
         images_result = self.list_images(offset=0, limit=-1)
         if not images_result.get("success"):
@@ -369,7 +374,7 @@ class SynologyContainer:
                     # for the Docker CLI fallback rather than reporting a
                     # misleading deletion attempt.
                     skipped.append(full_name)
-                elif full_name not in references:
+                elif full_name not in references and image["repository"] not in digest_repositories:
                     candidates.append((full_name, image))
 
         if dry_run:
@@ -412,6 +417,11 @@ class SynologyContainer:
         host = urlsplit(self._api.base_url).hostname
         if not host:
             return {"success": False, "error": {"code": "invalid_host", "message": "NAS URL has no hostname"}}
+        if not self._ssh_username or not self._ssh_password:
+            return {"success": False, "error": {"code": "ssh_credentials_unavailable", "message": "Explicit SSH credentials are required"}}
+        if not self._ssh_known_hosts:
+            return {"success": False, "error": {"code": "ssh_known_hosts_unavailable", "message": "A provisioned SSH known_hosts file is required"}}
+
 
         askpass_fd, askpass = tempfile.mkstemp(prefix="synology-mcp-askpass-")
         os.close(askpass_fd)
@@ -432,9 +442,9 @@ class SynologyContainer:
             )
             result = subprocess.run(
                 [
-                    "setsid", "ssh", "-o", "BatchMode=no", "-o", "ConnectTimeout=20",
+                    "/usr/bin/setsid", "/usr/bin/ssh", "-o", "BatchMode=no", "-o", "ConnectTimeout=20",
                     "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no",
-                    "-o", "StrictHostKeyChecking=accept-new", f"{self._ssh_username}@{host}", command,
+                    "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={self._ssh_known_hosts}", f"{self._ssh_username}@{host}", command,
                 ],
                 capture_output=True, text=True, timeout=300, env=env, check=False,
             )
