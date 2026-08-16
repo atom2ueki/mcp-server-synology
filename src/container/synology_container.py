@@ -1,7 +1,12 @@
 """Synology Container Manager operations."""
 
 import json
+import os
+import stat
+import subprocess
+import tempfile
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from utils.synology_api import SynologyAPIClient
 
@@ -15,8 +20,12 @@ class SynologyContainer:
         session_id: str,
         verify_ssl: bool = False,
         syno_token: Optional[str] = None,
+        ssh_username: Optional[str] = None,
+        ssh_password: Optional[str] = None,
     ):
         self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)
+        self._ssh_username = ssh_username
+        self._ssh_password = ssh_password
         self.container_api = "SYNO.Docker.Container"
         self.container_version = 1
         self.project_api = "SYNO.Docker.Project"
@@ -291,8 +300,158 @@ class SynologyContainer:
             self.image_api,
             self.image_version,
             "delete",
-            images=json.dumps([image]),
+            name=name,
+            tag=tag,
         )
+
+    def prune_images(self) -> Dict[str, Any]:
+        """Delete images that are not referenced by any container.
+
+        Some DSM versions expose no working Docker image-prune API.  When
+        explicitly configured with SSH credentials, use Docker's image-only
+        prune command.  Otherwise use the DSM list/delete APIs and fail closed
+        if any container image reference is unavailable.
+        """
+        if self._ssh_username and self._ssh_password:
+            return self._ssh_docker_prune()
+
+        return self._prune_images_from_inventory(dry_run=False)
+
+    def preview_image_prune(self) -> Dict[str, Any]:
+        """Preview removable images without invoking SSH or mutating DSM."""
+        return self._prune_images_from_inventory(dry_run=True)
+
+    def _prune_images_from_inventory(self, dry_run: bool) -> Dict[str, Any]:
+        """Compute image-prune candidates from the DSM inventories."""
+
+        containers = self.list_containers(offset=0, limit=-1, container_type="all")
+        if not containers.get("success"):
+            return containers
+        container_data = containers.get("data", {})
+        container_items = container_data.get("containers", []) if isinstance(container_data, dict) else []
+        references = set()
+        for item in container_items:
+            if not isinstance(item, dict) or not item.get("image"):
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "unsafe_prune",
+                        "message": "Cannot determine every container image reference; no images were deleted",
+                    },
+                }
+            image = str(item["image"])
+            references.add(image)
+            if "@" in image:
+                references.add(image.split("@", 1)[0])
+
+        images_result = self.list_images(offset=0, limit=-1)
+        if not images_result.get("success"):
+            return images_result
+        image_data = images_result.get("data", {})
+        images = image_data.get("images", []) if isinstance(image_data, dict) else []
+        if not isinstance(images, list):
+            return {
+                "success": False,
+                "error": {"code": "unsafe_prune", "message": "Unexpected image inventory; no images were deleted"},
+            }
+
+        candidates = []
+        skipped = []
+        for image in images:
+            if not isinstance(image, dict) or not image.get("repository"):
+                continue
+            tags = image.get("tags") or ["<none>"]
+            for tag in tags:
+                tag = str(tag)
+                full_name = f"{image['repository']}:{tag}"
+                if tag == "<none>":
+                    # DSM rejects literal <none> tags.  Leave dangling layers
+                    # for the Docker CLI fallback rather than reporting a
+                    # misleading deletion attempt.
+                    skipped.append(full_name)
+                elif full_name not in references:
+                    candidates.append((full_name, image))
+
+        if dry_run:
+            return {
+                "success": True,
+                "data": {
+                    "mode": "preview",
+                    "candidates": [name for name, _ in candidates],
+                    "skipped": skipped,
+                    "errors": [],
+                },
+            }
+
+        deleted = []
+        errors = []
+        for full_name, image in candidates:
+            repository, tag = full_name.rsplit(":", 1)
+            result = self._make_request(
+                self.image_api,
+                self.image_version,
+                "delete",
+                name=repository,
+                tag=tag,
+            )
+            if result.get("success"):
+                deleted.append(full_name)
+            else:
+                errors.append({"image": full_name, "error": result.get("error", {})})
+
+        response = {
+            "success": not errors,
+            "data": {"mode": "api", "deleted": deleted, "skipped": skipped, "errors": errors},
+        }
+        if errors:
+            response["error"] = {"code": "partial_prune", "message": "Some unused images could not be deleted"}
+        return response
+
+    def _ssh_docker_prune(self) -> Dict[str, Any]:
+        """Run Docker's image-only prune through the authorized SSH account."""
+        host = urlsplit(self._api.base_url).hostname
+        if not host:
+            return {"success": False, "error": {"code": "invalid_host", "message": "NAS URL has no hostname"}}
+
+        askpass_fd, askpass = tempfile.mkstemp(prefix="synology-mcp-askpass-")
+        os.close(askpass_fd)
+        try:
+            os.chmod(askpass, stat.S_IRWXU)
+            with open(askpass, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nprintf '%s\\n' \"$SYNOLOGY_SSH_PASSWORD\"\n")
+            env = os.environ.copy()
+            env.update({
+                "SYNOLOGY_SSH_PASSWORD": self._ssh_password,
+                "SSH_ASKPASS": askpass,
+                "SSH_ASKPASS_REQUIRE": "force",
+                "DISPLAY": "synology-mcp",
+            })
+            command = (
+                "sudo -n /var/packages/ContainerManager/target/usr/bin/docker "
+                "image prune --all --force"
+            )
+            result = subprocess.run(
+                [
+                    "setsid", "ssh", "-o", "BatchMode=no", "-o", "ConnectTimeout=20",
+                    "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no",
+                    "-o", "StrictHostKeyChecking=accept-new", f"{self._ssh_username}@{host}", command,
+                ],
+                capture_output=True, text=True, timeout=300, env=env, check=False,
+            )
+        except FileNotFoundError as exc:
+            return {"success": False, "error": {"code": "ssh_unavailable", "message": str(exc)}}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": {"code": "ssh_timeout", "message": "Docker prune timed out"}}
+        finally:
+            try:
+                os.unlink(askpass)
+            except OSError:
+                pass
+
+        output = (result.stdout or "").strip()
+        if result.returncode:
+            return {"success": False, "error": {"code": "ssh_prune_failed", "message": (result.stderr or output).strip()[-2000:]}}
+        return {"success": True, "data": {"mode": "ssh", "output": output}}
 
     def pull_image(self, repository: str, tag: str = "latest") -> Dict[str, Any]:
         """Pull a Container Manager image from a registry."""

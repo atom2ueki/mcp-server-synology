@@ -236,6 +236,8 @@ class SynologyMCPServer:
         self._register_tool("synology_container_image_list", "List Docker images", CI, partial(self._handle_container_call, method_name="image_list"))
         self._register_tool("synology_container_image_get", "Get details of a specific Docker image", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="image_get"))
         self._register_tool("synology_container_image_delete", "Delete a Docker image", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="image_delete"))
+        self._register_tool("synology_container_image_prune_preview", "Preview unused Docker images without deleting anything", CI, partial(self._handle_container_call, method_name="image_prune_preview"))
+        self._register_tool("synology_container_image_prune", "Remove Docker images unused by any container; preserves containers, networks, and build cache", CI, partial(self._handle_container_call, method_name="image_prune"))
         self._register_tool("synology_container_image_pull", "Pull a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}}, partial(self._handle_container_call, method_name="image_pull"))
         self._register_tool("synology_container_registry_list", "List configured Docker registries", CI, partial(self._handle_container_call, method_name="registry_list"))
         self._register_tool("synology_container_registry_search", "Search for images in a Docker registry", CI | {"properties": {**CI["properties"], "query": {"type": "string", "description": "Search query for image name"}, "offset": {"type": "integer", "description": "Pagination offset (default: 0)"}, "limit": {"type": "integer", "description": "Max results to return (default: 50)"}}, "required": ["query"]}, partial(self._handle_container_call, method_name="registry_search"))
@@ -440,6 +442,8 @@ class SynologyMCPServer:
                 session_id,
                 verify_ssl=config.verify_ssl_for(base_url),
                 syno_token=self.syno_tokens.get(base_url),
+                ssh_username=config.credentials_for(base_url)[0],
+                ssh_password=config.credentials_for(base_url)[1],
             )
 
         return self.container_instances[base_url]
@@ -1195,6 +1199,10 @@ class SynologyMCPServer:
                 limit=arguments.get("limit", -1),
                 show_dsm=arguments.get("show_dsm", False),
             )
+        elif method_name == "image_prune":
+            result = container.prune_images()
+        elif method_name == "image_prune_preview":
+            result = container.preview_image_prune()
         elif method_name in {"image_get", "image_delete"}:
             image_method = {
                 "image_get": container.get_image,

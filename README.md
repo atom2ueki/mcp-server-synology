@@ -439,6 +439,11 @@ docker-compose up
 - **`synology_container_image_delete`** - Delete a Container Manager image
   - `name` (required): Image repository name
   - `tag` (optional): Image tag (default: `latest`)
+- **`synology_container_image_prune`** - Remove images unused by any container
+  - **`synology_container_image_prune_preview`** provides a read-only candidate list before cleanup
+  - Uses Docker's image-only prune over explicitly configured SSH when DSM's image API cannot prune dangling layers
+  - The API-only fallback deletes safely identifiable unused tagged images and reports dangling images it could not remove
+  - Does not remove containers, networks, or build cache
 - **`synology_container_image_pull`** - Pull a Container Manager image
   - `repository` (required): Image repository name
   - `tag` (optional): Image tag (default: `latest`)

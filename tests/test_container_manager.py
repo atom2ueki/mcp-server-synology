@@ -310,6 +310,123 @@ def test_project_id_lookup_tolerates_non_dict_data(data):
     assert result["error"]["code"] == "not_found"
 
 
+def test_image_prune_removes_only_unreferenced_images():
+    """Pruning preserves container image references and deletes the rest."""
+    container = _container()
+
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={
+            "success": True,
+            "data": {"containers": [{"image": "caddy:alpine"}]},
+        },
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={
+            "success": True,
+            "data": {
+                "images": [
+                    {"id": "sha256:used", "repository": "caddy", "tags": ["alpine"]},
+                    {"id": "sha256:unused", "repository": "nginx", "tags": ["latest"]},
+                    {"id": "sha256:dangling", "repository": "caddy", "tags": ["<none>"]},
+                ]
+            },
+        },
+    ), patch.object(
+        container,
+        "_make_request",
+        return_value={"success": True},
+    ) as request:
+        result = container.prune_images()
+
+    assert result["success"] is True
+    assert result["data"]["mode"] == "api"
+    assert result["data"]["deleted"] == ["nginx:latest"]
+    assert result["data"]["skipped"] == ["caddy:<none>"]
+    assert request.call_count == 1
+    assert request.call_args.args == ("SYNO.Docker.Image", 1, "delete")
+    assert request.call_args.kwargs == {"name": "nginx", "tag": "latest"}
+
+
+def test_image_prune_ssh_fallback_uses_image_only_command():
+    """The SSH fallback preserves stopped containers and networks."""
+    from container.synology_container import SynologyContainer
+
+    container = SynologyContainer(
+        "https://nas.example.com:5001",
+        "sid_xyz",
+        ssh_username="sshuser",
+        ssh_password="sshpass",
+    )
+    completed = MagicMock(returncode=0, stdout="Total reclaimed space: 1GB", stderr="")
+
+    with patch("container.synology_container.subprocess.run", return_value=completed) as run:
+        result = container.prune_images()
+
+    assert result == {
+        "success": True,
+        "data": {"mode": "ssh", "output": "Total reclaimed space: 1GB"},
+    }
+    command = run.call_args.args[0]
+    assert command[-1] == "sudo -n /var/packages/ContainerManager/target/usr/bin/docker image prune --all --force"
+    assert "system prune" not in command[-1]
+
+
+def test_image_prune_preview_is_read_only_and_reports_candidates():
+    from container.synology_container import SynologyContainer
+
+    container = SynologyContainer("https://nas.example.com:5001", "sid_xyz")
+    containers = {"success": True, "data": {"containers": [{"image": "nginx:latest"}]}}
+    images = {
+        "success": True,
+        "data": {
+            "images": [
+                {"repository": "nginx", "tags": ["latest"]},
+                {"repository": "caddy", "tags": ["alpine"]},
+                {"repository": "dangling", "tags": ["<none>"]},
+            ]
+        },
+    }
+    with patch.object(container, "list_containers", return_value=containers) as list_containers, patch.object(
+        container, "list_images", return_value=images
+    ) as list_images, patch.object(container, "_make_request") as request:
+        result = container.preview_image_prune()
+
+    assert result == {
+        "success": True,
+        "data": {
+            "mode": "preview",
+            "candidates": ["caddy:alpine"],
+            "skipped": ["dangling:<none>"],
+            "errors": [],
+        },
+    }
+    list_containers.assert_called_once()
+    list_images.assert_called_once()
+    request.assert_not_called()
+
+
+def test_image_prune_fails_closed_when_container_references_are_missing():
+    """Pruning never deletes images when the container inventory is incomplete."""
+    container = _container()
+
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"name": "broken"}]}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": ["latest"]}]}},
+    ):
+        result = container.prune_images()
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unsafe_prune"
+
+
 def test_image_methods_wire_format_matches_dsm():
     """Image tools expose local image list/get/delete and pull."""
     container = _container()
@@ -360,11 +477,9 @@ def test_image_methods_wire_format_matches_dsm():
 
     delete_data = post.call_args_list[3].kwargs["data"]
     assert delete_data["method"] == "delete"
-    assert json.loads(delete_data["images"]) == [
-        {"id": "sha256:caddy", "repository": "caddy", "tags": ["alpine"]}
-    ]
-    assert "name" not in delete_data
-    assert "tag" not in delete_data
+    assert delete_data["name"] == "caddy"
+    assert delete_data["tag"] == "alpine"
+    assert "images" not in delete_data
 
     pull_data = post.call_args_list[4].kwargs["data"]
     assert pull_data["method"] == "pull_start"
@@ -541,6 +656,7 @@ def test_container_tools_are_registered():
         "synology_container_image_list",
         "synology_container_image_get",
         "synology_container_image_delete",
+        "synology_container_image_prune",
         "synology_container_image_pull",
         "synology_container_registry_list",
         "synology_container_registry_search",
