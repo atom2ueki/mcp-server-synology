@@ -741,6 +741,9 @@ def test_container_health_summary_is_compact_and_read_only():
 
 def test_container_disk_usage_uses_read_only_docker_command():
     container = _container()
+    container._ssh_username = "sshuser"
+    container._ssh_password = "sshpass"
+    container._ssh_known_hosts = "/tmp/known_hosts"
     completed = MagicMock(returncode=0, stdout="Images space usage:\n", stderr="")
     with patch("container.synology_container.subprocess.run", return_value=completed) as run:
         result = container.disk_usage()
