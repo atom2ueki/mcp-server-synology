@@ -545,18 +545,6 @@ class SynologyConfig:
                 return cfg.get("verify_ssl", self.verify_ssl)
         return self.verify_ssl
 
-    def credentials_for(self, base_url: str) -> tuple[Optional[str], Optional[str]]:
-        """Return the configured DSM username/password for an exact NAS URL."""
-        target = self._normalize_base_url(base_url)
-        for cfg in self.nas_configs.values():
-            if cfg.get("base_url") and self._normalize_base_url(cfg["base_url"]) == target:
-                return cfg.get("username"), cfg.get("password")
-        if self.synology_url and self._normalize_base_url(self.synology_url) == target:
-            return self.synology_username, self.synology_password
-        return None, None
-
-
-
     @staticmethod
     def _normalize_base_url(url: str) -> str:
         """Canonicalize a base URL for identity comparison.
