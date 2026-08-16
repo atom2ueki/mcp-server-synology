@@ -381,7 +381,7 @@ docker-compose up
   - `limit` (optional): Maximum containers to return
   - `container_type` (optional): Container filter (default: `all`)
 - **`synology_container_health_summary`** - Summarize container status, health, restart counts, and images
-- **`synology_container_disk_usage`** - Show Docker disk usage through the read-only SSH CLI
+- **`synology_container_disk_usage`** - Show the read-only disk-usage summary available through Container Manager APIs
 - **`synology_container_get`** - Get a Container Manager container
   - `name` (required): Container name
 - **`synology_container_start`** - Start a Container Manager container
@@ -443,8 +443,7 @@ docker-compose up
   - `tag` (optional): Image tag (default: `latest`)
 - **`synology_container_image_prune`** - Remove images unused by any container
   - **`synology_container_image_prune_preview`** provides a read-only candidate list before cleanup
-  - Selects Docker's image-only SSH prune when explicit `ssh_username`, `ssh_password`, and a provisioned `ssh_known_hosts` path are configured for the exact NAS URL
-  - The API-only fallback deletes safely identifiable unused tagged images and reports dangling images it could not remove
+  - Uses only Container Manager APIs to delete safely identifiable unused tagged images and reports dangling images it cannot remove through DSM
   - Does not remove containers, networks, or build cache
 - **`synology_container_image_pull`** - Pull a Container Manager image
   - `repository` (required): Image repository name

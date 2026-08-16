@@ -1,12 +1,7 @@
 """Synology Container Manager operations."""
 
 import json
-import os
-import stat
-import subprocess
-import tempfile
 from typing import Any, Dict, Optional
-from urllib.parse import urlsplit
 
 from utils.synology_api import SynologyAPIClient
 
@@ -20,14 +15,10 @@ class SynologyContainer:
         session_id: str,
         verify_ssl: bool = False,
         syno_token: Optional[str] = None,
-        ssh_username: Optional[str] = None,
-        ssh_password: Optional[str] = None,
-        ssh_known_hosts: Optional[str] = None,
+
     ):
         self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)
-        self._ssh_username = ssh_username
-        self._ssh_password = ssh_password
-        self._ssh_known_hosts = ssh_known_hosts
+
         self.container_api = "SYNO.Docker.Container"
         self.container_version = 1
         self.project_api = "SYNO.Docker.Project"
@@ -87,8 +78,20 @@ class SynologyContainer:
         return {"success": True, "data": {"containers": summary, "count": len(summary)}}
 
     def disk_usage(self) -> Dict[str, Any]:
-        """Return Docker disk usage using the read-only SSH CLI."""
-        return self._ssh_docker_command("system df", "docker_disk_usage_failed", "Docker disk usage timed out")
+        """Return a read-only disk-usage summary from DSM Container Manager APIs."""
+        images = self.list_images(offset=0, limit=-1, show_dsm=False)
+        if not images.get("success"):
+            return images
+        containers = self.list_containers(offset=0, limit=-1, container_type="all")
+        if not containers.get("success"):
+            return containers
+        image_items = images.get("data", {}).get("images", [])
+        container_items = containers.get("data", {}).get("containers", [])
+        if not isinstance(image_items, list) or not isinstance(container_items, list):
+            return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
+        image_bytes = sum(int(item.get("size", 0) or 0) for item in image_items if isinstance(item, dict) and str(item.get("size", "")).isdigit())
+        container_bytes = sum(int(item.get("size", 0) or 0) for item in container_items if isinstance(item, dict) and str(item.get("size", "")).isdigit())
+        return {"success": True, "data": {"mode": "api", "images": {"count": len(image_items), "size_bytes": image_bytes}, "containers": {"count": len(container_items), "size_bytes": container_bytes}, "volumes": {"supported": False}, "build_cache": {"supported": False}}}
 
     def get_container(self, name: str) -> Dict[str, Any]:
         """Get one Container Manager container by name."""
@@ -323,18 +326,13 @@ class SynologyContainer:
     def prune_images(self) -> Dict[str, Any]:
         """Delete images that are not referenced by any container.
 
-        Some DSM versions expose no working Docker image-prune API.  When
-        explicitly configured with SSH credentials, use Docker's image-only
-        prune command.  Otherwise use the DSM list/delete APIs and fail closed
-        if any container image reference is unavailable.
+        Uses DSM list/delete APIs and fails closed if any container image
+        reference is unavailable.
         """
-        if self._ssh_username and self._ssh_password:
-            return self._ssh_docker_prune()
-
         return self._prune_images_from_inventory(dry_run=False)
 
     def preview_image_prune(self) -> Dict[str, Any]:
-        """Preview removable images without invoking SSH or mutating DSM."""
+        """Preview removable images without mutating DSM."""
         return self._prune_images_from_inventory(dry_run=True)
 
     def _prune_images_from_inventory(self, dry_run: bool) -> Dict[str, Any]:
@@ -426,63 +424,6 @@ class SynologyContainer:
             response["error"] = {"code": "partial_prune", "message": "Some unused images could not be deleted"}
         return response
 
-    def _ssh_docker_prune(self) -> Dict[str, Any]:
-        """Run Docker's image-only prune through the authorized SSH account."""
-        return self._ssh_docker_command("image prune --all --force", "ssh_prune_failed", "Docker prune timed out")
-
-    def _ssh_docker_command(self, docker_command: str, error_code: str, timeout_message: str) -> Dict[str, Any]:
-        """Run a fixed Docker command through the explicitly configured SSH account."""
-        host = urlsplit(self._api.base_url).hostname
-        if not host:
-            return {"success": False, "error": {"code": "invalid_host", "message": "NAS URL has no hostname"}}
-        if not self._ssh_username or not self._ssh_password:
-            return {"success": False, "error": {"code": "ssh_credentials_unavailable", "message": "Explicit SSH credentials are required"}}
-        if not self._ssh_known_hosts:
-            return {"success": False, "error": {"code": "ssh_known_hosts_unavailable", "message": "A provisioned SSH known_hosts file is required"}}
-
-
-        if docker_command not in {"image prune --all --force", "system df"}:
-            return {"success": False, "error": {"code": "unsupported_ssh_command", "message": "Unsupported Docker command"}}
-
-        askpass_fd, askpass = tempfile.mkstemp(prefix="synology-mcp-askpass-")
-        os.close(askpass_fd)
-        try:
-            os.chmod(askpass, stat.S_IRWXU)
-            with open(askpass, "w", encoding="utf-8") as handle:
-                handle.write("#!/bin/sh\nprintf '%s\\n' \"$SYNOLOGY_SSH_PASSWORD\"\n")
-            env = os.environ.copy()
-            env.update({
-                "SYNOLOGY_SSH_PASSWORD": self._ssh_password,
-                "SSH_ASKPASS": askpass,
-                "SSH_ASKPASS_REQUIRE": "force",
-                "DISPLAY": "synology-mcp",
-            })
-            command = "sudo -n /var/packages/ContainerManager/target/usr/bin/docker " + docker_command
-            result = subprocess.run(
-                [
-                    "/usr/bin/setsid", "/usr/bin/ssh", "-o", "BatchMode=no", "-o", "ConnectTimeout=20",
-                    "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no",
-                    "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={self._ssh_known_hosts}", f"{self._ssh_username}@{host}", command,
-                ],
-                capture_output=True, text=True, timeout=300, env=env, check=False,
-            )
-        except FileNotFoundError as exc:
-            return {"success": False, "error": {"code": "ssh_unavailable", "message": str(exc)}}
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": {"code": "ssh_timeout", "message": timeout_message}}
-        finally:
-            try:
-                os.unlink(askpass)
-            except OSError:
-                pass
-
-        output = (result.stdout or "").strip()
-        if result.returncode:
-            return {"success": False, "error": {"code": error_code, "message": (result.stderr or output).strip()[-2000:]}}
-        data = {"mode": "ssh", "output": output}
-        if docker_command == "system df":
-            data["command"] = docker_command
-        return {"success": True, "data": data}
 
     def pull_image(self, repository: str, tag: str = "latest") -> Dict[str, Any]:
         """Pull a Container Manager image from a registry."""

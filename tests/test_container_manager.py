@@ -350,33 +350,6 @@ def test_image_prune_removes_only_unreferenced_images():
     assert request.call_args.kwargs == {"name": "nginx", "tag": "latest"}
 
 
-def test_image_prune_ssh_fallback_uses_image_only_command():
-    """The SSH fallback preserves stopped containers and networks."""
-    from container.synology_container import SynologyContainer
-
-    container = SynologyContainer(
-        "https://nas.example.com:5001",
-        "sid_xyz",
-        ssh_username="sshuser",
-        ssh_password="sshpass",
-        ssh_known_hosts="/tmp/known_hosts",
-    )
-    completed = MagicMock(returncode=0, stdout="Total reclaimed space: 1GB", stderr="")
-
-    with patch("container.synology_container.subprocess.run", return_value=completed) as run:
-        result = container.prune_images()
-
-    assert result == {
-        "success": True,
-        "data": {"mode": "ssh", "output": "Total reclaimed space: 1GB"},
-    }
-    command = run.call_args.args[0]
-    assert command[-1] == "sudo -n /var/packages/ContainerManager/target/usr/bin/docker image prune --all --force"
-    assert "system prune" not in command[-1]
-    assert "StrictHostKeyChecking=yes" in command
-    assert "UserKnownHostsFile=/tmp/known_hosts" in command
-
-
 def test_image_prune_preview_is_read_only_and_reports_candidates():
     from container.synology_container import SynologyContainer
 
@@ -431,14 +404,6 @@ def test_image_prune_fails_closed_on_malformed_container_inventory():
     assert result["success"] is False
     assert result["error"]["code"] == "unsafe_prune"
     images.assert_not_called()
-
-
-def test_image_prune_ssh_requires_explicit_known_hosts():
-    from container.synology_container import SynologyContainer
-
-    container = SynologyContainer("https://nas.example.com:5001", "sid_xyz", ssh_username="user", ssh_password="pass")
-    result = container.prune_images()
-    assert result["error"]["code"] == "ssh_known_hosts_unavailable"
 
 
 def test_image_prune_fails_closed_when_container_references_are_missing():
@@ -739,14 +704,13 @@ def test_container_health_summary_is_compact_and_read_only():
         assert container.health_summary() == {"success": True, "data": {"count": 1, "containers": [{"name": "plex", "status": "running", "health": "healthy", "restart_count": 2, "image": "plex:latest"}]}}
 
 
-def test_container_disk_usage_uses_read_only_docker_command():
+def test_container_disk_usage_uses_read_only_api_calls():
     container = _container()
-    container._ssh_username = "sshuser"
-    container._ssh_password = "sshpass"
-    container._ssh_known_hosts = "/tmp/known_hosts"
-    completed = MagicMock(returncode=0, stdout="Images space usage:\n", stderr="")
-    with patch("container.synology_container.subprocess.run", return_value=completed) as run:
+    with patch.object(container, "list_images", return_value={"success": True, "data": {"images": [{"size": 100}]}}), patch.object(
+        container, "list_containers", return_value={"success": True, "data": {"containers": [{"size": 20}]}}
+    ):
         result = container.disk_usage()
     assert result["success"] is True
-    assert result["data"]["command"] == "system df"
-    assert "prune" not in run.call_args.args[0][-1]
+    assert result["data"]["mode"] == "api"
+    assert result["data"]["images"]["size_bytes"] == 100
+    assert result["data"]["containers"]["size_bytes"] == 20
