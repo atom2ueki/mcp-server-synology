@@ -454,6 +454,36 @@ def test_image_prune_fails_closed_on_bare_or_unparseable_container_reference(ref
     request.assert_not_called()
 
 
+def test_image_prune_reports_partial_deletion_results():
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": []}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={
+            "success": True,
+            "data": {"images": [{"repository": "nginx", "tags": ["old", "older"]}]},
+        },
+    ), patch.object(
+        container,
+        "_make_request",
+        side_effect=[
+            {"success": False, "error": {"code": "delete_failed", "message": "busy"}},
+            {"success": True},
+        ],
+    ) as request:
+        result = container.prune_images()
+
+    assert result["success"] is False
+    assert result["error"] == {"code": "partial_prune", "message": "Some unused images could not be deleted"}
+    assert result["data"]["deleted"] == ["nginx:older"]
+    assert result["data"]["errors"] == [{"image": "nginx:old", "error": {"code": "delete_failed", "message": "busy"}}]
+    assert request.call_count == 2
+
+
 def test_image_prune_fails_closed_on_malformed_image_inventory():
     """Malformed image records never result in deletion requests."""
     container = _container()
@@ -830,11 +860,34 @@ def test_container_disk_usage_rejects_non_dictionary_container_payload():
     assert result["error"]["code"] == "invalid_inventory"
 
 
-def test_container_disk_usage_rejects_non_dictionary_inventory_payloads():
+@pytest.mark.parametrize(
+    ("image_sizes", "container_sizes", "expected_images", "expected_containers"),
+    [
+        ([100, "20", "1.5", True, -3, "invalid"], ["4.5", False, None], 121, 4),
+    ],
+)
+def test_container_disk_usage_coerces_numeric_sizes(
+    image_sizes, container_sizes, expected_images, expected_containers
+):
     container = _container()
-    with patch.object(container, "list_images", return_value={"success": True, "data": []}), patch.object(
-        container, "list_containers", return_value={"success": True, "data": {"containers": []}}
+    with patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"size": size} for size in image_sizes]}},
+    ), patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"size": size} for size in container_sizes]}},
     ):
         result = container.disk_usage()
+
+    assert result["data"]["images"]["size_bytes"] == expected_images
+    assert result["data"]["containers"]["size_bytes"] == expected_containers
+
+
+def test_container_health_summary_rejects_non_dictionary_inventory_payload():
+    container = _container()
+    with patch.object(container, "list_containers", return_value={"success": True, "data": None}):
+        result = container.health_summary()
     assert result["success"] is False
     assert result["error"]["code"] == "invalid_inventory"

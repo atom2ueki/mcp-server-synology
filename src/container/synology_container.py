@@ -2,6 +2,7 @@
 
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
 
 
@@ -19,11 +20,8 @@ def _canonical_image_reference(reference: str) -> tuple[str, Optional[str], Opti
     name, separator, digest = reference.partition("@")
     if separator and (not digest or not _DIGEST_RE.fullmatch(digest)):
         raise ValueError("invalid image digest")
-    if "@" in digest:
-        raise ValueError("invalid image reference")
-
     last = name.rsplit("/", 1)[-1]
-    tag = None
+    tag: Optional[str] = None
     if ":" in last:
         repository, tag = name.rsplit(":", 1)
         if not tag:
@@ -42,11 +40,25 @@ def _canonical_image_reference(reference: str) -> tuple[str, Optional[str], Opti
     if components[0] == "docker.io" and len(components) == 2:
         components.insert(1, "library")
     normalized_repository = "/".join(components).lower()
-    return normalized_repository, tag or "latest" if not separator else None, digest or None
+    normalized_tag = None if separator else (tag or "latest")
+    return normalized_repository, normalized_tag, digest or None
 
 
 def _unsafe_prune_result(message: str) -> Dict[str, Any]:
     return {"success": False, "error": {"code": "unsafe_prune", "message": message}}
+
+
+def _coerce_size(value: Any) -> int:
+    """Convert a DSM size value to a non-negative integer byte count."""
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        number = Decimal(str(value).strip()) if isinstance(value, str) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    if not number.is_finite() or number < 0:
+        return 0
+    return int(number)
 
 from utils.synology_api import SynologyAPIClient
 
@@ -117,8 +129,10 @@ class SynologyContainer:
         result = self.list_containers(offset=0, limit=-1, container_type="all")
         if not result.get("success"):
             return result
-        data = result.get("data", {})
-        items = data.get("containers", []) if isinstance(data, dict) else []
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
+        items = data.get("containers", [])
         summary = [{"name": i.get("name"), "status": i.get("status", i.get("state")), "health": i.get("health"), "restart_count": i.get("restartCount", i.get("restart_count", 0)), "image": i.get("image")} for i in items if isinstance(i, dict)]
         return {"success": True, "data": {"containers": summary, "count": len(summary)}}
 
@@ -138,8 +152,8 @@ class SynologyContainer:
         container_items = container_data.get("containers")
         if not isinstance(image_items, list) or not isinstance(container_items, list):
             return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
-        image_bytes = sum(int(item.get("size", 0) or 0) for item in image_items if isinstance(item, dict) and str(item.get("size", "")).isdigit())
-        container_bytes = sum(int(item.get("size", 0) or 0) for item in container_items if isinstance(item, dict) and str(item.get("size", "")).isdigit())
+        image_bytes = sum(_coerce_size(item.get("size")) for item in image_items if isinstance(item, dict))
+        container_bytes = sum(_coerce_size(item.get("size")) for item in container_items if isinstance(item, dict))
         return {"success": True, "data": {"mode": "api", "images": {"count": len(image_items), "size_bytes": image_bytes}, "containers": {"count": len(container_items), "size_bytes": container_bytes}, "volumes": {"supported": False}, "build_cache": {"supported": False}}}
 
     def get_container(self, name: str) -> Dict[str, Any]:
