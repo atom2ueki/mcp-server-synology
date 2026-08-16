@@ -332,35 +332,55 @@ class SynologyContainer:
                         "message": "Cannot determine every container image reference; no images were deleted",
                     },
                 }
-            image = str(item["image"])
+            image = item["image"]
+            if not isinstance(image, str) or not image:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "unsafe_prune",
+                        "message": "Cannot determine every container image reference; no images were deleted",
+                    },
+                }
             references.add(image)
             if "@" in image:
-                digest_repositories.add(image.split("@", 1)[0])
+                repository = image.split("@", 1)[0]
+                # Strip an optional tag while preserving registry ports.
+                last_component = repository.rsplit("/", 1)[-1]
+                if ":" in last_component:
+                    repository = repository.rsplit(":", 1)[0]
+                digest_repositories.add(repository)
 
         images_result = self.list_images(offset=0, limit=-1)
         if not images_result.get("success"):
             return images_result
-        image_data = images_result.get("data", {})
-        images = image_data.get("images", []) if isinstance(image_data, dict) else []
-        if not isinstance(images, list):
+        image_data = images_result.get("data")
+        if not isinstance(image_data, dict) or not isinstance(image_data.get("images"), list):
             return {
                 "success": False,
                 "error": {"code": "unsafe_prune", "message": "Unexpected image inventory; no images were deleted"},
             }
+        images = image_data["images"]
 
         candidates = []
         skipped = []
         for image in images:
-            if not isinstance(image, dict) or not image.get("repository"):
-                continue
-            tags = image.get("tags") or ["<none>"]
+            if not isinstance(image, dict) or not isinstance(image.get("repository"), str) or not image["repository"]:
+                return {
+                    "success": False,
+                    "error": {"code": "unsafe_prune", "message": "Unexpected image inventory; no images were deleted"},
+                }
+            tags = image.get("tags")
+            if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+                return {
+                    "success": False,
+                    "error": {"code": "unsafe_prune", "message": "Unexpected image inventory; no images were deleted"},
+                }
+            if not tags:
+                tags = ["<none>"]
             for tag in tags:
-                tag = str(tag)
                 full_name = f"{image['repository']}:{tag}"
                 if tag == "<none>":
-                    # DSM rejects literal <none> tags.  Leave dangling layers
-                    # for the Docker CLI fallback rather than reporting a
-                    # misleading deletion attempt.
+                    # DSM rejects literal <none> tags; report them separately.
                     skipped.append(full_name)
                 elif full_name not in references and image["repository"] not in digest_repositories:
                     candidates.append((full_name, image))
