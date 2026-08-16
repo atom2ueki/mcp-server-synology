@@ -395,11 +395,49 @@ def test_image_prune_protects_digest_referenced_repository():
     assert result["data"]["candidates"] == []
 
 
-def test_image_prune_fails_closed_on_malformed_container_inventory():
-    from container.synology_container import SynologyContainer
+def test_image_prune_protects_digest_repository_with_registry_port_and_tag():
+    """Digest references protect all tags while preserving registry ports."""
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"image": "registry.example:5000/nginx:stable@sha256:abc"}]}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={
+            "success": True,
+            "data": {"images": [{"repository": "registry.example:5000/nginx", "tags": ["stable", "old"]}]},
+        },
+    ):
+        result = container.preview_image_prune()
+    assert result["data"]["candidates"] == []
 
-    container = SynologyContainer("https://nas.example.com:5001", "sid_xyz")
-    with patch.object(container, "list_containers", return_value={"success": True, "data": {}}), patch.object(container, "list_images") as images:
+
+def test_image_prune_fails_closed_on_malformed_image_inventory():
+    """Malformed image records never result in deletion requests."""
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": []}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": "latest"}]}},
+    ), patch.object(container, "_make_request") as request:
+        result = container.prune_images()
+    assert result["success"] is False
+    assert result["error"]["code"] == "unsafe_prune"
+    request.assert_not_called()
+
+
+def test_image_prune_fails_closed_on_malformed_container_inventory():
+    """Malformed container inventories stop pruning before image lookup."""
+    container = _container()
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {}}), patch.object(
+        container, "list_images"
+    ) as images:
         result = container.preview_image_prune()
     assert result["success"] is False
     assert result["error"]["code"] == "unsafe_prune"
