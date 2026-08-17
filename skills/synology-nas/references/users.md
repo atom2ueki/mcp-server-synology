@@ -43,7 +43,18 @@ The README warns against running the MCP as a primary admin account. If user-man
 
 ### When error 105 comes back
 
-Error 105 is DSM's "the logged in session does not have permission". Report it and stop — don't retry with a different password, a different group, or a tweaked parameter name. A `synology_delete_user` against a user that doesn't exist returns 105 too, so the code says nothing about the arguments you sent; it's the session's privilege on that method. Route the user to DSM Control Panel → User & Group to do the work by hand.
+Error 105 is DSM's "the logged in session does not have permission". Report it and stop — don't retry with a different password, a different group, or a tweaked parameter name; no argument change will turn a privilege verdict around. Route the user to DSM Control Panel → User & Group to do the work by hand.
+
+Don't read 105 into every failed write, though — DSM returns distinct codes for distinct causes, and the ones that look like permission failures often aren't. Verified on DSM 7.3.2-86009 Update 4 with an account in `administrators`:
+
+| Call | Condition | Code |
+|------|-----------|------|
+| `synology_delete_user` | username doesn't exist | `3101` |
+| `synology_get_user` | username doesn't exist | `3106` |
+
+Both mean "no such user" — the argument is wrong, not the privileges. Read the code that actually came back before concluding anything: 105 is a privilege verdict, `3101` and `3106` are not.
+
+Don't generalize in either direction from a single session. Mutating `SYNO.Core.User` calls have been observed returning 105 on this DSM version with an admin-group account, and later re-testing over the same MCP process, same account, could not reproduce it — `create` and `delete` both succeeded. The trigger for the earlier refusals isn't understood. So report a 105 and stop, as above, but don't assume from one clean run that writes can never be refused.
 
 ## Read before write
 
