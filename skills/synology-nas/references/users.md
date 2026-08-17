@@ -18,11 +18,32 @@
 
 All accept `nas_name` / `base_url`.
 
+### Identifier parameter — `name` vs `username`
+
+The tools are **inconsistent** about what the user-identifier parameter is called. Getting this wrong is a schema validation error, not a silent no-op:
+
+| Tool | Identifier param |
+|------|------------------|
+| `synology_get_user` | `name` |
+| `synology_create_user` | `name` |
+| `synology_set_user` | `name` (plus `new_name` to rename) |
+| `synology_delete_user` | `name` |
+| `synology_get_user_permissions` | `name` |
+| `synology_set_user_permissions` | `name` |
+| `synology_add_user_to_group` | **`username`** |
+| `synology_remove_user_from_group` | **`username`** |
+
+The two group-membership tools are the exception — they take `username`, everything else takes `name`. `synology_list_group_members` takes `group` (not `group_name`).
+
 ## When to use this domain
 
 User management is **admin-level**. The MCP must be authenticated as a user with admin rights for these calls to succeed. If the user is connecting with a non-admin account (recommended for safety), most of these tools will fail with permission errors — surface that clearly rather than retrying.
 
 The README warns against running the MCP as a primary admin account. If user-management actions are needed, the user should temporarily authenticate with an admin account, do the work, and switch back. Don't try to elevate from inside Claude.
+
+### When error 105 comes back
+
+Error 105 is DSM's "the logged in session does not have permission". Report it and stop — don't retry with a different password, a different group, or a tweaked parameter name. A `synology_delete_user` against a user that doesn't exist returns 105 too, so the code says nothing about the arguments you sent; it's the session's privilege on that method. Route the user to DSM Control Panel → User & Group to do the work by hand.
 
 ## Read before write
 
@@ -36,28 +57,41 @@ DSM's user model is additive (group membership grants permissions, plus per-user
 
 ### Creating a new user
 
-`synology_create_user` requires at minimum a name and password. Common optional fields:
+`synology_create_user` requires `name` and `password`. The complete set of accepted fields:
 
+- `name` — username (required).
+- `password` — required.
 - `email` — for password recovery and notifications.
 - `description` — surface this when listing users.
-- `groups` — initial group memberships. Common groups: `users`, `administrators`, `http`.
-- `expired` — account expiry date.
-- `password_never_expire` — boolean.
+- `cannot_chg_passwd` — boolean, default `false`.
+- `passwd_never_expire` — boolean, default `true`. (Note the abbreviated `passwd`, not `password`.)
+- `nas_name` / `base_url`.
 
-For most setups: create with `groups: ["users"]` and add to additional groups via `synology_add_user_to_group` afterward. Putting someone in `administrators` is a meaningful trust decision — confirm before doing it.
+**There is no `groups` parameter on `synology_create_user`.** Group membership is a separate call — create the user first, then `synology_add_user_to_group(username=..., groups=[...])`. Putting someone in `administrators` is a meaningful trust decision — confirm before doing it.
+
+To disable an account, use `synology_set_user(name=..., expired="now")`; `"normal"` re-enables it. `expired` is an enum on `set_user`, not a date, and it does not exist on `create_user`.
 
 ### Setting share permissions
 
-`synology_set_user_permissions` controls per-share access (read, write, none). Permission entries look like:
+`synology_set_user_permissions(name=..., permissions=[...])` controls per-share access. Each permission entry is:
 
 ```json
 {
-  "share_name": "Photos",
-  "permission": "rw"  // or "ro", "no_access"
+  "name": "Photos",
+  "is_writable": true,
+  "is_deny": false
 }
 ```
 
-Pass an array of entries; not-mentioned shares retain their existing permission. To revoke access, set `"permission": "no_access"` explicitly — don't just omit the share.
+Only `name` (the shared folder name) is required per entry; `is_writable` and `is_deny` are booleans. There is no `share_name` key and no `"rw"`/`"ro"`/`"no_access"` string values — that grammar is:
+
+| Intent | Entry |
+|--------|-------|
+| Read/write | `{"name": "Photos", "is_writable": true}` |
+| Read-only | `{"name": "Photos", "is_writable": false}` |
+| Deny | `{"name": "Photos", "is_deny": true}` |
+
+Pass an array of entries; not-mentioned shares retain their existing permission. To revoke access, send an explicit `is_deny: true` entry — don't just omit the share.
 
 ### Deleting users
 
@@ -77,28 +111,31 @@ Pass an array of entries; not-mentioned shares retain their existing permission.
 
 ```
 synology_create_user(
-  username="photographer",
+  name="photographer",
   password="<strong-pass>",
   description="Read-only photo access",
+)
+synology_add_user_to_group(              # groups are a separate call
+  username="photographer",
   groups=["users"],
 )
 synology_set_user_permissions(
-  username="photographer",
-  permissions=[{"share_name": "Photos", "permission": "ro"}]
+  name="photographer",
+  permissions=[{"name": "Photos", "is_writable": False}]
 )
 ```
 
 ### "Who's in the administrators group?"
 
 ```
-synology_list_group_members(group_name="administrators")
+synology_list_group_members(group="administrators")
 ```
 
 ### "Remove user 'temp-contractor'"
 
 ```
-synology_get_user(username="temp-contractor")        # confirm it's the right one
-synology_delete_user(username="temp-contractor")     # permanent
+synology_get_user(name="temp-contractor")            # confirm it's the right one
+synology_delete_user(name="temp-contractor")         # permanent
 # optionally:
 delete(path="/homes/temp-contractor")                # cleanup home dir
 ```
