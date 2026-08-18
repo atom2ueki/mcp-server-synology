@@ -436,6 +436,22 @@ def test_image_prune_canonicalizes_implicit_latest_and_library_aliases():
     assert result["data"]["candidates"] == ["nginx:old", "redis:7"]
 
 
+def test_image_prune_normalizes_legacy_index_docker_io_alias():
+    """index.docker.io and docker.io references protect the same images."""
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"image": "index.docker.io/library/nginx:latest"}]}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": ["latest"]}]}},
+    ):
+        result = container.preview_image_prune()
+    assert result["data"]["candidates"] == []
+
+
 @pytest.mark.parametrize("reference", ["sha256:" + "a" * 64, "nginx:", "nginx@sha256:not-a-digest"])
 def test_image_prune_fails_closed_on_bare_or_unparseable_container_reference(reference):
     container = _container()
@@ -888,6 +904,15 @@ def test_container_disk_usage_coerces_numeric_sizes(
 def test_container_health_summary_rejects_non_dictionary_inventory_payload():
     container = _container()
     with patch.object(container, "list_containers", return_value={"success": True, "data": None}):
+        result = container.health_summary()
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_inventory"
+
+
+@pytest.mark.parametrize("containers", [None, "running", {"name": "plex"}])
+def test_container_health_summary_rejects_non_list_containers_field(containers):
+    container = _container()
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {"containers": containers}}):
         result = container.health_summary()
     assert result["success"] is False
     assert result["error"]["code"] == "invalid_inventory"

@@ -5,7 +5,6 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
 
-
 _IMAGE_ID_RE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
 _DIGEST_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+._-]*:[0-9a-fA-F]{32,}$")
 
@@ -37,7 +36,12 @@ def _canonical_image_reference(reference: str) -> tuple[str, Optional[str], Opti
     )
     if not has_registry:
         components.insert(0, "docker.io")
-    if components[0] == "docker.io" and len(components) == 2:
+    registry = components[0].lower()
+    if registry == "index.docker.io":
+        # Docker treats index.docker.io as a legacy alias of docker.io.
+        components[0] = "docker.io"
+        registry = "docker.io"
+    if registry == "docker.io" and len(components) == 2:
         components.insert(1, "library")
     normalized_repository = "/".join(components).lower()
     normalized_tag = None if separator else (tag or "latest")
@@ -132,7 +136,9 @@ class SynologyContainer:
         data = result.get("data")
         if not isinstance(data, dict):
             return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
-        items = data.get("containers", [])
+        items = data.get("containers")
+        if not isinstance(items, list):
+            return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
         summary = [{"name": i.get("name"), "status": i.get("status", i.get("state")), "health": i.get("health"), "restart_count": i.get("restartCount", i.get("restart_count", 0)), "image": i.get("image")} for i in items if isinstance(i, dict)]
         return {"success": True, "data": {"containers": summary, "count": len(summary)}}
 
