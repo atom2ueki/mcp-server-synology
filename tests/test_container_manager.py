@@ -310,6 +310,245 @@ def test_project_id_lookup_tolerates_non_dict_data(data):
     assert result["error"]["code"] == "not_found"
 
 
+def test_image_prune_removes_only_unreferenced_images():
+    """Pruning preserves container image references and deletes the rest."""
+    container = _container()
+
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={
+            "success": True,
+            "data": {"containers": [{"image": "caddy:alpine"}]},
+        },
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={
+            "success": True,
+            "data": {
+                "images": [
+                    {"id": "sha256:used", "repository": "caddy", "tags": ["alpine"]},
+                    {"id": "sha256:unused", "repository": "nginx", "tags": ["latest"]},
+                    {"id": "sha256:dangling", "repository": "caddy", "tags": ["<none>"]},
+                ]
+            },
+        },
+    ), patch.object(
+        container,
+        "_make_request",
+        return_value={"success": True},
+    ) as request:
+        result = container.prune_images()
+
+    assert result["success"] is True
+    assert result["data"]["mode"] == "api"
+    assert result["data"]["deleted"] == ["nginx:latest"]
+    assert result["data"]["skipped"] == ["caddy:<none>"]
+    assert request.call_count == 1
+    assert request.call_args.args == ("SYNO.Docker.Image", 1, "delete")
+    assert request.call_args.kwargs == {"name": "nginx", "tag": "latest"}
+
+
+def test_image_prune_preview_is_read_only_and_reports_candidates():
+    from container.synology_container import SynologyContainer
+
+    container = SynologyContainer("https://nas.example.com:5001", "sid_xyz")
+    containers = {"success": True, "data": {"containers": [{"image": "nginx:latest"}]}}
+    images = {
+        "success": True,
+        "data": {
+            "images": [
+                {"repository": "nginx", "tags": ["latest"]},
+                {"repository": "caddy", "tags": ["alpine"]},
+                {"repository": "dangling", "tags": ["<none>"]},
+            ]
+        },
+    }
+    with patch.object(container, "list_containers", return_value=containers) as list_containers, patch.object(
+        container, "list_images", return_value=images
+    ) as list_images, patch.object(container, "_make_request") as request:
+        result = container.preview_image_prune()
+
+    assert result == {
+        "success": True,
+        "data": {
+            "mode": "preview",
+            "candidates": ["caddy:alpine"],
+            "skipped": ["dangling:<none>"],
+            "errors": [],
+        },
+    }
+    list_containers.assert_called_once()
+    list_images.assert_called_once()
+    request.assert_not_called()
+
+
+def test_image_prune_protects_digest_referenced_repository():
+    from container.synology_container import SynologyContainer
+
+    container = SynologyContainer("https://nas.example.com:5001", "sid_xyz")
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {"containers": [{"image": "nginx@sha256:" + "a" * 64}]}}), patch.object(
+        container, "list_images", return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": ["latest", "old"]}]}}
+    ):
+        result = container.preview_image_prune()
+    assert result["data"]["candidates"] == []
+
+
+def test_image_prune_protects_digest_repository_with_registry_port_and_tag():
+    """Digest references protect all tags while preserving registry ports."""
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"image": "registry.example:5000/nginx:stable@sha256:" + "b" * 64}]}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={
+            "success": True,
+            "data": {"images": [{"repository": "registry.example:5000/nginx", "tags": ["stable", "old"]}]},
+        },
+    ):
+        result = container.preview_image_prune()
+    assert result["data"]["candidates"] == []
+
+
+def test_image_prune_canonicalizes_implicit_latest_and_library_aliases():
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"image": "docker.io/library/nginx:latest"}, {"image": "busybox"}]}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={
+            "success": True,
+            "data": {"images": [
+                {"repository": "nginx", "tags": ["latest", "old"]},
+                {"repository": "docker.io/library/busybox", "tags": ["latest"]},
+                {"repository": "redis", "tags": ["7"]},
+            ]},
+        },
+    ):
+        result = container.preview_image_prune()
+    assert result["data"]["candidates"] == ["nginx:old", "redis:7"]
+
+
+def test_image_prune_normalizes_legacy_index_docker_io_alias():
+    """index.docker.io and docker.io references protect the same images."""
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"image": "index.docker.io/library/nginx:latest"}]}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": ["latest"]}]}},
+    ):
+        result = container.preview_image_prune()
+    assert result["data"]["candidates"] == []
+
+
+@pytest.mark.parametrize("reference", ["sha256:" + "a" * 64, "nginx:", "nginx@sha256:not-a-digest"])
+def test_image_prune_fails_closed_on_bare_or_unparseable_container_reference(reference):
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"image": reference}]}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": ["latest"]}]}},
+    ), patch.object(container, "_make_request") as request:
+        result = container.prune_images()
+    assert result["success"] is False
+    assert result["error"]["code"] == "unsafe_prune"
+    request.assert_not_called()
+
+
+def test_image_prune_reports_partial_deletion_results():
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": []}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={
+            "success": True,
+            "data": {"images": [{"repository": "nginx", "tags": ["old", "older"]}]},
+        },
+    ), patch.object(
+        container,
+        "_make_request",
+        side_effect=[
+            {"success": False, "error": {"code": "delete_failed", "message": "busy"}},
+            {"success": True},
+        ],
+    ) as request:
+        result = container.prune_images()
+
+    assert result["success"] is False
+    assert result["error"] == {"code": "partial_prune", "message": "Some unused images could not be deleted"}
+    assert result["data"]["deleted"] == ["nginx:older"]
+    assert result["data"]["errors"] == [{"image": "nginx:old", "error": {"code": "delete_failed", "message": "busy"}}]
+    assert request.call_count == 2
+
+
+def test_image_prune_fails_closed_on_malformed_image_inventory():
+    """Malformed image records never result in deletion requests."""
+    container = _container()
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": []}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": "latest"}]}},
+    ), patch.object(container, "_make_request") as request:
+        result = container.prune_images()
+    assert result["success"] is False
+    assert result["error"]["code"] == "unsafe_prune"
+    request.assert_not_called()
+
+
+def test_image_prune_fails_closed_on_malformed_container_inventory():
+    """Malformed container inventories stop pruning before image lookup."""
+    container = _container()
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {}}), patch.object(
+        container, "list_images"
+    ) as images:
+        result = container.preview_image_prune()
+    assert result["success"] is False
+    assert result["error"]["code"] == "unsafe_prune"
+    images.assert_not_called()
+
+
+def test_image_prune_fails_closed_when_container_references_are_missing():
+    """Pruning never deletes images when the container inventory is incomplete."""
+    container = _container()
+
+    with patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"name": "broken"}]}},
+    ), patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"repository": "nginx", "tags": ["latest"]}]}},
+    ):
+        result = container.prune_images()
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unsafe_prune"
+
+
 def test_image_methods_wire_format_matches_dsm():
     """Image tools expose local image list/get/delete and pull."""
     container = _container()
@@ -360,11 +599,9 @@ def test_image_methods_wire_format_matches_dsm():
 
     delete_data = post.call_args_list[3].kwargs["data"]
     assert delete_data["method"] == "delete"
-    assert json.loads(delete_data["images"]) == [
-        {"id": "sha256:caddy", "repository": "caddy", "tags": ["alpine"]}
-    ]
-    assert "name" not in delete_data
-    assert "tag" not in delete_data
+    assert delete_data["name"] == "caddy"
+    assert delete_data["tag"] == "alpine"
+    assert "images" not in delete_data
 
     pull_data = post.call_args_list[4].kwargs["data"]
     assert pull_data["method"] == "pull_start"
@@ -541,6 +778,10 @@ def test_container_tools_are_registered():
         "synology_container_image_list",
         "synology_container_image_get",
         "synology_container_image_delete",
+        "synology_container_image_prune",
+        "synology_container_image_prune_preview",
+        "synology_container_health_summary",
+        "synology_container_disk_usage",
         "synology_container_image_pull",
         "synology_container_registry_list",
         "synology_container_registry_search",
@@ -582,3 +823,96 @@ async def test_legacy_single_nas_auto_login_registers_default_name():
         await server._auto_login_if_configured()
 
     assert server.nas_name_map["default"] == "http://nas.example.com:5000"
+
+
+def test_container_health_summary_is_compact_and_read_only():
+    container = _container()
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {"containers": [{"name": "plex", "status": "running", "health": "healthy", "restartCount": 2, "image": "plex:latest"}]}}):
+        assert container.health_summary() == {"success": True, "data": {"count": 1, "containers": [{"name": "plex", "status": "running", "health": "healthy", "restart_count": 2, "image": "plex:latest"}]}}
+
+
+def test_container_disk_usage_uses_read_only_api_calls():
+    container = _container()
+    with patch.object(container, "list_images", return_value={"success": True, "data": {"images": [{"size": 100}]}}), patch.object(
+        container, "list_containers", return_value={"success": True, "data": {"containers": [{"size": 20}]}}
+    ):
+        result = container.disk_usage()
+    assert result["success"] is True
+    assert result["data"]["mode"] == "api"
+    assert result["data"]["images"]["size_bytes"] == 100
+    assert result["data"]["containers"]["size_bytes"] == 20
+
+
+def test_container_disk_usage_rejects_null_inventory_payloads():
+    container = _container()
+    with patch.object(container, "list_images", return_value={"success": True, "data": None}), patch.object(
+        container, "list_containers", return_value={"success": True, "data": None}
+    ):
+        result = container.disk_usage()
+    assert result == {
+        "success": False,
+        "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"},
+    }
+
+
+@pytest.mark.parametrize("payload", [None, []])
+def test_container_disk_usage_rejects_non_dictionary_image_payloads(payload):
+    container = _container()
+    with patch.object(container, "list_images", return_value={"success": True, "data": payload}), patch.object(
+        container, "list_containers", return_value={"success": True, "data": {"containers": []}}
+    ):
+        result = container.disk_usage()
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_inventory"
+
+
+def test_container_disk_usage_rejects_non_dictionary_container_payload():
+    container = _container()
+    with patch.object(container, "list_images", return_value={"success": True, "data": {"images": []}}), patch.object(
+        container, "list_containers", return_value={"success": True, "data": None}
+    ):
+        result = container.disk_usage()
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_inventory"
+
+
+@pytest.mark.parametrize(
+    ("image_sizes", "container_sizes", "expected_images", "expected_containers"),
+    [
+        ([100, "20", "1.5", True, -3, "invalid"], ["4.5", False, None], 121, 4),
+    ],
+)
+def test_container_disk_usage_coerces_numeric_sizes(
+    image_sizes, container_sizes, expected_images, expected_containers
+):
+    container = _container()
+    with patch.object(
+        container,
+        "list_images",
+        return_value={"success": True, "data": {"images": [{"size": size} for size in image_sizes]}},
+    ), patch.object(
+        container,
+        "list_containers",
+        return_value={"success": True, "data": {"containers": [{"size": size} for size in container_sizes]}},
+    ):
+        result = container.disk_usage()
+
+    assert result["data"]["images"]["size_bytes"] == expected_images
+    assert result["data"]["containers"]["size_bytes"] == expected_containers
+
+
+def test_container_health_summary_rejects_non_dictionary_inventory_payload():
+    container = _container()
+    with patch.object(container, "list_containers", return_value={"success": True, "data": None}):
+        result = container.health_summary()
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_inventory"
+
+
+@pytest.mark.parametrize("containers", [None, "running", {"name": "plex"}])
+def test_container_health_summary_rejects_non_list_containers_field(containers):
+    container = _container()
+    with patch.object(container, "list_containers", return_value={"success": True, "data": {"containers": containers}}):
+        result = container.health_summary()
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_inventory"

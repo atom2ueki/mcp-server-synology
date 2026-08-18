@@ -104,6 +104,7 @@ class SynologyConfig:
         self.synology_url = os.getenv("SYNOLOGY_URL")
         self.synology_username = os.getenv("SYNOLOGY_USERNAME")
         self.synology_password = os.getenv("SYNOLOGY_PASSWORD")
+
         # One-shot 2FA code for legacy .env single-NAS users on first login.
         # Settings.json users store `device_id` per-NAS for ongoing reuse and
         # don't need this. Read-only here; auto-login consumes it but does
@@ -442,6 +443,7 @@ class SynologyConfig:
                     port = nas_info.get("port", 5000)
                     username = nas_info.get("username", "")
                     password = nas_info.get("password", "")
+
                     # Optional 2FA/OTP support (DSM Login Web API Guide):
                     #   - `otp_code`: one-shot code from authenticator. Needed
                     #     only on the FIRST login after enabling 2FA on the
@@ -494,6 +496,7 @@ class SynologyConfig:
                         "base_url": base_url,
                         "username": username,
                         "password": password,
+
                         "verify_ssl": nas_verify_ssl,
                         "note": nas_info.get("note", ""),
                         "otp_code": otp_code,
@@ -610,6 +613,7 @@ class SynologyConfig:
             "base_url": self.synology_url,
             "username": self.synology_username,
             "password": self.synology_password,
+
             "verify_ssl": self.verify_ssl,
             "otp_code": self.synology_otp_code,
             "device_id": None,

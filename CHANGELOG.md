@@ -4,6 +4,7 @@
 
 ### Added
 - Per-NAS `url` key in `settings.json`: when present it is used verbatim (trailing slash stripped) and wins over `host`/`port`, so a NAS published through a reverse proxy on the default 443 — whose URL carries no port — can finally be addressed. Non-string values are rejected with a warning and skip only that entry. (#76)
+- `synology_container_image_prune` for safe Docker image-only cleanup through Container Manager APIs. It preserves containers and networks and reports dangling images that DSM cannot safely delete without pretending they were deleted.
 
 ### Fixed
 - `list_directory` and `get_file_info` reported **every file as 0 bytes**. DSM returns the byte count inside the entry's `additional` block (which is where we ask for the `size` field), but both handlers only read a top-level `size` key that DSM never populates. Sizes are now read from `additional.size`, falling back to the top-level key for API versions that inline it.

@@ -1,7 +1,68 @@
 """Synology Container Manager operations."""
 
 import json
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
+
+_IMAGE_ID_RE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
+_DIGEST_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+._-]*:[0-9a-fA-F]{32,}$")
+
+
+def _canonical_image_reference(reference: str) -> tuple[str, Optional[str], Optional[str]]:
+    """Return Docker's normalized repository, tag, and digest components."""
+    if not isinstance(reference, str) or not reference or reference != reference.strip():
+        raise ValueError("invalid image reference")
+    if _IMAGE_ID_RE.fullmatch(reference):
+        raise ValueError("bare image ID is not an image reference")
+
+    name, separator, digest = reference.partition("@")
+    if separator and (not digest or not _DIGEST_RE.fullmatch(digest)):
+        raise ValueError("invalid image digest")
+    last = name.rsplit("/", 1)[-1]
+    tag: Optional[str] = None
+    if ":" in last:
+        repository, tag = name.rsplit(":", 1)
+        if not tag:
+            raise ValueError("invalid image tag")
+    else:
+        repository = name
+    if not repository or any(not component for component in repository.split("/")):
+        raise ValueError("invalid image repository")
+
+    components = repository.split("/")
+    has_registry = len(components) > 1 and (
+        "." in components[0] or ":" in components[0] or components[0] == "localhost"
+    )
+    if not has_registry:
+        components.insert(0, "docker.io")
+    registry = components[0].lower()
+    if registry == "index.docker.io":
+        # Docker treats index.docker.io as a legacy alias of docker.io.
+        components[0] = "docker.io"
+        registry = "docker.io"
+    if registry == "docker.io" and len(components) == 2:
+        components.insert(1, "library")
+    normalized_repository = "/".join(components).lower()
+    normalized_tag = None if separator else (tag or "latest")
+    return normalized_repository, normalized_tag, digest or None
+
+
+def _unsafe_prune_result(message: str) -> Dict[str, Any]:
+    return {"success": False, "error": {"code": "unsafe_prune", "message": message}}
+
+
+def _coerce_size(value: Any) -> int:
+    """Convert a DSM size value to a non-negative integer byte count."""
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        number = Decimal(str(value).strip()) if isinstance(value, str) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    if not number.is_finite() or number < 0:
+        return 0
+    return int(number)
 
 from utils.synology_api import SynologyAPIClient
 
@@ -15,8 +76,10 @@ class SynologyContainer:
         session_id: str,
         verify_ssl: bool = False,
         syno_token: Optional[str] = None,
+
     ):
         self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)
+
         self.container_api = "SYNO.Docker.Container"
         self.container_version = 1
         self.project_api = "SYNO.Docker.Project"
@@ -64,6 +127,40 @@ class SynologyContainer:
             limit=str(limit),
             type=container_type,
         )
+
+    def health_summary(self) -> Dict[str, Any]:
+        """Return a compact health summary for every container."""
+        result = self.list_containers(offset=0, limit=-1, container_type="all")
+        if not result.get("success"):
+            return result
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
+        items = data.get("containers")
+        if not isinstance(items, list):
+            return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
+        summary = [{"name": i.get("name"), "status": i.get("status", i.get("state")), "health": i.get("health"), "restart_count": i.get("restartCount", i.get("restart_count", 0)), "image": i.get("image")} for i in items if isinstance(i, dict)]
+        return {"success": True, "data": {"containers": summary, "count": len(summary)}}
+
+    def disk_usage(self) -> Dict[str, Any]:
+        """Return a read-only disk-usage summary from DSM Container Manager APIs."""
+        images = self.list_images(offset=0, limit=-1, show_dsm=False)
+        if not images.get("success"):
+            return images
+        containers = self.list_containers(offset=0, limit=-1, container_type="all")
+        if not containers.get("success"):
+            return containers
+        image_data = images.get("data")
+        container_data = containers.get("data")
+        if not isinstance(image_data, dict) or not isinstance(container_data, dict):
+            return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
+        image_items = image_data.get("images")
+        container_items = container_data.get("containers")
+        if not isinstance(image_items, list) or not isinstance(container_items, list):
+            return {"success": False, "error": {"code": "invalid_inventory", "message": "DSM returned an invalid Container Manager inventory"}}
+        image_bytes = sum(_coerce_size(item.get("size")) for item in image_items if isinstance(item, dict))
+        container_bytes = sum(_coerce_size(item.get("size")) for item in container_items if isinstance(item, dict))
+        return {"success": True, "data": {"mode": "api", "images": {"count": len(image_items), "size_bytes": image_bytes}, "containers": {"count": len(container_items), "size_bytes": container_bytes}, "volumes": {"supported": False}, "build_cache": {"supported": False}}}
 
     def get_container(self, name: str) -> Dict[str, Any]:
         """Get one Container Manager container by name."""
@@ -291,8 +388,114 @@ class SynologyContainer:
             self.image_api,
             self.image_version,
             "delete",
-            images=json.dumps([image]),
+            name=name,
+            tag=tag,
         )
+
+    def prune_images(self) -> Dict[str, Any]:
+        """Delete images that are not referenced by any container.
+
+        Uses DSM list/delete APIs and fails closed if any container image
+        reference is unavailable.
+        """
+        return self._prune_images_from_inventory(dry_run=False)
+
+    def preview_image_prune(self) -> Dict[str, Any]:
+        """Preview removable images without mutating DSM."""
+        return self._prune_images_from_inventory(dry_run=True)
+
+    def _prune_images_from_inventory(self, dry_run: bool) -> Dict[str, Any]:
+        """Compute image-prune candidates from the DSM inventories."""
+
+        containers = self.list_containers(offset=0, limit=-1, container_type="all")
+        if not containers.get("success"):
+            return containers
+        container_data = containers.get("data")
+        if not isinstance(container_data, dict) or not isinstance(container_data.get("containers"), list):
+            return {"success": False, "error": {"code": "unsafe_prune", "message": "Unexpected container inventory; no images were deleted"}}
+        container_items = container_data["containers"]
+        references = set()
+        digest_repositories = set()
+        for item in container_items:
+            if not isinstance(item, dict) or not isinstance(item.get("image"), str) or not item["image"]:
+                return _unsafe_prune_result("Cannot determine every container image reference; no images were deleted")
+            try:
+                repository, tag, digest = _canonical_image_reference(item["image"])
+            except ValueError:
+                return _unsafe_prune_result("Cannot parse every container image reference; no images were deleted")
+            if digest:
+                # DSM image inventories do not reliably expose manifest digests.
+                # Protect the whole canonical repository unless an exact digest
+                # match can be established from a future inventory shape.
+                digest_repositories.add(repository)
+            else:
+                references.add((repository, tag))
+
+        images_result = self.list_images(offset=0, limit=-1)
+        if not images_result.get("success"):
+            return images_result
+        image_data = images_result.get("data")
+        if not isinstance(image_data, dict) or not isinstance(image_data.get("images"), list):
+            return _unsafe_prune_result("Unexpected image inventory; no images were deleted")
+        images = image_data["images"]
+
+        candidates = []
+        skipped = []
+        for image in images:
+            if not isinstance(image, dict) or not isinstance(image.get("repository"), str) or not image["repository"]:
+                return _unsafe_prune_result("Unexpected image inventory; no images were deleted")
+            tags = image.get("tags")
+            if not isinstance(tags, list) or any(not isinstance(tag, str) or not tag for tag in tags):
+                return _unsafe_prune_result("Unexpected image inventory; no images were deleted")
+            if not tags:
+                tags = ["<none>"]
+            for tag in tags:
+                full_name = f"{image['repository']}:{tag}"
+                if tag == "<none>":
+                    # DSM rejects literal <none> tags; report them separately.
+                    skipped.append(full_name)
+                    continue
+                try:
+                    repository, candidate_tag, _ = _canonical_image_reference(f"{image['repository']}:{tag}")
+                except ValueError:
+                    return _unsafe_prune_result("Unexpected image inventory; no images were deleted")
+                if (repository, candidate_tag) not in references and repository not in digest_repositories:
+                    candidates.append((full_name, image["repository"], tag))
+
+        if dry_run:
+            return {
+                "success": True,
+                "data": {
+                    "mode": "preview",
+                    "candidates": [name for name, _, _ in candidates],
+                    "skipped": skipped,
+                    "errors": [],
+                },
+            }
+
+        deleted = []
+        errors = []
+        for full_name, repository, tag in candidates:
+            result = self._make_request(
+                self.image_api,
+                self.image_version,
+                "delete",
+                name=repository,
+                tag=tag,
+            )
+            if result.get("success"):
+                deleted.append(full_name)
+            else:
+                errors.append({"image": full_name, "error": result.get("error", {})})
+
+        response = {
+            "success": not errors,
+            "data": {"mode": "api", "deleted": deleted, "skipped": skipped, "errors": errors},
+        }
+        if errors:
+            response["error"] = {"code": "partial_prune", "message": "Some unused images could not be deleted"}
+        return response
+
 
     def pull_image(self, repository: str, tag: str = "latest") -> Dict[str, Any]:
         """Pull a Container Manager image from a registry."""
