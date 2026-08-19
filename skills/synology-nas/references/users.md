@@ -43,7 +43,7 @@ The README warns against running the MCP as a primary admin account. If user-man
 
 ### When error 105 comes back
 
-Error 105 is DSM's "the logged in session does not have permission". Report it and stop — don't retry with a different password, a different group, or a tweaked parameter name; no argument change will turn a privilege verdict around. Route the user to DSM Control Panel → User & Group to do the work by hand.
+Error 105 is DSM's "the logged-in session does not have permission". Report it and stop — don't retry with a different password, a different group, or a tweaked parameter name; no argument change will turn a privilege verdict around. Route the user to DSM Control Panel → User & Group to do the work by hand.
 
 Don't read 105 into every failed write, though — DSM returns distinct codes for distinct causes, and the ones that look like permission failures often aren't. Verified on DSM 7.3.2-86009 Update 4 with an account in `administrators`:
 

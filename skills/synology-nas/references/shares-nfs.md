@@ -88,7 +88,7 @@ sudo mount -t nfs <nas-ip>:/volume1/Photos /mnt/photos -o ro,nfsvers=4
 
 Use a CIDR string for `client_ip`:
 
-```
+```text
 synology_nfs_set_permission(
   share_name="backups",
   client_ip="192.168.1.0/24",
