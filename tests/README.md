@@ -18,7 +18,7 @@ Integration tests for each module of the Synology MCP Server.
 
 3. **Install dependencies:**
    ```bash
-   pip install -r requirements.txt
+   pip install -e ".[test]"
    ```
 
 4. **Run tests:**

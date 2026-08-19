@@ -67,8 +67,8 @@ docker-compose up -d --build
 ### 4️⃣ Alternative: Local Python
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install the package and its dependencies
+pip install .
 
 # Run with environment control
 python main.py
@@ -199,9 +199,9 @@ By default the server speaks **stdio**, which means the MCP client has to spawn 
 
 ### Deploy
 
-1. `mcp-proxy` is installed automatically when you build the HTTP image — it
-   lives in `requirements-http.txt` and the provided compose file sets the
-   `INSTALL_HTTP=true` build arg (it is not in the default stdio/Xiaozhi image).
+1. All dependencies come from `pyproject.toml`: `mcp>=2.0.0` ships starlette,
+   uvicorn, and sse-starlette, so the same image serves both stdio and
+   Streamable HTTP — no extra build arg or separate requirements file.
 2. Use the provided `docker-compose.http.yml`:
 
 ```bash
@@ -210,7 +210,7 @@ docker compose -f docker-compose.http.yml up -d --build
 docker logs -f synology-mcp-http
 ```
 
-You should see mcp-proxy report `Uvicorn running on http://0.0.0.0:8765` and the auto-login succeed.
+You should see uvicorn report `Uvicorn running on http://0.0.0.0:8765` and the auto-login succeed.
 
 ### Reverse proxy
 
@@ -780,7 +780,7 @@ mcp-server-synology/
 │   └── downloadstation/      # Download management
 ├── docker-compose.yml        # Single service, environment-controlled
 ├── Dockerfile
-├── requirements.txt
+├── pyproject.toml            # Dependencies (single source of truth)
 └── .env                      # Configuration
 ```
 
