@@ -254,3 +254,9 @@ scratch_*.py
 *.zip
 *.rar
 *.7z 
+
+# Local agent tooling workspaces (skills, plans) — machine-local, not project config
+.agents/
+.zcode/
+.claude/skills/
+.claude/settings.local.json
