@@ -17,7 +17,8 @@
 
 ### Changed
 - `search_files` documents DSM's actual matching rule: `pattern` is a case-insensitive **substring** of the entry name, and wildcards are not special (`*.dcm`, `dcm` and `*dcm*` all return the same entries). The tool description previously advertised glob-style wildcards.
-- Removed `requirements.txt` and `requirements-http.txt`; `pyproject.toml` is now the single source of truth for dependencies. Test dependencies moved to the `test` extra (`pip install ".[test]"`), and the Docker image installs the project with `pip install .`. The dead `INSTALL_HTTP` build arg (a no-op since `mcp>=2.0.0` bundled uvicorn) is gone, and stale `mcp-proxy` references in the README's HTTP deployment section now match the native Streamable HTTP setup.
+- The README's remote-deployment section documents the transport the server actually runs. It still described an `mcp-proxy` sidecar wrapping `main.py` over stdio and a `/sse` connector URL, but the server has served native Streamable HTTP from uvicorn at `MCP_HTTP_PATH` (default `/mcp`) since `docker-compose.http.yml` moved off the proxy. The security note now says plainly that there is no application-level authentication, and that the `MCP_HTTP_ALLOWED_HOSTS`/`MCP_HTTP_ALLOWED_ORIGINS` DNS-rebinding allowlist is not a substitute for it.
+- Removed `requirements.txt` and `requirements-http.txt`; `pyproject.toml` is now the single source of truth for dependencies. Test dependencies moved to the `test` extra (`pip install ".[test]"`), and the Docker image installs the project with `pip install .`. The dead `INSTALL_HTTP` build arg (a no-op since `mcp>=2.0.0` bundled uvicorn) is gone.
 
 ## [1.5.0] - 2026-06-27
 

@@ -177,9 +177,9 @@ If you prefer not to use Docker:
   }
 }
 ```
-## 🌐 Remote HTTP/SSE Deployment (NEW)
+## 🌐 Remote Streamable HTTP Deployment
 
-By default the server speaks **stdio**, which means the MCP client has to spawn the process locally (or via a bridge such as SSH/docker exec). For setups where the NAS is remote (different machine from where Claude/Cursor runs), you can expose the MCP server over **HTTP/SSE** using [`mcp-proxy`](https://github.com/sparfenyuk/mcp-proxy). This makes it consumable by any MCP client that supports URL-based connectors — exactly like `ha-mcp` or other "remote" MCP servers.
+By default the server speaks **stdio**, which means the MCP client has to spawn the process locally (or via a bridge such as SSH/docker exec). For setups where the NAS is remote (different machine from where Claude/Cursor runs), set `MCP_HTTP=true` and the server serves **native Streamable HTTP** from uvicorn in the same process — no `mcp-proxy` sidecar and no separate `/sse` endpoint. This makes it consumable by any MCP client that supports URL-based connectors — exactly like `ha-mcp` or other "remote" MCP servers.
 
 ### Architecture
 
@@ -193,8 +193,8 @@ By default the server speaks **stdio**, which means the MCP client has to spawn 
         │ HTTP localhost:8765
         ▼
 [Docker container]
-  └─ mcp-proxy
-       └─ python main.py (stdio)
+  └─ python main.py
+       └─ uvicorn → Streamable HTTP at /mcp
 ```
 
 ### Deploy
@@ -210,7 +210,7 @@ docker compose -f docker-compose.http.yml up -d --build
 docker logs -f synology-mcp-http
 ```
 
-You should see uvicorn report `Uvicorn running on http://0.0.0.0:8765` and the auto-login succeed.
+You should see the server log `Starting Streamable HTTP MCP server on http://0.0.0.0:8765/mcp` and the auto-login succeed. uvicorn's own `Uvicorn running on …` banner is *not* printed at the compose file's defaults — it is INFO on the `uvicorn.error` logger, which the server pins to `warning` unless `DEBUG=true`.
 
 ### Reverse proxy
 
@@ -218,7 +218,7 @@ Most MCP clients require HTTPS, so the HTTP endpoint must be fronted by a TLS-te
 
 - **Source**: `HTTPS`, hostname `synology-mcp.example.com`, port `443`
 - **Destination**: `HTTP`, `localhost`, port `8765`
-- **Custom Headers**: click *Create → WebSocket* (adds the headers needed for SSE/long-lived connections)
+- **Custom Headers**: none required — Streamable HTTP is plain POST/GET on a single endpoint, not a WebSocket upgrade. The *Create → WebSocket* preset is harmless if you already apply it elsewhere (it sets `Connection: upgrade` only for real upgrade requests), but it is not what keeps a stream open
 
 For Nginx, the equivalent is:
 
@@ -230,7 +230,7 @@ location / {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-    # SSE-specific
+    # Responses may stream as long-lived text/event-stream
     proxy_buffering off;
     proxy_cache off;
     proxy_read_timeout 24h;
@@ -242,16 +242,17 @@ location / {
 In Claude Desktop (or any MCP client that supports remote connectors), add a custom connector pointing at:
 
 ```
-https://synology-mcp.example.com/sse
+https://synology-mcp.example.com/mcp
 ```
 
-No `command`, no `args`, no local Python — just a URL.
+The path is whatever `MCP_HTTP_PATH` is set to (default `/mcp`). No `command`, no `args`, no local Python — just a URL.
 
 ### Security
 
-`mcp-proxy` does **not** provide server-side authentication. Anything that can reach the HTTP endpoint can call every tool. Mitigations:
+The server does **not** implement any application-level authentication — anything that can reach the HTTP endpoint can call every tool. It does enable the MCP SDK's DNS-rebinding protection, which rejects requests whose `Host`/`Origin` headers are not on an allowlist (`MCP_HTTP_ALLOWED_HOSTS` / `MCP_HTTP_ALLOWED_ORIGINS`, defaulting to loopback). Behind a reverse proxy set both, minding the differing formats — hosts are bare (`synology-mcp.example.com`), origins are scheme-qualified (`https://synology-mcp.example.com`), as in the commented examples in `docker-compose.http.yml`. That guards browsers against rebinding attacks; it is **not** authentication. Mitigations:
 
 - Keep it on a private network or behind a VPN
+- Leave the published port on loopback (`docker-compose.http.yml` binds `127.0.0.1:8765`) so only a same-host reverse proxy can reach it
 - Use the reverse proxy to enforce an IP allow-list
 - Add Basic Auth / mTLS / OAuth2 proxy at the reverse proxy layer
 - Use a dedicated low-privilege DSM user (already recommended in the security warning above)
