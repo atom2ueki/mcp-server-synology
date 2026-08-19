@@ -53,7 +53,7 @@ def check_requirements():
 
         if importlib.util.find_spec("websockets") is None:
             errors.append(
-                "websockets package is not installed. Run: pip install -r requirements.txt"
+                "websockets package is not installed. Run: pip install ."
             )
 
     return errors

@@ -1,6 +1,0 @@
-# HTTP transport dependencies — used only by docker-compose.http.yml.
-#
-# mcp>=2.0.0 already pulls in starlette, uvicorn, and sse-starlette, so this
-# file is now empty by design. It exists so the Dockerfile's INSTALL_HTTP build
-# arg keeps working (the `pip install -r requirements-http.txt` step becomes a
-# no-op). If you add HTTP-only dependencies in the future, put them here.

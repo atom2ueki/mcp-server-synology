@@ -17,6 +17,7 @@
 
 ### Changed
 - `search_files` documents DSM's actual matching rule: `pattern` is a case-insensitive **substring** of the entry name, and wildcards are not special (`*.dcm`, `dcm` and `*dcm*` all return the same entries). The tool description previously advertised glob-style wildcards.
+- Removed `requirements.txt` and `requirements-http.txt`; `pyproject.toml` is now the single source of truth for dependencies. Test dependencies moved to the `test` extra (`pip install ".[test]"`), and the Docker image installs the project with `pip install .`. The dead `INSTALL_HTTP` build arg (a no-op since `mcp>=2.0.0` bundled uvicorn) is gone, and stale `mcp-proxy` references in the README's HTTP deployment section now match the native Streamable HTTP setup.
 
 ## [1.5.0] - 2026-06-27
 
