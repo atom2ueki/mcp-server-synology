@@ -210,7 +210,7 @@ docker compose -f docker-compose.http.yml up -d --build
 docker logs -f synology-mcp-http
 ```
 
-You should see uvicorn report `Uvicorn running on http://0.0.0.0:8765` and the auto-login succeed.
+You should see the server log `Starting Streamable HTTP MCP server on http://0.0.0.0:8765/mcp` and the auto-login succeed. uvicorn's own `Uvicorn running on …` banner is *not* printed at the compose file's defaults — it is INFO on the `uvicorn.error` logger, which the server pins to `warning` unless `DEBUG=true`.
 
 ### Reverse proxy
 
