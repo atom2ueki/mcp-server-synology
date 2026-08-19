@@ -1352,13 +1352,19 @@ class SynologyMCPServer:
     async def _handle_usermgr_add_to_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
-        result = usermgr.add_user_to_group(arguments["username"], arguments["groups"])
+        # to_thread: the write polls membership for up to ~5s and must not
+        # stall the event loop serving other sessions.
+        result = await asyncio.to_thread(
+            usermgr.add_user_to_group, arguments["username"], arguments["groups"]
+        )
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     async def _handle_usermgr_remove_from_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
-        result = usermgr.remove_user_from_group(arguments["username"], arguments["groups"])
+        result = await asyncio.to_thread(
+            usermgr.remove_user_from_group, arguments["username"], arguments["groups"]
+        )
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     async def _handle_usermgr_get_permissions(self, arguments: dict) -> list[types.TextContent]:

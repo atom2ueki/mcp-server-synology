@@ -185,6 +185,29 @@ def test_remove_user_from_group_warns_when_still_member():
     print("✅ never-applied leave surfaces verified=false and warning")
 
 
+def test_remove_user_from_group_unknown_payload_does_not_verify():
+    """Regression (PR review): an unrecognized payload is unreadable, not empty.
+
+    {'success': true, 'data': {}} carries no membership data; a removal must
+    not "verify" absence the response never showed.
+    """
+    mgr = _make_manager()
+    empty_resp = MagicMock()
+    empty_resp.json.return_value = {"success": True, "data": {}}
+    empty_resp.raise_for_status = MagicMock()
+    with (
+        patch("utils.synology_api.requests.post", return_value=_join_response()),
+        patch("utils.synology_api.requests.get", return_value=empty_resp),
+        patch("usermanagement.synology_users.time"),
+    ):
+        result = mgr.remove_user_from_group("authelia", ["docker"])
+
+    assert result["verified"] is False
+    assert result["unverified_groups"] == ["docker"]
+
+    print("✅ removal does not verify on unrecognized payload shape")
+
+
 def test_group_member_names_tolerates_response_shapes():
     """The parser accepts the data.shapes seen across DSM versions."""
     mgr = _make_manager()
@@ -193,9 +216,11 @@ def test_group_member_names_tolerates_response_shapes():
         {"success": True, "data": {"users": [{"name": "admin", "uid": 1024}]}},
         {"success": True, "data": {"members": [{"name": "admin"}]}},
         {"success": True, "data": ["admin", "guest"]},
+        {"success": True, "data": {}},
+        {"success": True, "data": {"users": []}},
         {"success": False, "error": {"code": 105}},
     ]
-    expected = [{"admin"}, {"admin"}, {"admin", "guest"}, None]
+    expected = [{"admin"}, {"admin"}, {"admin", "guest"}, None, set(), None]
 
     for shape, want in zip(shapes, expected):
         resp = MagicMock()
@@ -205,3 +230,27 @@ def test_group_member_names_tolerates_response_shapes():
             assert mgr._group_member_names("administrators") == want
 
     print("✅ member-name parser tolerates known response shapes")
+
+
+def test_verification_skips_already_confirmed_groups():
+    """Confirmed groups drop out of the working set — no redundant re-polls."""
+    mgr = _make_manager()
+    users_resp = _member_response([("authelia", 1026)])  # confirmed on round 1
+    docker_slow = _member_response([("admin", 1024)])  # authelia not yet applied
+    docker_done = _member_response([("admin", 1024), ("authelia", 1026)])
+    with (
+        patch("utils.synology_api.requests.post", return_value=_join_response()),
+        patch(
+            "utils.synology_api.requests.get",
+            side_effect=[users_resp, docker_slow, docker_slow, docker_done],
+        ) as get,
+        patch("usermanagement.synology_users.time"),
+    ):
+        result = mgr.add_user_to_group("authelia", ["users", "docker"])
+
+    assert result["verified"] is True
+    # Round 1 polls both groups; rounds 2+ poll only the still-pending 'docker'.
+    polled_groups = [c.kwargs["params"]["group"] for c in get.call_args_list]
+    assert polled_groups == ["users", "docker", "docker", "docker"]
+
+    print("✅ already-confirmed groups are not re-polled")

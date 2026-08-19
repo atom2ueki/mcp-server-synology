@@ -211,6 +211,11 @@ class SynologyUserManager:
             entries = data.get("users", data.get("members"))
         elif isinstance(data, list):
             entries = data
+        # An unrecognized payload is unreadable, not an empty group: returning
+        # an empty set here would let a removal "verify" absence the response
+        # never actually showed.
+        if not isinstance(entries, list):
+            return None
         names: Set[str] = set()
         for entry in entries or []:
             if isinstance(entry, dict) and entry.get("name"):
@@ -226,18 +231,21 @@ class SynologyUserManager:
 
         Returns (verified, unverified_groups). A group whose listing can't be
         read counts as unverified — indistinguishable from not-yet-applied.
+        Groups confirmed on an earlier attempt drop out of the working set.
         """
+        pending = list(groups)
         for attempt in range(GROUP_WRITE_VERIFY_ATTEMPTS):
-            unverified = []
-            for group in groups:
+            still_pending = []
+            for group in pending:
                 names = self._group_member_names(group)
                 if names is None or (username in names) != expect_member:
-                    unverified.append(group)
-            if not unverified:
+                    still_pending.append(group)
+            if not still_pending:
                 return True, []
+            pending = still_pending
             if attempt < GROUP_WRITE_VERIFY_ATTEMPTS - 1:
                 time.sleep(GROUP_WRITE_VERIFY_INTERVAL)
-        return False, unverified
+        return False, pending
 
     def _apply_group_change(
         self,
