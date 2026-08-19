@@ -64,6 +64,17 @@ Don't generalize in either direction from a single session. Mutating `SYNO.Core.
 
 DSM's user model is additive (group membership grants permissions, plus per-user overrides). Reading first prevents accidental privilege escalation/demotion.
 
+### Group writes are verified, not just queued
+
+`synology_add_user_to_group` / `synology_remove_user_from_group` submit an async DSM batch task and then poll the group listing to confirm the change landed. The response carries a `verified` boolean:
+
+- `verified: true` — the membership change is visible in the group listing; it applied.
+- `verified: false` with a `warning` and `unverified_groups` — DSM accepted the request but the change never showed up within the polling window. Treat `success: true` as **queued, not applied**, and re-check with `synology_list_group_members` before telling the user anything succeeded. Don't retry blindly; if it stays unverified, the batch task is being refused server-side and a retry won't help.
+
+### `synology_list_group_members` lists DSM users only
+
+The underlying `SYNO.Core.Group.Member` endpoint enumerates DSM user accounts, nothing else. Non-user members — service accounts like `Virtualization` that appear in the group's `/etc/group` line — are **omitted**. If you need an authoritative answer to "who is in this privileged group" (e.g. `administrators`), say so and suggest checking `/etc/group` over SSH; the tool's listing under-reports by design.
+
 ## Workflow patterns
 
 ### Creating a new user
@@ -141,6 +152,8 @@ synology_set_user_permissions(
 ```
 synology_list_group_members(group="administrators")
 ```
+
+Remember the limitation above: this lists DSM users only. Service accounts in the group (like `Virtualization`) won't appear — for a privileged-group audit, cross-check `/etc/group` over SSH.
 
 ### "Remove user 'temp-contractor'"
 
