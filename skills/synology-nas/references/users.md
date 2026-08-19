@@ -132,7 +132,7 @@ synology_add_user_to_group(              # groups are a separate call
 )
 synology_set_user_permissions(
   name="photographer",
-  permissions=[{"name": "Photos", "is_writable": False}]
+  permissions=[{"name": "Photos", "is_writable": false}]
 )
 ```
 
