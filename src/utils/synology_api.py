@@ -220,7 +220,8 @@ class SynologyAPIClient:
                 parsed = json.loads(bytes(body).decode("utf-8"))
                 return parsed
 
-            match = re.search(rb"Exit Code:\s*(-?\d+)", bytes(tail))
+            matches = list(re.finditer(rb"Exit Code:\s*(-?\d+)", bytes(tail)))
+            match = matches[-1] if matches else None
             if not match:
                 return {
                     "success": False,

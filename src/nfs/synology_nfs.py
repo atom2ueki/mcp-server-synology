@@ -1,13 +1,21 @@
 # src/nfs/synology_nfs.py - Synology NFS service and share management
 
+import hashlib
 import json
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+from filelock import FileLock, Timeout
 
 from utils.synology_api import SynologyAPIClient
 
 
 class SynologyNFS:
     """Manage NFS service and share-level NFS permissions on Synology DSM."""
+
+    _lock_directory = Path(tempfile.gettempdir()) / "synology-mcp-nfs-locks"
+    _lock_timeout_seconds = 30
 
     def __init__(
         self,
@@ -34,6 +42,39 @@ class SynologyNFS:
         if use_post:
             return self._api.post(api, method, version, extra_params)
         return self._api.get(api, method, version, extra_params)
+
+    def _permission_lock(self, share_name: str) -> FileLock:
+        """Return a host-wide lock for one NAS/share without leaking its name."""
+        identity = f"{self.base_url}\0{share_name}".encode("utf-8")
+        lock_name = f"{hashlib.sha256(identity).hexdigest()}.lock"
+        self._lock_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return FileLock(
+            str(self._lock_directory / lock_name),
+            timeout=self._lock_timeout_seconds,
+        )
+
+    def _save_nfs_permission(
+        self, share_name: str, client_ip: str, nfs_rule: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Load, merge, and save one NFS rule while the share lock is held."""
+        api = "SYNO.Core.FileServ.NFS.SharePrivilege"
+        current = self._api_call(api, "load", extra_params={"share_name": share_name})
+        if not current.get("success"):
+            return current
+
+        data = current.get("data", {})
+        rules = data.get("rule", []) if isinstance(data, dict) else []
+        if not isinstance(rules, list):
+            rules = []
+
+        rules = [rule for rule in rules if rule.get("client") != client_ip]
+        rules.append(nfs_rule)
+        return self._api_call(
+            api,
+            "save",
+            extra_params={"share_name": share_name, "rule": json.dumps(rules)},
+            use_post=True,
+        )
 
     # ------------------------------------------------------------------
     # NFS Service
@@ -150,16 +191,6 @@ class SynologyNFS:
                 },
             }
 
-        api = "SYNO.Core.FileServ.NFS.SharePrivilege"
-        current = self._api_call(api, "load", extra_params={"share_name": share_name})
-        if not current.get("success"):
-            return current
-
-        data = current.get("data", {})
-        rules = data.get("rule", []) if isinstance(data, dict) else []
-        if not isinstance(rules, list):
-            rules = []
-
         security_flavor = {
             "sys": False,
             "kerberos": False,
@@ -177,11 +208,14 @@ class SynologyNFS:
             "security_flavor": security_flavor,
         }
 
-        rules = [rule for rule in rules if rule.get("client") != client_ip]
-        rules.append(nfs_rule)
-        return self._api_call(
-            api,
-            "save",
-            extra_params={"share_name": share_name, "rule": json.dumps(rules)},
-            use_post=True,
-        )
+        try:
+            with self._permission_lock(share_name):
+                return self._save_nfs_permission(share_name, client_ip, nfs_rule)
+        except Timeout:
+            return {
+                "success": False,
+                "error": {
+                    "code": "nfs_update_busy",
+                    "message": "Timed out waiting for another NFS rule update on this share",
+                },
+            }

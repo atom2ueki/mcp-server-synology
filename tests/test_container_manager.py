@@ -212,6 +212,30 @@ def test_project_stream_failure_returns_structured_exit_code():
     assert result["error"]["code"] == "stream_exit_17"
 
 
+def test_project_stream_uses_final_exit_code_marker():
+    """Only DSM's final exit marker determines the streamed operation result."""
+    container = _container()
+    failed = MagicMock()
+    failed.iter_content.return_value = [
+        b"build output mentioned Exit Code: 0\n",
+        b"DSM final marker\nExit Code: 17\n",
+    ]
+    failed.raise_for_status = MagicMock()
+    failed.close = MagicMock()
+
+    with patch(
+        "utils.synology_api.requests.post",
+        side_effect=[
+            _successful_response({"abc-123": {"id": "abc-123", "name": "media"}}),
+            failed,
+        ],
+    ):
+        result = container.build_project("media")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "stream_exit_17"
+
+
 def test_project_create_wire_format_matches_dsm():
     """Project creation follows DSM's create-empty-then-update flow."""
     container = _container()
@@ -870,6 +894,65 @@ def test_container_tools_are_registered():
     }.issubset(names)
 
     assert "synology_container_api_call" not in names
+
+
+def test_project_tool_schemas_require_handler_inputs():
+    """Schema-valid project writes must include every directly indexed argument."""
+    from mcp_server import SynologyMCPServer
+
+    server = SynologyMCPServer()
+    tools = {tool.name: tool for tool in server._get_tool_definitions()}
+
+    assert tools["synology_container_project_create"].input_schema["required"] == [
+        "name",
+        "share_path",
+        "content",
+    ]
+    assert tools["synology_container_project_update"].input_schema["required"] == [
+        "name",
+        "content",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_project_stream_operation_keeps_event_loop_responsive():
+    """A blocked DSM stream runs outside the MCP event loop."""
+    import asyncio
+    import threading
+
+    from mcp_server import SynologyMCPServer
+
+    server = SynologyMCPServer()
+    container = MagicMock()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_build(name):
+        assert name == "media"
+        started.set()
+        release.wait(timeout=1)
+        return {"success": True, "data": {"exit_code": 0}}
+
+    container.build_project.side_effect = blocking_build
+
+    with (
+        patch.object(server, "_get_base_url", return_value="https://nas.example.com:5001"),
+        patch.object(server, "_get_container", return_value=container),
+    ):
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        task = asyncio.create_task(
+            server._handle_container_call({"name": "media"}, method_name="project_build")
+        )
+        try:
+            await asyncio.sleep(0.02)
+            assert started.is_set()
+            assert loop.time() - started_at < 0.2
+        finally:
+            release.set()
+        result = await task
+
+    assert json.loads(result[0].text)["success"] is True
 
 
 @pytest.mark.asyncio

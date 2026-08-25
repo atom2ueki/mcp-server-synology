@@ -332,43 +332,17 @@ class SynologyDownloadStation:
         if password:
             params["password"] = password
 
+        logger.debug("Creating task with real NAS format")
+        logger.debug(f"URI: {uri}")
+        logger.debug(f"Destination: {destination}")
+
         try:
-            logger.debug("Creating task with real NAS format")
-            logger.debug(f"URI: {uri}")
-            logger.debug(f"Destination: {destination}")
-
             data = self._make_request(self.task_api, self.task_version, "create", **params)
-
-            task_ids = data.get("task_id", [])
-            if isinstance(task_ids, str):
-                task_ids = [task_ids]
-            if not task_ids:
-                import time
-
-                for _ in range(20):
-                    tasks = self.list_tasks(limit=100).get("tasks", [])
-                    task_ids = [
-                        task["id"]
-                        for task in tasks
-                        if task.get("id") and task.get("uri") == uri
-                    ]
-                    if task_ids:
-                        break
-                    time.sleep(0.25)
-            if task_ids:
-                data = {**data, "task_id": task_ids}
-
-            logger.info("Task created successfully!")
-            logger.debug(f"Task IDs: {data.get('task_id', [])}")
-            logger.debug(f"List IDs: {data.get('list_id', [])}")
-
-            return data
-
         except Exception as e:
-            error_msg = str(e)
             logger.warning(f"Create task failed: {e}")
 
-            # Fallback: Try with version 1 if version 2 failed
+            # Only a failed create request may fall back. Once v2 succeeds,
+            # retrying creation can materialize the same download twice.
             if self.task_version != "1":
                 try:
                     logger.info("Trying with DownloadStation2.Task v1")
@@ -388,6 +362,36 @@ class SynologyDownloadStation:
             raise Exception(
                 f"Task creation failed: {e}. Make sure the URL is valid and you have permission to create downloads."
             )
+
+        task_ids = data.get("task_id", [])
+        if isinstance(task_ids, str):
+            task_ids = [task_ids]
+        if not task_ids:
+            import time
+
+            try:
+                for _ in range(20):
+                    tasks = self.list_tasks(limit=100).get("tasks", [])
+                    task_ids = [
+                        task["id"]
+                        for task in tasks
+                        if task.get("id") and task.get("uri") == uri
+                    ]
+                    if task_ids:
+                        break
+                    time.sleep(0.25)
+            except Exception as lookup_error:
+                logger.warning(
+                    "Task was created, but its materialized ID could not be resolved: %s",
+                    lookup_error,
+                )
+        if task_ids:
+            data = {**data, "task_id": task_ids}
+
+        logger.info("Task created successfully!")
+        logger.debug(f"Task IDs: {data.get('task_id', [])}")
+        logger.debug(f"List IDs: {data.get('list_id', [])}")
+        return data
 
     def delete_tasks(self, task_ids: List[str], force_complete: bool = False) -> Dict[str, Any]:
         """Delete download tasks."""

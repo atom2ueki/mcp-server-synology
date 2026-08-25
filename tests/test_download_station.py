@@ -69,6 +69,33 @@ def test_create_task_starts_download_instead_of_preview_list():
     assert result["task_id"] == ["dbid_2"]
 
 
+def test_create_task_does_not_retry_after_successful_v2_create():
+    """A failed ID lookup must not issue a second create request."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._check_destination_exists = MagicMock(return_value=True)
+    station._make_request = MagicMock(return_value={})
+    station.list_tasks = MagicMock(side_effect=RuntimeError("lookup unavailable"))
+
+    result = station.create_task(
+        "https://example.com/audit.bin",
+        destination="downloads",
+    )
+
+    assert result == {}
+    station._make_request.assert_called_once_with(
+        "SYNO.DownloadStation2.Task",
+        "2",
+        "create",
+        type="url",
+        destination="downloads",
+        create_list="false",
+        url='["https://example.com/audit.bin"]',
+    )
+    station.list_tasks.assert_called_once_with(limit=100)
+
+
 def test_task_actions_json_encode_id_arrays_and_boolean():
     """DSM 7.3.2 expects task IDs as JSON arrays, not comma strings."""
     from downloadstation.synology_downloadstation import SynologyDownloadStation
