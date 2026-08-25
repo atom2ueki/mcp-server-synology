@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- `copy_file` performs a server-side File Station copy of one regular file and reports success only after verifying the target path and byte count. It avoids routing binary data through the model, but is deliberately documented as unsuitable for transactionally consistent backups of live SQLite databases.
+- `get_file_content` supports lossless structured base64 reads with raw size, MIME type and SHA-256, while text mode now decodes UTF-8 strictly. `create_file` accepts strictly validated base64 uploads. Both directions enforce explicit size limits.
+
+### Fixed
+- File downloads no longer pass through `requests.Response.text`, which silently replaced or dropped bytes in databases, images and archives.
+- File Station create-folder and copy/move calls now send DSM's required JSON-array fields. Copy/move completion is verified from File Station rather than trusting DSM's unreliable `found_file_num` counter.
+- Synchronous File Station I/O runs in worker threads so long searches, transfers and task polling do not block the MCP event loop.
+
 ## [1.6.0] - 2026-08-20
 
 ### Added

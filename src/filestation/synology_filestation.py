@@ -1,7 +1,11 @@
 # src/synology_filestation.py - Synology FileStation API utilities
 
+import base64
+import binascii
+import hashlib
 import json
 import logging
+import mimetypes
 import os
 import tempfile
 import time
@@ -16,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 class SynologyFileStation:
     """Handles Synology FileStation API operations."""
+
+    DEFAULT_MAX_BYTES = 1024 * 1024
+    MAX_CONTENT_BYTES = 8 * 1024 * 1024
 
     def __init__(
         self,
@@ -577,13 +584,20 @@ class SynologyFileStation:
             "message": f"Successfully renamed '{os.path.basename(formatted_path)}' to '{new_name}'",
         }
 
-    def create_file(self, path: str, content: str = "", overwrite: bool = False) -> Dict[str, Any]:
+    def create_file(
+        self,
+        path: str,
+        content: str = "",
+        overwrite: bool = False,
+        encoding: str = "text",
+    ) -> Dict[str, Any]:
         """Create a new file with specified content.
 
         Args:
             path: Full path where the file should be created (must start with /)
             content: Content to write to the file (default: empty string)
             overwrite: Whether to overwrite existing file (default: False)
+            encoding: ``text`` for UTF-8 text or ``base64`` for arbitrary bytes
 
         Returns:
             Dict with operation result
@@ -601,9 +615,30 @@ class SynologyFileStation:
         if not filename:
             raise Exception("Invalid filename")
 
-        # Create temporary file with content
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8") as temp_file:
-            temp_file.write(content)
+        if encoding == "text":
+            if not isinstance(content, str):
+                raise ValueError("Text content must be a string")
+            payload_bytes = content.encode("utf-8")
+            media_type = "text/plain; charset=utf-8"
+        elif encoding == "base64":
+            if not isinstance(content, str):
+                raise ValueError("Base64 content must be a string")
+            try:
+                payload_bytes = base64.b64decode(content, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError("Invalid base64 content") from exc
+            media_type = "application/octet-stream"
+        else:
+            raise ValueError("encoding must be 'text' or 'base64'")
+
+        if len(payload_bytes) > self.MAX_CONTENT_BYTES:
+            raise ValueError(
+                f"Decoded content exceeds the {self.MAX_CONTENT_BYTES}-byte upload limit"
+            )
+
+        # Keep the multipart upload stream seekable and deterministic.
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
+            temp_file.write(payload_bytes)
             temp_file_path = temp_file.name
 
         try:
@@ -614,7 +649,7 @@ class SynologyFileStation:
                     url = f"{self.api_url}?api=SYNO.FileStation.Upload&version=2&method=upload&_sid={self.session_id}"
 
                     # Create multipart data
-                    files = {"file": (filename, payload, "text/plain")}
+                    files = {"file": (filename, payload, media_type)}
 
                     data = {
                         "path": directory,
@@ -646,7 +681,8 @@ class SynologyFileStation:
                 "path": formatted_path,
                 "filename": filename,
                 "directory": directory,
-                "size": len(content.encode("utf-8")),
+                "size": len(payload_bytes),
+                "encoding": encoding,
                 "message": f"Successfully created file '{filename}' at '{directory}'",
             }
 
@@ -691,9 +727,11 @@ class SynologyFileStation:
             "SYNO.FileStation.CreateFolder",
             "2",
             "create",
-            folder_path=formatted_folder_path,
-            name=clean_name,
-            force_parent=force_parent,
+            # DSM expects arrays even for one folder/name. Plain strings can
+            # return error 400 or silently create nothing on recent DSM builds.
+            folder_path=json.dumps([formatted_folder_path]),
+            name=json.dumps([clean_name]),
+            force_parent=str(force_parent).lower(),
         )
 
         folders = data.get("folders", [])
@@ -817,14 +855,38 @@ class SynologyFileStation:
         if path in critical_paths:
             raise Exception(f"Cannot access critical system path: {path}")
 
-    def get_file_content(self, path: str) -> str:
-        """Get the content of a file."""
+    def get_file_content(
+        self,
+        path: str,
+        encoding: str = "text",
+        max_bytes: int = DEFAULT_MAX_BYTES,
+    ) -> Any:
+        """Read a file losslessly as strict UTF-8 text or structured base64."""
         formatted_path = self._format_path(path)
 
         # Check for critical paths
         self._check_critical_path(formatted_path)
 
-        # Use the download API to get file content
+        if encoding not in {"text", "base64"}:
+            raise ValueError("encoding must be 'text' or 'base64'")
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+            raise ValueError("max_bytes must be a positive integer")
+        if max_bytes > self.MAX_CONTENT_BYTES:
+            raise ValueError(f"max_bytes cannot exceed {self.MAX_CONTENT_BYTES}")
+
+        info = self.get_file_info(formatted_path)
+        if info.get("type") != "file":
+            raise ValueError(f"Path is not a regular file: {formatted_path}")
+        expected_size = info.get("size")
+        if not isinstance(expected_size, int) or expected_size < 0:
+            raise ValueError("FileStation returned an invalid file size")
+        if expected_size > max_bytes:
+            raise ValueError(
+                f"File is {expected_size} bytes, exceeding max_bytes={max_bytes}"
+            )
+
+        # Use the download API and consume raw bytes. response.text is lossy for
+        # binary data because requests decodes it before the MCP sees it.
         download_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
         response = requests.get(
             f"{self.base_url}/webapi/entry.cgi",
@@ -840,21 +902,51 @@ class SynologyFileStation:
             stream=True,
             timeout=15,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
 
-        # Check for API error in the headers (download API is special)
-        if (
-            "Content-Type" in response.headers
-            and "application/json" in response.headers["Content-Type"]
-        ):
-            error_data = response.json()
-            if not error_data.get("success"):
-                error_code = error_data.get("error", {}).get("code", "unknown")
-                raise Exception(f"Synology API error: {error_code}")
+            # Check for API error in the headers (download API is special).
+            if "application/json" in response.headers.get("Content-Type", ""):
+                error_data = response.json()
+                if not error_data.get("success"):
+                    error_code = error_data.get("error", {}).get("code", "unknown")
+                    raise Exception(f"Synology API error: {error_code}")
 
-        # Assuming the content is text, read it
-        # For binary files, this would need to be handled differently
-        return response.text
+            chunks = []
+            downloaded = 0
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > max_bytes:
+                    raise ValueError(f"Downloaded content exceeds max_bytes={max_bytes}")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+        finally:
+            response.close()
+
+        if len(raw) != expected_size:
+            raise IOError(
+                f"Downloaded byte count changed or was truncated: expected {expected_size}, got {len(raw)}"
+            )
+
+        if encoding == "text":
+            try:
+                return raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    "File is not valid UTF-8 text; retry with encoding='base64'"
+                ) from exc
+
+        mime_type = mimetypes.guess_type(formatted_path)[0] or "application/octet-stream"
+        return {
+            "path": formatted_path,
+            "encoding": "base64",
+            "mime_type": mime_type,
+            "size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "content": base64.b64encode(raw).decode("ascii"),
+        }
 
     def _is_directory(self, path: str) -> bool:
         """True if `path` exists and is a directory."""
@@ -921,6 +1013,29 @@ class SynologyFileStation:
 
         return self._move_into_folder(formatted_source, formatted_dest, overwrite)
 
+    def copy_file(
+        self, source_path: str, destination_folder: str, overwrite: bool = False
+    ) -> Dict[str, Any]:
+        """Copy one regular file server-side into an existing directory.
+
+        This verifies the resulting path and byte count. It does not make a
+        transactionally consistent snapshot of a live database such as SQLite.
+        """
+        formatted_source = self._format_path(source_path)
+        formatted_dest = self._format_path(destination_folder)
+        source_info = self.get_file_info(formatted_source)
+        if source_info.get("type") != "file":
+            raise ValueError("copy_file only supports regular files")
+        if not self._is_directory(formatted_dest):
+            raise ValueError(f"Destination directory does not exist: {formatted_dest}")
+        return self._copy_move_into_folder(
+            formatted_source,
+            formatted_dest,
+            overwrite,
+            remove_source=False,
+            source_info=source_info,
+        )
+
     def _path_exists(self, path: str) -> bool:
         try:
             self.get_file_info(path)
@@ -933,6 +1048,24 @@ class SynologyFileStation:
     ) -> Dict[str, Any]:
         """Move `formatted_source` into the existing folder `formatted_dest`."""
 
+        return self._copy_move_into_folder(
+            formatted_source,
+            formatted_dest,
+            overwrite,
+            remove_source=True,
+        )
+
+    def _copy_move_into_folder(
+        self,
+        formatted_source: str,
+        formatted_dest: str,
+        overwrite: bool,
+        *,
+        remove_source: bool,
+        source_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run and verify one DSM CopyMove task."""
+
         # Check for critical paths
         self._check_critical_path(formatted_source)
         self._check_critical_path(formatted_dest)
@@ -944,20 +1077,34 @@ class SynologyFileStation:
         if not formatted_dest or formatted_dest == "/":
             raise Exception("Invalid destination path")
 
-        # Start the move operation
+        source_info = source_info or self.get_file_info(formatted_source)
+        if not self._is_directory(formatted_dest):
+            raise ValueError(f"Destination directory does not exist: {formatted_dest}")
+        final_dest = os.path.join(formatted_dest, os.path.basename(formatted_source)).replace(
+            "\\", "/"
+        )
+        if final_dest == formatted_source:
+            raise ValueError("Source and destination resolve to the same path")
+        if not overwrite and self._path_exists(final_dest):
+            raise FileExistsError(f"Destination path already exists: {final_dest}")
+
+        # DSM requires a JSON array for path. A scalar may return a completed
+        # task with found_file_num=0 and no copied/moved file.
         start_data = self._make_request(
             "SYNO.FileStation.CopyMove",
             "3",
             "start",
-            path=formatted_source,
+            path=json.dumps([formatted_source]),
             dest_folder_path=formatted_dest,
-            overwrite=overwrite,
-            remove_src=True,  # This makes it a move operation instead of copy
+            overwrite=str(overwrite).lower(),
+            remove_src=str(remove_source).lower(),
+            accurate_progress="true",
         )
 
         task_id = start_data.get("taskid")
         if not task_id:
-            raise Exception("Failed to start move task")
+            operation = "move" if remove_source else "copy"
+            raise Exception(f"Failed to start {operation} task")
 
         try:
             # Wait for move to complete
@@ -977,27 +1124,37 @@ class SynologyFileStation:
                         error_info = status_data["error"]
                         raise Exception(f"Move failed: {error_info}")
 
-                    # Determine the final destination path
-                    source_name = os.path.basename(formatted_source)
-                    if formatted_dest.endswith("/") or not os.path.splitext(formatted_dest)[1]:
-                        # Destination is a directory
-                        final_dest = os.path.join(formatted_dest, source_name).replace("\\", "/")
-                    else:
-                        # Destination includes the new filename
-                        final_dest = formatted_dest
+                    # found_file_num is unreliable on DSM: successful tasks can
+                    # report zero. Verify the actual target path and byte count.
+                    target_info = self.get_file_info(final_dest)
+                    if target_info.get("type") != source_info.get("type"):
+                        raise IOError(f"Destination type does not match source: {final_dest}")
+                    if source_info.get("type") == "file" and target_info.get(
+                        "size"
+                    ) != source_info.get("size"):
+                        raise IOError(
+                            f"Destination byte count does not match source: {final_dest}"
+                        )
+                    if remove_source and self._path_exists(formatted_source):
+                        raise IOError(f"Source still exists after move: {formatted_source}")
+
+                    operation = "moved" if remove_source else "copied"
 
                     return {
                         "success": True,
                         "source_path": formatted_source,
                         "destination_path": final_dest,
+                        "size": target_info.get("size"),
+                        "verified": True,
                         "task_id": task_id,
-                        "message": f"Successfully moved '{formatted_source}' to '{final_dest}'",
+                        "message": f"Successfully {operation} '{formatted_source}' to '{final_dest}'",
                     }
 
                 time.sleep(0.5)
                 wait_time += 0.5
 
-            raise Exception(f"Move operation timed out after {max_wait_time} seconds")
+            operation = "Move" if remove_source else "Copy"
+            raise Exception(f"{operation} operation timed out after {max_wait_time} seconds")
 
         except Exception as e:
             # Try to stop the task if it's still running
@@ -1005,4 +1162,4 @@ class SynologyFileStation:
                 self._make_request("SYNO.FileStation.CopyMove", "3", "stop", taskid=task_id)
             except Exception:
                 pass  # Ignore cleanup errors
-            raise e
+            raise
