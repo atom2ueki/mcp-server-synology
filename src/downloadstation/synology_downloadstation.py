@@ -205,12 +205,15 @@ class SynologyDownloadStation:
                 raise
 
         tasks = []
-        for task in data.get("tasks", []):
+        raw_tasks = data.get("tasks")
+        if raw_tasks is None:
+            raw_tasks = data.get("task", [])
+        for task in raw_tasks:
             task_info = {
-                "id": task.get("id"),
+                "id": task.get("id") or task.get("task_id"),
                 "type": task.get("type"),
                 "username": task.get("username"),
-                "title": task.get("title"),
+                "title": task.get("title") or task.get("filename"),
                 "size": task.get("size"),
                 "status": task.get("status"),
                 "status_extra": task.get("status_extra", {}),
@@ -317,7 +320,9 @@ class SynologyDownloadStation:
         params = {
             "type": "url",
             "destination": destination,
-            "create_list": "true",
+            # `true` creates a preview list that the DSM UI later confirms via
+            # Task.List.Polling; it does not create a download task by itself.
+            "create_list": "false",
             "url": json.dumps([uri]),  # URL as JSON array
         }
 
@@ -333,6 +338,25 @@ class SynologyDownloadStation:
             logger.debug(f"Destination: {destination}")
 
             data = self._make_request(self.task_api, self.task_version, "create", **params)
+
+            task_ids = data.get("task_id", [])
+            if isinstance(task_ids, str):
+                task_ids = [task_ids]
+            if not task_ids:
+                import time
+
+                for _ in range(20):
+                    tasks = self.list_tasks(limit=100).get("tasks", [])
+                    task_ids = [
+                        task["id"]
+                        for task in tasks
+                        if task.get("id") and task.get("uri") == uri
+                    ]
+                    if task_ids:
+                        break
+                    time.sleep(0.25)
+            if task_ids:
+                data = {**data, "task_id": task_ids}
 
             logger.info("Task created successfully!")
             logger.debug(f"Task IDs: {data.get('task_id', [])}")
@@ -367,17 +391,20 @@ class SynologyDownloadStation:
 
     def delete_tasks(self, task_ids: List[str], force_complete: bool = False) -> Dict[str, Any]:
         """Delete download tasks."""
-        params = {"id": ",".join(task_ids), "force_complete": force_complete}
+        params = {
+            "id": json.dumps(task_ids),
+            "force_complete": json.dumps(force_complete),
+        }
         return self._make_request(self.task_api, self.task_version, "delete", **params)
 
     def pause_tasks(self, task_ids: List[str]) -> Dict[str, Any]:
         """Pause download tasks."""
-        params = {"id": ",".join(task_ids)}
+        params = {"id": json.dumps(task_ids)}
         return self._make_request(self.task_api, self.task_version, "pause", **params)
 
     def resume_tasks(self, task_ids: List[str]) -> Dict[str, Any]:
         """Resume download tasks."""
-        params = {"id": ",".join(task_ids)}
+        params = {"id": json.dumps(task_ids)}
         return self._make_request(self.task_api, self.task_version, "resume", **params)
 
     def get_statistics(self) -> Dict[str, Any]:

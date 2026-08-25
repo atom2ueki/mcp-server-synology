@@ -1,8 +1,92 @@
 """Real Download Station functionality tests."""
 
 import time
+from unittest.mock import MagicMock
 
 import pytest
+
+
+def test_list_tasks_accepts_dsm_singular_task_payload():
+    """DSM 7.3.2 returns `task` and may use `task_id`/`filename`."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._make_request = MagicMock(
+        return_value={
+            "total": 1,
+            "task": [
+                {
+                    "task_id": "dbid_1",
+                    "filename": "audit.bin",
+                    "status": "downloading",
+                    "additional": {"detail": {"uri": "https://example.com/audit.bin"}},
+                }
+            ],
+        }
+    )
+
+    result = station.list_tasks()
+
+    assert result["total"] == 1
+    assert result["tasks"][0]["id"] == "dbid_1"
+    assert result["tasks"][0]["title"] == "audit.bin"
+    assert result["tasks"][0]["uri"] == "https://example.com/audit.bin"
+
+
+def test_create_task_starts_download_instead_of_preview_list():
+    """Direct MCP creation must use create_list=false and return the materialized task ID."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._check_destination_exists = MagicMock(return_value=True)
+    station._make_request = MagicMock(
+        side_effect=[
+            {},
+            {
+                "total": 1,
+                "task": [
+                    {
+                        "id": "dbid_2",
+                        "title": "audit.bin",
+                        "additional": {
+                            "detail": {"uri": "https://example.com/audit.bin"}
+                        },
+                    }
+                ],
+            },
+        ]
+    )
+
+    result = station.create_task(
+        "https://example.com/audit.bin",
+        destination="downloads",
+    )
+
+    create_call = station._make_request.call_args_list[0]
+    assert create_call.args == ("SYNO.DownloadStation2.Task", "2", "create")
+    assert create_call.kwargs["create_list"] == "false"
+    assert create_call.kwargs["url"] == '["https://example.com/audit.bin"]'
+    assert result["task_id"] == ["dbid_2"]
+
+
+def test_task_actions_json_encode_id_arrays_and_boolean():
+    """DSM 7.3.2 expects task IDs as JSON arrays, not comma strings."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._make_request = MagicMock(return_value={})
+
+    station.pause_tasks(["dbid_1", "dbid_2"])
+    station.resume_tasks(["dbid_1", "dbid_2"])
+    station.delete_tasks(["dbid_1", "dbid_2"], force_complete=True)
+
+    pause, resume, delete = station._make_request.call_args_list
+    assert pause.kwargs == {"id": '["dbid_1", "dbid_2"]'}
+    assert resume.kwargs == {"id": '["dbid_1", "dbid_2"]'}
+    assert delete.kwargs == {
+        "id": '["dbid_1", "dbid_2"]',
+        "force_complete": "true",
+    }
 
 
 @pytest.mark.real_nas
@@ -221,6 +305,7 @@ class TestRealDownloadStation:
 
 
 # Simple connectivity test that can run quickly
+@pytest.mark.real_nas
 def test_basic_connectivity(download_station):
     """Quick test to verify basic Download Station connectivity."""
     try:
