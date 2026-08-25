@@ -224,6 +224,7 @@ class TestSynologyFileStation:
 
 
 # Quick connectivity test
+@pytest.mark.real_nas
 def test_filestation_connectivity(session_info):
     """Quick test to verify FileStation is accessible."""
     from filestation.synology_filestation import SynologyFileStation

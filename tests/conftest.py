@@ -201,6 +201,16 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: tests that may take a long time")
 
 
+def pytest_addoption(parser):
+    """Require an explicit opt-in before tests may modify a real NAS."""
+    parser.addoption(
+        "--run-destructive",
+        action="store_true",
+        default=False,
+        help="run tests marked destructive against the configured NAS",
+    )
+
+
 # Custom test collection - only run if credentials are available
 def pytest_collection_modifyitems(config, items):
     """Modify test collection based on environment.
@@ -212,11 +222,14 @@ def pytest_collection_modifyitems(config, items):
     # Note: config here is pytest's config object, not our global config
     from config import config as synology_config
 
-    if not synology_config.has_synology_credentials():
-        for item in items:
-            # Only skip tests that require real NAS connection
-            if "real_nas" in item.keywords:
-                item.add_marker(pytest.mark.skip(reason="No Synology credentials configured"))
+    run_destructive = config.getoption("--run-destructive")
+    for item in items:
+        if "real_nas" in item.keywords and not synology_config.has_synology_credentials():
+            item.add_marker(pytest.mark.skip(reason="No Synology credentials configured"))
+        if "destructive" in item.keywords and not run_destructive:
+            item.add_marker(
+                pytest.mark.skip(reason="Pass --run-destructive to modify the configured NAS")
+            )
 
 
 # Helpful output
