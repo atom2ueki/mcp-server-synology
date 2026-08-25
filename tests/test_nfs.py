@@ -158,6 +158,79 @@ def test_nfs_set_nfs_permission_parameter_validation():
     print("✅ Parameter validation tests passed")
 
 
+def test_nfs_set_permission_wire_format_matches_dsm_7_3_2():
+    """NFS rules use DSM's SharePrivilege load/save API and preserve other clients."""
+    import json
+
+    from nfs.synology_nfs import SynologyNFS
+
+    nfs = SynologyNFS(
+        "https://nas.example.com:5001",
+        "sid_xyz",
+        verify_ssl=False,
+        syno_token="tok_abc",
+    )
+    existing_rule = {
+        "client": "192.0.2.2",
+        "privilege": "rw",
+        "root_squash": "root",
+        "async": True,
+        "insecure": False,
+        "crossmnt": False,
+        "security_flavor": {"sys": True},
+    }
+    load_response = MagicMock()
+    load_response.json.return_value = {
+        "success": True,
+        "data": {"rule": [existing_rule]},
+    }
+    load_response.raise_for_status = MagicMock()
+    save_response = MagicMock()
+    save_response.json.return_value = {"success": True, "data": {}}
+    save_response.raise_for_status = MagicMock()
+
+    with (
+        patch("utils.synology_api.requests.get", return_value=load_response) as get,
+        patch("utils.synology_api.requests.post", return_value=save_response) as post,
+    ):
+        result = nfs.set_nfs_permission(
+            "audit",
+            "192.0.2.1",
+            privilege="readonly",
+            squash="root_squash",
+            security="sys",
+        )
+
+    assert result["success"] is True
+    load_data = get.call_args.kwargs["params"]
+    assert load_data["api"] == "SYNO.Core.FileServ.NFS.SharePrivilege"
+    assert load_data["method"] == "load"
+    assert load_data["share_name"] == "audit"
+
+    save_data = post.call_args.kwargs["data"]
+    assert save_data["api"] == "SYNO.Core.FileServ.NFS.SharePrivilege"
+    assert save_data["method"] == "save"
+    assert save_data["share_name"] == "audit"
+    assert post.call_args.kwargs["headers"]["X-SYNO-TOKEN"] == "tok_abc"
+    assert json.loads(save_data["rule"]) == [
+        existing_rule,
+        {
+            "client": "192.0.2.1",
+            "privilege": "ro",
+            "root_squash": "guest",
+            "async": True,
+            "insecure": False,
+            "crossmnt": False,
+            "security_flavor": {
+                "sys": True,
+                "kerberos": False,
+                "kerberos_integrity": False,
+                "kerberos_privacy": False,
+            },
+        },
+    ]
+
+
 def test_create_share_wire_format_matches_dsm_7_3_2():
     """Regression test for issue #8.
 

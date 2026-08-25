@@ -129,17 +129,59 @@ class SynologyNFS:
             squash: Squash option — "root_squash", "no_root_squash", or "all_squash".
             security: Security mode — "sys" (AUTH_SYS), "krb5", "krb5i", or "krb5p".
         """
-        import json as _json
+        privilege_map = {"readonly": "ro", "readwrite": "rw"}
+        squash_map = {
+            "no_root_squash": "root",
+            "root_squash": "guest",
+            "all_squash": "all_guest",
+        }
+        security_map = {
+            "sys": "sys",
+            "krb5": "kerberos",
+            "krb5i": "kerberos_integrity",
+            "krb5p": "kerberos_privacy",
+        }
+        if privilege not in privilege_map or squash not in squash_map or security not in security_map:
+            return {
+                "success": False,
+                "error": {
+                    "code": "invalid_parameter",
+                    "message": "Invalid NFS privilege, squash, or security value",
+                },
+            }
 
+        api = "SYNO.Core.FileServ.NFS.SharePrivilege"
+        current = self._api_call(api, "load", extra_params={"share_name": share_name})
+        if not current.get("success"):
+            return current
+
+        data = current.get("data", {})
+        rules = data.get("rule", []) if isinstance(data, dict) else []
+        if not isinstance(rules, list):
+            rules = []
+
+        security_flavor = {
+            "sys": False,
+            "kerberos": False,
+            "kerberos_integrity": False,
+            "kerberos_privacy": False,
+        }
+        security_flavor[security_map[security]] = True
         nfs_rule = {
-            "host": client_ip,
-            "privilege": privilege,
-            "squash": squash,
-            "security": security,
+            "client": client_ip,
+            "privilege": privilege_map[privilege],
+            "root_squash": squash_map[squash],
+            "async": True,
+            "insecure": False,
+            "crossmnt": False,
+            "security_flavor": security_flavor,
         }
 
-        params = {
-            "name": share_name,
-            "nfs_privilege": _json.dumps([nfs_rule]),
-        }
-        return self._api_call("SYNO.Core.Share", "set", extra_params=params, use_post=True)
+        rules = [rule for rule in rules if rule.get("client") != client_ip]
+        rules.append(nfs_rule)
+        return self._api_call(
+            api,
+            "save",
+            extra_params={"share_name": share_name, "rule": json.dumps(rules)},
+            use_post=True,
+        )
