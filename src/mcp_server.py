@@ -1000,7 +1000,9 @@ class SynologyMCPServer:
         password = arguments.get("password")
 
         downloadstation = self._get_downloadstation(base_url)
-        result = downloadstation.create_task(uri, destination, username, password)
+        result = await asyncio.to_thread(
+            downloadstation.create_task, uri, destination, username, password
+        )
 
         return [
             types.TextContent(

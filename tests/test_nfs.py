@@ -301,6 +301,31 @@ def test_nfs_set_permission_serializes_same_nas_share(tmp_path, monkeypatch):
     assert {rule["client"] for rule in state["rules"]} == {"192.0.2.1", "192.0.2.2"}
 
 
+@pytest.mark.parametrize("data", [{}, {"rule": {}}, {"rule": ["malformed"]}])
+def test_nfs_set_permission_rejects_malformed_existing_rules(data, tmp_path, monkeypatch):
+    """Malformed load data must never be replaced by a one-rule save."""
+    from nfs.synology_nfs import SynologyNFS
+
+    monkeypatch.setattr(SynologyNFS, "_lock_directory", tmp_path)
+    nfs = SynologyNFS("https://nas.example.com:5001", "sid")
+    nfs._api_call = MagicMock(return_value={"success": True, "data": data})
+
+    result = nfs.set_nfs_permission("audit", "192.0.2.1")
+
+    assert result == {
+        "success": False,
+        "error": {
+            "code": "invalid_response",
+            "message": "DSM returned malformed NFS rule data; no changes were saved",
+        },
+    }
+    nfs._api_call.assert_called_once_with(
+        "SYNO.Core.FileServ.NFS.SharePrivilege",
+        "load",
+        extra_params={"share_name": "audit"},
+    )
+
+
 @pytest.mark.asyncio
 async def test_nfs_set_permission_handler_uses_worker_thread():
     """Waiting for the cross-process lock must not block the MCP event loop."""

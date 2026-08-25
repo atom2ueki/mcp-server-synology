@@ -62,10 +62,16 @@ class SynologyNFS:
         if not current.get("success"):
             return current
 
-        data = current.get("data", {})
-        rules = data.get("rule", []) if isinstance(data, dict) else []
-        if not isinstance(rules, list):
-            rules = []
+        data = current.get("data")
+        rules = data.get("rule") if isinstance(data, dict) else None
+        if not isinstance(rules, list) or any(not isinstance(rule, dict) for rule in rules):
+            return {
+                "success": False,
+                "error": {
+                    "code": "invalid_response",
+                    "message": "DSM returned malformed NFS rule data; no changes were saved",
+                },
+            }
 
         rules = [rule for rule in rules if rule.get("client") != client_ip]
         rules.append(nfs_rule)

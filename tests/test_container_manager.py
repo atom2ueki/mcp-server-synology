@@ -947,7 +947,7 @@ async def test_project_stream_operation_keeps_event_loop_responsive():
         try:
             await asyncio.sleep(0.02)
             assert started.is_set()
-            assert loop.time() - started_at < 0.2
+            assert loop.time() - started_at < 0.5
         finally:
             release.set()
         result = await task

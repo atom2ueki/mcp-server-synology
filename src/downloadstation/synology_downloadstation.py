@@ -271,6 +271,27 @@ class SynologyDownloadStation:
                 "bt_max_upload": 0,
             }
 
+    @staticmethod
+    def _new_task_ids(
+        tasks: List[Dict[str, Any]],
+        uri: str,
+        destination: str,
+        existing_task_ids: set[str],
+    ) -> List[str]:
+        """Find newly appeared URI matches, preferring the requested destination."""
+        candidates = [
+            task
+            for task in tasks
+            if task.get("id")
+            and task.get("uri") == uri
+            and task["id"] not in existing_task_ids
+        ]
+        destination_matches = [
+            task for task in candidates if task.get("destination") == destination
+        ]
+        selected = destination_matches or candidates
+        return [task["id"] for task in selected]
+
     def create_task(
         self,
         uri: str,
@@ -336,6 +357,21 @@ class SynologyDownloadStation:
         logger.debug(f"URI: {uri}")
         logger.debug(f"Destination: {destination}")
 
+        existing_task_ids: Optional[set[str]]
+        try:
+            existing_tasks = self.list_tasks(limit=100).get("tasks", [])
+            existing_task_ids = {
+                task["id"]
+                for task in existing_tasks
+                if task.get("id") and task.get("uri") == uri
+            }
+        except Exception as lookup_error:
+            existing_task_ids = None
+            logger.warning(
+                "Could not capture task IDs before creation; ID synthesis will be skipped: %s",
+                lookup_error,
+            )
+
         try:
             data = self._make_request(self.task_api, self.task_version, "create", **params)
         except Exception as e:
@@ -366,17 +402,18 @@ class SynologyDownloadStation:
         task_ids = data.get("task_id", [])
         if isinstance(task_ids, str):
             task_ids = [task_ids]
-        if not task_ids:
+        if not task_ids and existing_task_ids is not None:
             import time
 
             try:
                 for _ in range(20):
                     tasks = self.list_tasks(limit=100).get("tasks", [])
-                    task_ids = [
-                        task["id"]
-                        for task in tasks
-                        if task.get("id") and task.get("uri") == uri
-                    ]
+                    task_ids = self._new_task_ids(
+                        tasks,
+                        uri,
+                        destination,
+                        existing_task_ids,
+                    )
                     if task_ids:
                         break
                     time.sleep(0.25)
