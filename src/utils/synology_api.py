@@ -1,6 +1,8 @@
 # src/utils/synology_api.py - Shared API client for all Synology modules
 
+import json
 import logging
+import re
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -56,11 +58,13 @@ class SynologyAPIClient:
         session_id: str,
         verify_ssl: bool = False,
         syno_token: Optional[str] = None,
+        request_timeout: int = 15,
     ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
         self.syno_token = syno_token
+        self.request_timeout = request_timeout
         self._api_url = f"{self.base_url}/webapi/entry.cgi"
 
     def request(
@@ -124,7 +128,7 @@ class SynologyAPIClient:
                     self._api_url,
                     data=params,
                     headers=headers,
-                    timeout=15,
+                    timeout=self.request_timeout,
                     verify=self.verify_ssl,
                 )
             else:
@@ -132,7 +136,7 @@ class SynologyAPIClient:
                     self._api_url,
                     params=params,
                     headers=headers,
-                    timeout=15,
+                    timeout=self.request_timeout,
                     verify=self.verify_ssl,
                 )
             resp.raise_for_status()
@@ -153,3 +157,95 @@ class SynologyAPIClient:
     ) -> Dict[str, Any]:
         """Make a POST request to the API."""
         return self.request(api, method, version, extra_params, use_post=True)
+
+    def post_stream(
+        self, api: str, method: str, version: int = 1, extra_params: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Run a DSM chunked-text operation and validate its final exit code.
+
+        Container Manager's ``*_stream`` methods do not return JSON. They keep
+        a chunked HTTP response open while Compose runs and finish with
+        ``Exit Code: N``. A regular 15-second JSON request can therefore time
+        out or fail JSON decoding even when DSM completes the operation.
+        """
+        result = self._do_stream_request(api, method, version, extra_params)
+        if not result.get("success") and result.get("error", {}).get("code") == 119:
+            new_sid, new_token = _try_relogin(self.base_url, self.session_id)
+            if new_sid:
+                self.session_id = new_sid
+                self.syno_token = new_token
+                result = self._do_stream_request(api, method, version, extra_params)
+        return result
+
+    def _do_stream_request(
+        self, api: str, method: str, version: int, extra_params: Optional[Dict]
+    ) -> Dict[str, Any]:
+        params = {
+            "api": api,
+            "version": str(version),
+            "method": method,
+            "_sid": self.session_id,
+        }
+        if extra_params:
+            params.update(extra_params)
+        headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
+
+        response = None
+        try:
+            response = requests.post(
+                self._api_url,
+                data=params,
+                headers=headers,
+                timeout=(15, 300),
+                verify=self.verify_ssl,
+                stream=True,
+            )
+            response.raise_for_status()
+
+            # Keep enough for DSM's small JSON errors and the tail of Compose
+            # output, but never retain an unbounded build log in MCP memory.
+            body = bytearray()
+            tail = bytearray()
+            for chunk in response.iter_content(chunk_size=4096):
+                if not chunk:
+                    continue
+                if len(body) < 65536:
+                    body.extend(chunk[: 65536 - len(body)])
+                tail.extend(chunk)
+                if len(tail) > 8192:
+                    del tail[:-8192]
+
+            stripped = bytes(body).lstrip()
+            if stripped.startswith(b"{"):
+                parsed = json.loads(bytes(body).decode("utf-8"))
+                return parsed
+
+            match = re.search(rb"Exit Code:\s*(-?\d+)", bytes(tail))
+            if not match:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "stream_incomplete",
+                        "message": "DSM stream ended without an exit code",
+                    },
+                }
+
+            exit_code = int(match.group(1))
+            if exit_code != 0:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": f"stream_exit_{exit_code}",
+                        "message": f"DSM stream operation exited with code {exit_code}",
+                    },
+                }
+            return {"success": True, "data": {"exit_code": exit_code}}
+        except requests.RequestException as exc:
+            return {"success": False, "error": {"code": "network_error", "message": str(exc)}}
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return {"success": False, "error": {"code": "invalid_response", "message": str(exc)}}
+        except Exception as exc:
+            return {"success": False, "error": {"code": "unknown_error", "message": str(exc)}}
+        finally:
+            if response is not None:
+                response.close()
