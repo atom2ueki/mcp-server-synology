@@ -75,7 +75,7 @@ list_directory(path="/Photos")
 ### "Find all PDFs in /volume1/documents"
 
 ```
-search_files(path="/volume1/documents", pattern="*.pdf")
+search_files(path="/volume1/documents", pattern=".pdf")
 ```
 
 ### "Save these notes to my homes folder"
@@ -93,7 +93,7 @@ If the parent dir doesn't exist, you'll get an error — fall back to `create_di
 ### "Move last month's photos into the archive"
 
 ```
-search_files(path="/Photos", pattern="*.jpg") # to find them
+search_files(path="/Photos", pattern=".jpg") # to find them
 # then per-file:
 move_file(source_path="/Photos/2026-03-01.jpg", destination_path="/Photos/archive/2026-03/2026-03-01.jpg", overwrite=false)
 ```

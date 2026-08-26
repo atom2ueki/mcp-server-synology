@@ -718,7 +718,7 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 // Search for PDFs
 {
   "path": "/volume1/documents", 
-  "pattern": "*.pdf"
+  "pattern": ".pdf"
 }
 
 // Create new file

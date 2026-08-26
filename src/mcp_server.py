@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import threading
 from functools import partial
 from typing import Callable, Dict, Optional
 
@@ -59,6 +60,8 @@ class SynologyMCPServer:
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
+        self._session_locks: Dict[str, threading.RLock] = {}
+        self._session_locks_guard = threading.Lock()
         self._tool_registry: Dict[str, tuple[types.Tool, Callable]] = {}
         self.server = self._create_server()
         self._register_all_tools()
@@ -306,6 +309,11 @@ class SynologyMCPServer:
         """Get tool definitions from the registry."""
         return [tool for tool, _ in self._tool_registry.values()]
 
+    def _session_lock(self, base_url: str) -> threading.RLock:
+        """Return the shared re-entrant lock for one normalized NAS URL."""
+        normalized = base_url.rstrip("/")
+        with self._session_locks_guard:
+            return self._session_locks.setdefault(normalized, threading.RLock())
 
     def _login_nas(self, nas_name: Optional[str]) -> str:
         """Log in to a configured NAS and return its base_url.
@@ -387,19 +395,21 @@ class SynologyMCPServer:
 
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
-        if base_url not in self.sessions:
-            raise Exception(f"No active session for {base_url}. Please login first.")
+        base_url = base_url.rstrip("/")
+        with self._session_lock(base_url):
+            if base_url not in self.sessions:
+                raise Exception(f"No active session for {base_url}. Please login first.")
 
-        if base_url not in self.filestation_instances:
-            session_id = self.sessions[base_url]
-            self.filestation_instances[base_url] = SynologyFileStation(
-                base_url,
-                session_id,
-                verify_ssl=config.verify_ssl_for(base_url),
-                syno_token=self.syno_tokens.get(base_url),
-            )
+            if base_url not in self.filestation_instances:
+                session_id = self.sessions[base_url]
+                self.filestation_instances[base_url] = SynologyFileStation(
+                    base_url,
+                    session_id,
+                    verify_ssl=config.verify_ssl_for(base_url),
+                    syno_token=self.syno_tokens.get(base_url),
+                )
 
-        return self.filestation_instances[base_url]
+            return self.filestation_instances[base_url]
 
     def _get_downloadstation(self, base_url: str) -> SynologyDownloadStation:
         """Get or create DownloadStation instance for a base URL."""
@@ -584,15 +594,19 @@ class SynologyMCPServer:
                     # trailing slash) matches the stripped key under which
                     # _login_nas / _handle_login store sessions.
                     target_url = target_url.rstrip("/")
-                    # A session may already exist for this URL without the name
-                    # being mapped -- synology_login establishes one but does
-                    # not touch nas_name_map. Logging in again would overwrite
-                    # the tracked SID and strand that first session, leaving it
-                    # open on the NAS and unreachable by logout.
-                    if target_url in self.sessions:
-                        self.nas_name_map[nas_name] = target_url
-                        return target_url
-                    return self._login_nas(configured_name)
+                    # File Station handlers resolve targets in worker threads.
+                    # Serialize first use so concurrent calls cannot both log
+                    # in and leave one cached client holding an overwritten SID.
+                    with self._session_lock(target_url):
+                        # A session may already exist for this URL without the name
+                        # being mapped -- synology_login establishes one but does
+                        # not touch nas_name_map. Logging in again would overwrite
+                        # the tracked SID and strand that first session, leaving it
+                        # open on the NAS and unreachable by logout.
+                        if target_url in self.sessions:
+                            self.nas_name_map[nas_name] = target_url
+                            return target_url
+                        return self._login_nas(configured_name)
             raise Exception(
                 f"NAS '{nas_name}' not found. Available: {list(self.nas_name_map.keys())}"
             )

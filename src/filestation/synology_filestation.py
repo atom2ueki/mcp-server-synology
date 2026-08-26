@@ -623,6 +623,11 @@ class SynologyFileStation:
         elif encoding == "base64":
             if not isinstance(content, str):
                 raise ValueError("Base64 content must be a string")
+            max_encoded_length = 4 * ((self.MAX_CONTENT_BYTES + 2) // 3)
+            if len(content) > max_encoded_length:
+                raise ValueError(
+                    f"Base64 content exceeds the encoded limit for a {self.MAX_CONTENT_BYTES}-byte upload"
+                )
             try:
                 payload_bytes = base64.b64decode(content, validate=True)
             except (binascii.Error, ValueError) as exc:

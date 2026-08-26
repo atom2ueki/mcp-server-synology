@@ -176,11 +176,23 @@ class TestLosslessUpload:
             make_client().create_file("/docker/audit/sample.bin", "not base64!", encoding="base64")
 
     def test_decoded_base64_limit_is_enforced(self, monkeypatch):
-        monkeypatch.setattr(SynologyFileStation, "MAX_CONTENT_BYTES", 3)
+        # Five decoded bytes still fit in the same eight encoded characters as
+        # the four-byte limit, so the post-decode boundary check must remain.
+        monkeypatch.setattr(SynologyFileStation, "MAX_CONTENT_BYTES", 4)
         with pytest.raises(ValueError, match="upload limit"):
             make_client().create_file(
-                "/docker/audit/sample.bin", base64.b64encode(b"1234").decode(), encoding="base64"
+                "/docker/audit/sample.bin", base64.b64encode(b"12345").decode(), encoding="base64"
             )
+
+    def test_oversized_base64_is_rejected_before_decode(self, monkeypatch):
+        monkeypatch.setattr(SynologyFileStation, "MAX_CONTENT_BYTES", 3)
+        monkeypatch.setattr(
+            "filestation.synology_filestation.base64.b64decode",
+            lambda *a, **k: pytest.fail("oversized input must not be decoded"),
+        )
+
+        with pytest.raises(ValueError, match="encoded limit"):
+            make_client().create_file("/docker/audit/sample.bin", "AAAAA", encoding="base64")
 
 
 def test_create_folder_uses_json_arrays(monkeypatch):
