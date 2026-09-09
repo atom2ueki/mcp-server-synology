@@ -1,9 +1,12 @@
 # src/health/synology_health.py - Synology NAS health monitoring
 # Supports both DSM 6 and DSM 7 APIs with automatic fallback.
 
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from utils.synology_api import SynologyAPIClient
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from iscsi.synology_iscsi import SynologyISCSI
 
 
 class SynologyHealth:
@@ -21,6 +24,8 @@ class SynologyHealth:
         self.verify_ssl = verify_ssl
         self.syno_token = syno_token
         self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)
+        # Built on first use by _iscsi(); shares self._api.
+        self.__iscsi: Optional["SynologyISCSI"] = None
 
     def _api_call(
         self, api: str, method: str, version: int = 1, extra_params: Optional[Dict] = None
@@ -143,31 +148,33 @@ class SynologyHealth:
     # iSCSI LUNs
     # ------------------------------------------------------------------
 
+    def _iscsi(self) -> "SynologyISCSI":
+        """SAN Manager view of this NAS, sharing this instance's API client.
+
+        The iSCSI surface grew past listing (create, targets, mapping) and moved
+        to its own module. These two methods stay because they are part of this
+        class's published interface, but they delegate rather than keeping a
+        second copy of the call shapes.
+        """
+        from iscsi.synology_iscsi import SynologyISCSI
+
+        if self.__iscsi is None:
+            self.__iscsi = SynologyISCSI(
+                self.base_url,
+                self.session_id,
+                self.verify_ssl,
+                syno_token=self.syno_token,
+                api_client=self._api,
+            )
+        return self.__iscsi
+
     def lun_list(self) -> Dict[str, Any]:
-        """List all iSCSI LUNs with name, UUID, size, usage, status, target mappings."""
-        return self._api_call("SYNO.Core.ISCSI.LUN", "list")
+        """List all iSCSI LUNs with name, UUID, size, type, status and backing volume."""
+        return self._iscsi().lun_list()
 
     def lun_get(self, name_or_uuid: str) -> Dict[str, Any]:
-        """Get a single iSCSI LUN by name or UUID.
-
-        The LUN list response already carries the full LUN objects, so a
-        single LUN is resolved client-side by matching either the `name` or
-        `uuid` field — no extra API round-trip beyond the list call.
-        """
-        result = self.lun_list()
-        if not result.get("success"):
-            return result
-        luns = result.get("data", {}).get("luns", []) or []
-        for lun in luns:
-            if name_or_uuid in (lun.get("name"), lun.get("uuid")):
-                return {"success": True, "data": lun}
-        return {
-            "success": False,
-            "error": {
-                "code": "lun_not_found",
-                "message": f"No iSCSI LUN found matching '{name_or_uuid}'",
-            },
-        }
+        """Get a single iSCSI LUN by name or UUID."""
+        return self._iscsi().lun_get(name_or_uuid)
 
     # ------------------------------------------------------------------
     # Network

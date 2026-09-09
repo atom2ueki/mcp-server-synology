@@ -23,6 +23,7 @@ from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
 from filestation import SynologyFileStation
 from health import SynologyHealth
+from iscsi import SynologyISCSI
 from nfs import SynologyNFS
 from usermanagement import SynologyUserManager
 
@@ -57,6 +58,7 @@ class SynologyMCPServer:
         self.health_instances: Dict[str, SynologyHealth] = {}
         self.container_instances: Dict[str, SynologyContainer] = {}
         self.nfs_instances: Dict[str, SynologyNFS] = {}
+        self.iscsi_instances: Dict[str, SynologyISCSI] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
         self._tool_registry: Dict[str, tuple[types.Tool, Callable]] = {}
@@ -198,12 +200,46 @@ class SynologyMCPServer:
         self._register_tool("synology_disk_smart", "Get detailed S.M.A.R.T. attributes for a specific physical disk", TN_PR({"disk_id": {"type": "string", "description": "Disk identifier from synology_disk_health output — either the disk id (e.g. \'sata1\', \'sda\', \'nvme0n1\') or its device path (e.g. \'/dev/sata1\')"}}, ["disk_id"]), self._handle_disk_smart)
         self._register_tool("synology_volume_status", "List all volumes/filesystems with status, total size, used space, and RAID info", TN, partial(self._handle_health_call, method_name="volume_list"))
         self._register_tool("synology_storage_pool", "List RAID/storage pools with RAID level, status, and member disks", TN, partial(self._handle_health_call, method_name="storage_pool_list"))
-        self._register_tool("synology_lun_list", "List all iSCSI LUNs with name, UUID, size, used space, status, mapped targets, and backing volume", TN, partial(self._handle_health_call, method_name="lun_list"))
+        self._register_tool("synology_lun_list", "List all iSCSI LUNs with name, UUID, size, type, status and backing volume. To see which target a LUN is attached to, use synology_target_list.", TN, partial(self._handle_iscsi_call, method_name="lun_list"))
         self._register_tool("synology_lun_get", "Get details for a single iSCSI LUN by name or UUID", TN_PR({"name": {"type": "string", "description": "LUN name or UUID from synology_lun_list output"}}, ["name"]), self._handle_lun_get)
         self._register_tool("synology_network", "Get network interface status and transfer rates", TN, partial(self._handle_health_call, method_name="network_info"))
         self._register_tool("synology_ups", "Get UPS (uninterruptible power supply) status, battery level, and power info", TN, partial(self._handle_health_call, method_name="ups_info"))
         self._register_tool("synology_services", "List installed packages/services and their running status", TN, partial(self._handle_health_call, method_name="package_list"))
         self._register_tool("synology_system_log", "Get recent system log entries for diagnosing issues", TN_P({"offset": {"type": "integer", "description": "Starting offset (default: 0)"}, "limit": {"type": "integer", "description": "Max entries to return (default: 50)"}}), self._handle_system_log)
+        # SAN Manager (iSCSI) - LUN and target provisioning
+        self._register_tool("synology_lun_create", "Create an iSCSI LUN on a volume. Returns its uuid and lun_id. On a btrfs volume DSM provisions thin by default.", TN_PR({
+            "name": {"type": "string", "description": "LUN name, e.g. 'macmini-dev'"},
+            "location": {"type": "string", "description": "Volume path to create it on, e.g. '/volume2'"},
+            "size": {"type": "integer", "description": "Size in BYTES (e.g. 536870912000 for 500 GB)"},
+            "type": {"type": "string", "description": "LUN type. 'thin' (default, DSM 'BLUN') or 'advanced'/'file'; a raw DSM type name such as BLUN, ADV, THIN or FILE is passed through unchanged. Thick provisioning is not available on a btrfs volume."},
+            "description": {"type": "string", "description": "Optional free-text description stored on the LUN"},
+        }, ["name", "location", "size"]), self._handle_lun_create)
+        self._register_tool("synology_lun_delete", "DESTRUCTIVE. Permanently delete an iSCSI LUN and everything stored on it. Requires confirm=true.", TN_PR({
+            "uuid": {"type": "string", "description": "LUN UUID from synology_lun_list"},
+            "confirm": {"type": "boolean", "description": "Must be true. Guards against deleting a LUN by accident; there is no undo."},
+        }, ["uuid", "confirm"]), self._handle_lun_delete)
+        self._register_tool("synology_target_list", "List iSCSI targets with IQN, auth type, enabled state and the LUNs mapped to each", TN, partial(self._handle_iscsi_call, method_name="target_list"))
+        self._register_tool("synology_target_get", "Get a single iSCSI target by its numeric target_id", TN_PR({"target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"}}, ["target_id"]), self._handle_target_get)
+        self._register_tool("synology_target_create", "Create an iSCSI target. Returns its target_id. Leave chap_user/chap_password unset for a target with no authentication.", TN_PR({
+            "name": {"type": "string", "description": "Target name, e.g. 'macmini-dev'"},
+            "iqn": {"type": "string", "description": "Full IQN. Defaults to iqn.2000-01.com.synology:<name>."},
+            "chap_user": {"type": "string", "description": "CHAP username. Must be given together with chap_password; supplying only one is refused rather than silently creating an unauthenticated target."},
+            "chap_password": {"type": "string", "description": "CHAP password (12-16 chars per DSM). Must be given together with chap_user."},
+            "max_sessions": {"type": "integer", "description": "Max concurrent sessions; 0 (default) means DSM's default, no explicit cap."},
+        }, ["name"]), self._handle_target_create)
+        self._register_tool("synology_target_delete", "DESTRUCTIVE. Delete an iSCSI target. Mapped LUNs survive but become unreachable over iSCSI. Requires confirm=true.", TN_PR({
+            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
+            "confirm": {"type": "boolean", "description": "Must be true. Guards against disconnecting a live initiator by accident."},
+        }, ["target_id", "confirm"]), self._handle_target_delete)
+        self._register_tool("synology_target_map_lun", "Map one or more LUNs to an iSCSI target, making them visible to initiators that connect to it", TN_PR({
+            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
+            "lun_uuids": {"type": "array", "items": {"type": "string"}, "description": "LUN UUIDs from synology_lun_list"},
+        }, ["target_id", "lun_uuids"]), self._handle_target_map_lun)
+        self._register_tool("synology_target_unmap_lun", "Unmap one or more LUNs from an iSCSI target. The LUNs themselves are not deleted.", TN_PR({
+            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
+            "lun_uuids": {"type": "array", "items": {"type": "string"}, "description": "LUN UUIDs from synology_lun_list"},
+        }, ["target_id", "lun_uuids"]), self._handle_target_unmap_lun)
+
         self._register_tool("synology_health_summary", "Get a combined health overview: system info, CPU/memory utilization, disk health, volume status, storage pools, network, and UPS — all in one call", TN, partial(self._handle_health_call, method_name="health_summary"))
 
         # Container Manager
@@ -465,6 +501,22 @@ class SynologyMCPServer:
 
         return self.nfs_instances[base_url]
 
+    def _get_iscsi(self, base_url: str) -> SynologyISCSI:
+        """Get or create SAN Manager (iSCSI) instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.iscsi_instances:
+            session_id = self.sessions[base_url]
+            self.iscsi_instances[base_url] = SynologyISCSI(
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl_for(base_url),
+                syno_token=self.syno_tokens.get(base_url),
+            )
+
+        return self.iscsi_instances[base_url]
+
     def _get_usermgr(self, base_url: str) -> SynologyUserManager:
         """Get or create UserManager instance for a base URL."""
         if base_url not in self.sessions:
@@ -537,6 +589,7 @@ class SynologyMCPServer:
             self.health_instances,
             self.container_instances,
             self.nfs_instances,
+            self.iscsi_instances,
             self.usermgr_instances,
         )
 
@@ -1091,13 +1144,130 @@ class SynologyMCPServer:
         result = health.disk_smart_info(disk_id)
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
+    async def _handle_iscsi_call(
+        self, arguments: dict, method_name: str
+    ) -> list[types.TextContent]:
+        """Generic handler for no-argument SAN Manager calls."""
+        base_url = self._get_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        result = getattr(iscsi, method_name)()
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    @staticmethod
+    def _refuse_unconfirmed(action: str) -> list[types.TextContent]:
+        """Response for a destructive tool called without confirm=true.
+
+        Returned rather than raised: this is a normal, expected answer telling
+        the caller what to do next, not a server fault.
+        """
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "success": False,
+                        "error": {
+                            "code": "confirmation_required",
+                            "message": (
+                                f"{action} is destructive and was not performed. "
+                                "Re-issue the call with confirm=true if that is intended."
+                            ),
+                        },
+                    },
+                    indent=2,
+                ),
+            )
+        ]
+
     async def _handle_lun_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting details for a single iSCSI LUN."""
         base_url = self._get_base_url(arguments)
         name = arguments["name"]
-        health = self._get_health(base_url)
-        result = health.lun_get(name)
+        iscsi = self._get_iscsi(base_url)
+        result = iscsi.lun_get(name)
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_lun_create(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating an iSCSI LUN."""
+        base_url = self._get_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        result = iscsi.lun_create(
+            name=arguments["name"],
+            location=arguments["location"],
+            size=arguments["size"],
+            lun_type=arguments.get("type", "thin"),
+            description=arguments.get("description"),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_lun_delete(self, arguments: dict) -> list[types.TextContent]:
+        """Handle deleting an iSCSI LUN. Refuses without confirm=true."""
+        if not arguments.get("confirm"):
+            return self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
+        base_url = self._get_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        result = iscsi.lun_delete(arguments["uuid"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_target_get(self, arguments: dict) -> list[types.TextContent]:
+        """Handle getting a single iSCSI target."""
+        base_url = self._get_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        result = iscsi.target_get(arguments["target_id"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_target_create(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating an iSCSI target."""
+        base_url = self._get_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        result = iscsi.target_create(
+            name=arguments["name"],
+            iqn=arguments.get("iqn"),
+            chap_user=arguments.get("chap_user"),
+            chap_password=arguments.get("chap_password"),
+            max_sessions=arguments.get("max_sessions", 0),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_target_delete(self, arguments: dict) -> list[types.TextContent]:
+        """Handle deleting an iSCSI target. Refuses without confirm=true."""
+        if not arguments.get("confirm"):
+            return self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
+        base_url = self._get_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        result = iscsi.target_delete(arguments["target_id"])
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    async def _handle_target_map_lun(self, arguments: dict) -> list[types.TextContent]:
+        """Handle mapping LUNs to an iSCSI target."""
+        return await self._map_luns(arguments, unmap=False)
+
+    async def _handle_target_unmap_lun(self, arguments: dict) -> list[types.TextContent]:
+        """Handle unmapping LUNs from an iSCSI target."""
+        return await self._map_luns(arguments, unmap=True)
+
+    async def _map_luns(self, arguments: dict, *, unmap: bool) -> list[types.TextContent]:
+        """Map or unmap LUNs against one target.
+
+        DSM maps from the LUN side (SYNO.Core.ISCSI.LUN/map_target takes one
+        uuid and a list of target_ids), so a request naming several LUNs is one
+        call per LUN. Each result is reported separately rather than collapsed
+        into a single boolean, so a partial failure names the LUN that failed.
+        """
+        base_url = self._get_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        target_id = arguments["target_id"]
+        lun_uuids = arguments["lun_uuids"]
+        results = []
+        for uuid in lun_uuids:
+            call = iscsi.lun_unmap_targets if unmap else iscsi.lun_map_targets
+            outcome = call(uuid, [target_id])
+            results.append({"lun_uuid": uuid, **outcome})
+        payload = {
+            "success": all(r.get("success") for r in results),
+            "data": {"target_id": target_id, "results": results},
+        }
+        return [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
 
     async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting system log entries."""

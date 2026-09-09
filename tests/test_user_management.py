@@ -128,7 +128,13 @@ def test_add_user_to_group_treats_unreadable_listing_as_unverified():
 
 
 def test_group_write_api_error_skips_verification():
-    """A refused join is returned unchanged — nothing to verify."""
+    """A refused join is surfaced as-is — nothing to verify.
+
+    The DSM code is preserved exactly; the api/method/version/message that
+    SynologyAPIClient adds on the way out are asserted separately, because the
+    point of this test is that no verification round-trip happened, not the
+    shape of the error envelope.
+    """
     mgr = _make_manager()
     error_resp = MagicMock()
     error_resp.json.return_value = {"success": False, "error": {"code": 105}}
@@ -139,7 +145,11 @@ def test_group_write_api_error_skips_verification():
     ):
         result = mgr.add_user_to_group("authelia", ["docker"])
 
-    assert result == {"success": False, "error": {"code": 105}}
+    assert result["success"] is False
+    assert result["error"]["code"] == 105
+    assert result["error"]["api"] == "SYNO.Core.User.Group"
+    assert result["error"]["method"] == "join"
+    assert result["error"]["message"] == "The logged-in session does not have permission"
     assert "verified" not in result
     assert post.call_count == 1
     assert get.call_count == 0

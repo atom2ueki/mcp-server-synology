@@ -1,0 +1,236 @@
+# src/iscsi/synology_iscsi.py - Synology SAN Manager (iSCSI LUN + target) management
+#
+# Wraps SYNO.Core.ISCSI.LUN and SYNO.Core.ISCSI.Target, both v1 on entry.cgi.
+#
+# Every call shape here was established against a live RS1221+ running DSM
+# 7.3.2-86009 Update 4 on 2026-09-08, not carried over from another DSM
+# generation: the OpenStack Cinder driver and jparklab/synology-csi were the
+# starting point, and both differ from what this DSM actually accepts.
+
+import json
+from typing import Any, Dict, List, Optional
+
+from utils.synology_api import SynologyAPIClient
+
+LUN_API = "SYNO.Core.ISCSI.LUN"
+TARGET_API = "SYNO.Core.ISCSI.Target"
+
+# LUN types accepted by DSM 7.3.2 on a btrfs volume, verified by creating one of
+# each and reading the type back:
+#
+#   BLUN -> 263 (type_str "BLUN")   the SAN Manager default on btrfs, thin
+#   THIN -> 7                       legacy thin
+#   ADV  -> 15                      legacy "advanced" (thin + snapshot support)
+#   FILE -> 3                       regular-file LUN
+#
+# BLUN_THICK, BLUN_SINK and ADV_THICK are recognised names but were refused with
+# 18990503 on this btrfs volume; THICK, VMWARE and RAW were refused with 18990500
+# as unrecognised. Nothing is validated client-side beyond the friendly aliases
+# below - this server may be pointed at another DSM or an ext4 volume where a
+# different set is legal, and a hard-coded allowlist would then be wrong in a way
+# the caller could not override.
+LUN_TYPE_ALIASES = {
+    "thin": "BLUN",
+    "btrfs": "BLUN",
+    "advanced": "ADV",
+    "adv": "ADV",
+    "file": "FILE",
+    "legacy_thin": "THIN",
+}
+DEFAULT_LUN_TYPE = "BLUN"
+
+# auth_type as SAN Manager stores it, confirmed by creating a target with each
+# and reading `auth_type` back from Target/get.
+AUTH_NONE = 0
+AUTH_CHAP = 1
+
+DEFAULT_IQN_PREFIX = "iqn.2000-01.com.synology"
+
+
+def _json_str(value: Any) -> str:
+    """Render a value as a JSON string literal, i.e. with its quote characters.
+
+    SYNO.Core.ISCSI.Target parses `target_id` as JSON, so it wants the three
+    characters `"1"` and not the one character `1`. Sending the bare form fails
+    with 18990710 on get, set and delete - the same code DSM returns for a
+    target that does not exist, which is what makes it so hard to diagnose from
+    the outside. SYNO.Core.ISCSI.LUN is tolerant of a bare `uuid`, so this is
+    applied only where it was shown to be required.
+    """
+    return json.dumps(str(value))
+
+
+class SynologyISCSI:
+    """Manage iSCSI LUNs and targets (DSM SAN Manager) on a Synology NAS."""
+
+    def __init__(
+        self,
+        base_url: str,
+        session_id: str,
+        verify_ssl: bool = False,
+        syno_token: Optional[str] = None,
+        api_client: Optional[SynologyAPIClient] = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.session_id = session_id
+        self.verify_ssl = verify_ssl
+        self.syno_token = syno_token
+        # `api_client` lets a caller that already holds a client for this NAS
+        # share it rather than opening a second one. SynologyHealth uses it so
+        # that its lun_* methods and this module are one implementation with one
+        # session, instead of two that can drift apart.
+        self._api = api_client or SynologyAPIClient(
+            base_url, session_id, verify_ssl, syno_token=syno_token
+        )
+
+    def _get(self, api: str, method: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        return self._api.get(api, method, 1, params)
+
+    def _post(self, api: str, method: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        return self._api.post(api, method, 1, params)
+
+    # ------------------------------------------------------------------
+    # LUNs
+    # ------------------------------------------------------------------
+
+    def lun_list(self, additional: Optional[List[str]] = None) -> Dict[str, Any]:
+        """List iSCSI LUNs.
+
+        `additional` names optional fields to include. DSM ignores a field it
+        does not recognise rather than erroring, so asking for the wrong name
+        silently returns less data - `status` and `is_mapped` are the two that
+        were confirmed to work here. Note that `mapped_targets` is NOT one of
+        them, despite reading like the obvious name; to see what a LUN is
+        attached to, read `mapped_luns` from `target_list` instead.
+        """
+        params = {"additional": json.dumps(additional or ["status", "is_mapped"])}
+        return self._get(LUN_API, "list", params)
+
+    def lun_get(self, name_or_uuid: str) -> Dict[str, Any]:
+        """Get a single LUN by name or UUID.
+
+        Resolved client-side from the list so that a name works as well as a
+        UUID; SYNO.Core.ISCSI.LUN/get takes a UUID only.
+        """
+        result = self.lun_list()
+        if not result.get("success"):
+            return result
+        luns = result.get("data", {}).get("luns", []) or []
+        for lun in luns:
+            if name_or_uuid in (lun.get("name"), lun.get("uuid")):
+                return {"success": True, "data": lun}
+        return {
+            "success": False,
+            "error": {
+                "code": "lun_not_found",
+                "message": f"No iSCSI LUN found matching '{name_or_uuid}'",
+                "api": LUN_API,
+                "method": "get",
+            },
+        }
+
+    def lun_create(
+        self,
+        name: str,
+        location: str,
+        size: int,
+        lun_type: str = DEFAULT_LUN_TYPE,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a LUN. `size` is in bytes; `location` is a volume path (/volume2).
+
+        Returns {"success": true, "data": {"lun_id": N, "uuid": "..."}}.
+        """
+        resolved_type = LUN_TYPE_ALIASES.get(lun_type.strip().lower(), lun_type.strip())
+        params = {
+            "name": name,
+            "type": resolved_type,
+            "location": location,
+            "size": str(int(size)),
+        }
+        if description is not None:
+            params["description"] = description
+        return self._post(LUN_API, "create", params)
+
+    def lun_delete(self, uuid: str) -> Dict[str, Any]:
+        """Delete a LUN by UUID. Destroys the LUN and everything stored on it."""
+        return self._post(LUN_API, "delete", {"uuid": uuid})
+
+    def lun_map_targets(self, uuid: str, target_ids: List[Any]) -> Dict[str, Any]:
+        """Map a LUN to one or more targets."""
+        return self._post(
+            LUN_API,
+            "map_target",
+            {"uuid": uuid, "target_ids": json.dumps([str(t) for t in target_ids])},
+        )
+
+    def lun_unmap_targets(self, uuid: str, target_ids: List[Any]) -> Dict[str, Any]:
+        """Unmap a LUN from one or more targets."""
+        return self._post(
+            LUN_API,
+            "unmap_target",
+            {"uuid": uuid, "target_ids": json.dumps([str(t) for t in target_ids])},
+        )
+
+    # ------------------------------------------------------------------
+    # Targets
+    # ------------------------------------------------------------------
+
+    def target_list(self, additional: Optional[List[str]] = None) -> Dict[str, Any]:
+        """List iSCSI targets, including the LUNs mapped to each.
+
+        `mapped_lun` (singular) is the field name that populates `mapped_luns`
+        in the response - `mapped_luns`, `luns` and `mapping` are all ignored.
+        """
+        params = {"additional": json.dumps(additional or ["mapped_lun"])}
+        return self._get(TARGET_API, "list", params)
+
+    def target_get(self, target_id: Any) -> Dict[str, Any]:
+        """Get a single target by numeric target_id."""
+        return self._get(TARGET_API, "get", {"target_id": _json_str(target_id)})
+
+    def target_create(
+        self,
+        name: str,
+        iqn: Optional[str] = None,
+        chap_user: Optional[str] = None,
+        chap_password: Optional[str] = None,
+        max_sessions: int = 0,
+    ) -> Dict[str, Any]:
+        """Create an iSCSI target.
+
+        CHAP is off unless BOTH `chap_user` and `chap_password` are given; a
+        target created with auth_type 0 accepts any initiator that can reach it.
+        Half a credential is refused rather than quietly downgraded to no
+        authentication, which would leave the target open while the caller
+        believed it was protected.
+
+        `max_sessions` 0 means DSM's default (no explicit cap).
+        """
+        if bool(chap_user) != bool(chap_password):
+            return {
+                "success": False,
+                "error": {
+                    "code": "chap_incomplete",
+                    "message": (
+                        "CHAP needs both chap_user and chap_password. Supply both to "
+                        "enable CHAP, or neither for a target with no authentication."
+                    ),
+                    "api": TARGET_API,
+                    "method": "create",
+                },
+            }
+        use_chap = bool(chap_user)
+        params = {
+            "name": name,
+            "iqn": iqn or f"{DEFAULT_IQN_PREFIX}:{name}",
+            "auth_type": str(AUTH_CHAP if use_chap else AUTH_NONE),
+            "user": chap_user or "",
+            "password": chap_password or "",
+            "max_sessions": str(int(max_sessions)),
+        }
+        return self._post(TARGET_API, "create", params)
+
+    def target_delete(self, target_id: Any) -> Dict[str, Any]:
+        """Delete a target by numeric target_id. Any mapped LUNs survive."""
+        return self._post(TARGET_API, "delete", {"target_id": _json_str(target_id)})
