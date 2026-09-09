@@ -39,12 +39,69 @@ LUN_TYPE_ALIASES = {
 }
 DEFAULT_LUN_TYPE = "BLUN"
 
+# DSM type names seen to be recognised by SYNO.Core.ISCSI.LUN/create, whether or
+# not this particular volume accepts them. Held separately from the aliases
+# because the two collide: "THIN" is a real DSM type (7) and "thin" is the
+# friendly name for BLUN (263). Lowercasing before the alias lookup silently
+# turned an explicit request for type 7 into type 263.
+DSM_LUN_TYPES = frozenset(
+    {
+        "BLUN",
+        "BLUN_THICK",
+        "BLUN_SINK",
+        "BLUN_THICK_SINK",
+        "BLOCK",
+        "FILE",
+        "THIN",
+        "ADV",
+        "ADV_THICK",
+        "SINK",
+        "CINDER",
+        "CINDER_BLUN",
+        "CINDER_BLUN_THICK",
+    }
+)
+
+
+def _resolve_lun_type(lun_type: str) -> str:
+    """Map a caller's LUN type onto a DSM type name.
+
+    An exact DSM name is passed through untouched, and that check comes FIRST:
+    otherwise `THIN` (DSM type 7) would be lowercased into the `thin` alias and
+    silently become `BLUN` (type 263). Anything else is looked up
+    case-insensitively in the friendly aliases, and an unknown value is
+    forwarded as given so a DSM or volume with a type this list has never seen
+    is still reachable.
+    """
+    given = lun_type.strip()
+    if given in DSM_LUN_TYPES:
+        return given
+    return LUN_TYPE_ALIASES.get(given.lower(), given)
+
 # auth_type as SAN Manager stores it, confirmed by creating a target with each
 # and reading `auth_type` back from Target/get.
 AUTH_NONE = 0
 AUTH_CHAP = 1
 
 DEFAULT_IQN_PREFIX = "iqn.2000-01.com.synology"
+
+
+def _empty_selection(method: str, field: str) -> Dict[str, Any]:
+    """Refuse an operation whose target list is empty.
+
+    `all([])` is True, so an empty list would otherwise make no request at all
+    and report success - a check that passes precisely because it examined
+    nothing.
+    """
+    return {
+        "success": False,
+        "error": {
+            "code": "empty_selection",
+            "message": f"{field} was empty, so nothing was changed. Name at least one.",
+            "api": LUN_API,
+            "method": method,
+        },
+    }
 
 
 def _json_str(value: Any) -> str:
@@ -141,7 +198,7 @@ class SynologyISCSI:
 
         Returns {"success": true, "data": {"lun_id": N, "uuid": "..."}}.
         """
-        resolved_type = LUN_TYPE_ALIASES.get(lun_type.strip().lower(), lun_type.strip())
+        resolved_type = _resolve_lun_type(lun_type)
         params = {
             "name": name,
             "type": resolved_type,
@@ -158,6 +215,8 @@ class SynologyISCSI:
 
     def lun_map_targets(self, uuid: str, target_ids: List[Any]) -> Dict[str, Any]:
         """Map a LUN to one or more targets."""
+        if not target_ids:
+            return _empty_selection("map_target", "target_ids")
         return self._post(
             LUN_API,
             "map_target",
@@ -166,6 +225,8 @@ class SynologyISCSI:
 
     def lun_unmap_targets(self, uuid: str, target_ids: List[Any]) -> Dict[str, Any]:
         """Unmap a LUN from one or more targets."""
+        if not target_ids:
+            return _empty_selection("unmap_target", "target_ids")
         return self._post(
             LUN_API,
             "unmap_target",

@@ -12,6 +12,8 @@ DSM 7.3.2-86009 Update 4, not to a guess about the API:
     returns a bare number.
 """
 
+import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -253,8 +255,18 @@ class TestSessionRecovery:
         expired = {"success": False, "error": {"code": code}}
         recovered = {"success": True, "data": {"luns": []}}
 
+        # Credentials are captured AT THE MOMENT of each call, not read off the
+        # client afterwards. Asserting only the final state would still pass if
+        # the refresh were moved after the retry - i.e. if the retry went out
+        # with the same dead SID that just failed, which is the whole bug.
+        seen = []
+
+        def record(*_args, **_kwargs):
+            seen.append((client.session_id, client.syno_token))
+            return expired if len(seen) == 1 else recovered
+
         with (
-            patch.object(client, "_do_request", side_effect=[expired, recovered]) as do,
+            patch.object(client, "_do_request", side_effect=record) as do,
             patch(
                 "utils.synology_api._try_relogin", return_value=("fresh-sid", "new")
             ) as relogin,
@@ -264,6 +276,8 @@ class TestSessionRecovery:
         assert result["success"] is True
         assert do.call_count == 2
         relogin.assert_called_once_with("https://nas.example", "stale-sid")
+        assert seen[0] == ("stale-sid", "old"), "first attempt should use the original session"
+        assert seen[1] == ("fresh-sid", "new"), "retry must use the refreshed session, not the dead one"
         assert client.session_id == "fresh-sid"
         assert client.syno_token == "new"
 
@@ -333,3 +347,168 @@ def test_api_client_can_be_shared():
     shared = MagicMock()
     iscsi = SynologyISCSI("https://nas.example", "sid", api_client=shared)
     assert iscsi._api is shared
+
+
+# ---------------------------------------------------------------------------
+# Regressions found in review (2026-09-08)
+# ---------------------------------------------------------------------------
+
+
+class TestLunTypeCollision:
+    """`THIN` is a DSM type (7); `thin` is the friendly name for BLUN (263)."""
+
+    def test_uppercase_dsm_thin_is_not_rewritten_to_blun(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post", return_value={"success": True}) as mock:
+            iscsi.lun_create("dev", "/volume2", 1, lun_type="THIN")
+        assert mock.call_args[0][3]["type"] == "THIN"
+
+    def test_lowercase_thin_is_still_the_friendly_alias(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post", return_value={"success": True}) as mock:
+            iscsi.lun_create("dev", "/volume2", 1, lun_type="thin")
+        assert mock.call_args[0][3]["type"] == "BLUN"
+
+    @pytest.mark.parametrize("dsm_type", ["ADV", "FILE", "BLUN", "BLUN_THICK", "CINDER"])
+    def test_every_known_dsm_name_survives_verbatim(self, dsm_type):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post", return_value={"success": True}) as mock:
+            iscsi.lun_create("dev", "/volume2", 1, lun_type=dsm_type)
+        assert mock.call_args[0][3]["type"] == dsm_type
+
+
+class TestEmptySelection:
+    """all([]) is True, so an empty list must be refused, not reported as done."""
+
+    def test_map_with_no_targets_makes_no_request(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post") as mock:
+            result = iscsi.lun_map_targets("uuid-1", [])
+        assert result["success"] is False
+        assert result["error"]["code"] == "empty_selection"
+        mock.assert_not_called()
+
+    def test_unmap_with_no_targets_makes_no_request(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post") as mock:
+            result = iscsi.lun_unmap_targets("uuid-1", [])
+        assert result["success"] is False
+        mock.assert_not_called()
+
+
+class TestDestructiveGating:
+    """The confirm gate must be a gate, not a formality.
+
+    pytest-asyncio is not installed in this venv (four pre-existing tests in
+    test_logout.py fail for that reason), so the coroutine is driven directly
+    rather than through a marker that would silently skip.
+    """
+
+    @staticmethod
+    def _server():
+        from mcp_server import SynologyMCPServer
+
+        return SynologyMCPServer()
+
+    def _call(self, handler, arguments):
+        return json.loads(asyncio.run(handler(arguments))[0].text)
+
+    @pytest.mark.parametrize("confirm", ["false", "true", 1, 0, "", "yes", None, [], "False"])
+    def test_only_boolean_true_confirms(self, confirm):
+        """The JSON string "false" is truthy in Python - it must not confirm a delete."""
+        server = self._server()
+        assert server._is_confirmed({"confirm": confirm}) is (confirm is True)
+
+    def test_boolean_true_confirms(self):
+        assert self._server()._is_confirmed({"confirm": True}) is True
+
+    def test_absent_confirm_does_not_confirm(self):
+        assert self._server()._is_confirmed({}) is False
+
+    def test_string_false_does_not_reach_the_nas(self):
+        server = self._server()
+        with patch.object(server, "_get_iscsi") as get_iscsi:
+            result = self._call(server._handle_lun_delete, {"uuid": "u", "confirm": "false"})
+        assert result["success"] is False
+        assert result["error"]["code"] == "confirmation_required"
+        get_iscsi.assert_not_called()
+
+    def test_target_delete_gate_is_the_same_gate(self):
+        server = self._server()
+        with patch.object(server, "_get_iscsi") as get_iscsi:
+            result = self._call(server._handle_target_delete, {"target_id": 1, "confirm": "false"})
+        assert result["error"]["code"] == "confirmation_required"
+        get_iscsi.assert_not_called()
+
+
+class TestChapArgumentAliases:
+    """A credential under a name the handler does not read must be refused.
+
+    Discarding it does not fail - it creates a target with no authentication
+    while the caller believes it supplied some.
+    """
+
+    @staticmethod
+    def _server():
+        from mcp_server import SynologyMCPServer
+
+        return SynologyMCPServer()
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"name": "t", "user": "u", "password": "p"},
+            {"name": "t", "username": "u", "password": "p"},
+            {"name": "t", "password": "p"},
+            {"name": "t", "chap_username": "u", "chap_password": "p"},
+            {"name": "t", "secret": "p"},
+        ],
+    )
+    def test_misnamed_credentials_create_nothing(self, arguments):
+        server = self._server()
+        with patch.object(server, "_get_iscsi") as get_iscsi:
+            result = json.loads(
+                asyncio.run(server._handle_target_create(arguments))[0].text
+            )
+        assert result["success"] is False
+        assert result["error"]["code"] == "unknown_argument"
+        get_iscsi.assert_not_called()
+
+    def test_correctly_named_credentials_are_accepted(self):
+        server = self._server()
+        iscsi = MagicMock()
+        iscsi.target_create.return_value = {"success": True, "data": {"target_id": 1}}
+        with (
+            patch.object(server, "_get_base_url", return_value="https://nas.example"),
+            patch.object(server, "_get_iscsi", return_value=iscsi),
+        ):
+            result = json.loads(
+                asyncio.run(
+                    server._handle_target_create(
+                        {"name": "t", "chap_user": "u", "chap_password": "p" * 12}
+                    )
+                )[0].text
+            )
+        assert result["success"] is True
+        assert iscsi.target_create.call_args.kwargs["chap_user"] == "u"
+
+
+class TestEmptyMappingRequest:
+    @staticmethod
+    def _server():
+        from mcp_server import SynologyMCPServer
+
+        return SynologyMCPServer()
+
+    def test_empty_lun_uuids_is_refused_not_reported_as_success(self):
+        server = self._server()
+        with patch.object(server, "_get_base_url", return_value="https://nas.example"):
+            with patch.object(server, "_get_iscsi") as get_iscsi:
+                result = json.loads(
+                    asyncio.run(
+                        server._handle_target_map_lun({"target_id": 1, "lun_uuids": []})
+                    )[0].text
+                )
+        assert result["success"] is False
+        assert result["error"]["code"] == "empty_selection"
+        get_iscsi.assert_not_called()

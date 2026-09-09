@@ -1154,6 +1154,18 @@ class SynologyMCPServer:
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     @staticmethod
+    def _is_confirmed(arguments: dict) -> bool:
+        """True only for a real boolean true.
+
+        Not `arguments.get("confirm")`: the JSON string "false" is truthy in
+        Python, and nothing between the caller and here validates an argument
+        against the tool's declared schema. A client that stringifies its
+        booleans would have had every destructive guard wave it through while
+        appearing to decline.
+        """
+        return arguments.get("confirm") is True
+
+    @staticmethod
     def _refuse_unconfirmed(action: str) -> list[types.TextContent]:
         """Response for a destructive tool called without confirm=true.
 
@@ -1202,7 +1214,7 @@ class SynologyMCPServer:
 
     async def _handle_lun_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting an iSCSI LUN. Refuses without confirm=true."""
-        if not arguments.get("confirm"):
+        if not self._is_confirmed(arguments):
             return self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
@@ -1216,8 +1228,40 @@ class SynologyMCPServer:
         result = iscsi.target_get(arguments["target_id"])
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
+    #: Names a caller might reasonably reach for when it means chap_user /
+    #: chap_password. Nothing validates arguments against the declared schema in
+    #: this server, so an unrecognised one is silently dropped - and dropping a
+    #: credential here does not fail, it creates a target with NO authentication
+    #: while the caller believes it supplied some. Refused by name instead.
+    _CHAP_ARG_ALIASES = frozenset(
+        {"user", "username", "password", "passwd", "chap", "chap_username", "secret"}
+    )
+
     async def _handle_target_create(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating an iSCSI target."""
+        misnamed = sorted(self._CHAP_ARG_ALIASES.intersection(arguments))
+        if misnamed:
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "success": False,
+                            "error": {
+                                "code": "unknown_argument",
+                                "message": (
+                                    f"No target was created. {', '.join(misnamed)} "
+                                    "is not read by this tool; CHAP credentials must be "
+                                    "given as chap_user and chap_password. Creating the "
+                                    "target while ignoring them would have left it "
+                                    "unauthenticated."
+                                ),
+                            },
+                        },
+                        indent=2,
+                    ),
+                )
+            ]
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         result = iscsi.target_create(
@@ -1231,7 +1275,7 @@ class SynologyMCPServer:
 
     async def _handle_target_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting an iSCSI target. Refuses without confirm=true."""
-        if not arguments.get("confirm"):
+        if not self._is_confirmed(arguments):
             return self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
@@ -1254,10 +1298,33 @@ class SynologyMCPServer:
         call per LUN. Each result is reported separately rather than collapsed
         into a single boolean, so a partial failure names the LUN that failed.
         """
-        base_url = self._get_base_url(arguments)
-        iscsi = self._get_iscsi(base_url)
         target_id = arguments["target_id"]
         lun_uuids = arguments["lun_uuids"]
+        # Checked before resolving a session: an empty request is refused on its
+        # arguments alone, so it cannot depend on being logged in first.
+        if not lun_uuids:
+            # all([]) is True, so this would otherwise touch the NAS not at all
+            # and report success.
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "success": False,
+                            "error": {
+                                "code": "empty_selection",
+                                "message": (
+                                    "lun_uuids was empty, so nothing was changed. "
+                                    "Name at least one LUN."
+                                ),
+                            },
+                        },
+                        indent=2,
+                    ),
+                )
+            ]
+        base_url = self._get_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
         results = []
         for uuid in lun_uuids:
             call = iscsi.lun_unmap_targets if unmap else iscsi.lun_map_targets

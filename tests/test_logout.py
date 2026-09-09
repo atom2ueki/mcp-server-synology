@@ -7,14 +7,36 @@ import pytest
 BASE_URL = "http://nas.example.com:5000/"
 
 # Every per-domain instance cache the server keeps keyed by base_url.
-INSTANCE_DICTS = (
-    "filestation_instances",
-    "downloadstation_instances",
-    "health_instances",
-    "container_instances",
-    "nfs_instances",
-    "usermgr_instances",
-)
+#
+# DISCOVERED, not listed. This was a hardcoded tuple, and when iscsi_instances
+# was added it was not added here - so the new cache was neither populated nor
+# asserted, and dropping it from eviction would have left every test in this
+# file green. That is the vacuous-check anti-pattern: a check whose scope
+# excludes the thing it is meant to check always passes.
+#
+# Deriving the list from _service_instance_dicts() closes that, but only half of
+# it: it cannot catch a cache that was never registered there in the first place.
+# test_every_instance_cache_is_registered_for_eviction is the other half, and it
+# deliberately does NOT use this function.
+# Caches deliberately NOT evicted on logout, each with the reason. An exemption
+# removes something from the check above, so it is named one at a time rather
+# than widened into a pattern.
+NOT_EVICTED_ON_LOGOUT = {
+    # Holds the SynologyAuth for this base_url, which is also what
+    # utils.synology_api._try_relogin looks up to recover an expired session.
+    # Dropping it on logout would break transparent re-auth, and logging in
+    # again reuses this instance rather than opening a second registration.
+    "auth_instances",
+}
+
+
+def _instance_dict_attrs(server):
+    registered = {id(d) for d in server._service_instance_dicts()}
+    return tuple(
+        attr
+        for attr in vars(server)
+        if attr.endswith("_instances") and id(getattr(server, attr)) in registered
+    )
 
 
 def _server_with_active_session(logout_result):
@@ -30,7 +52,7 @@ def _server_with_active_session(logout_result):
     server.auth_instances[BASE_URL] = auth
 
     # Populate each service cache with a sentinel so we can assert it gets evicted.
-    for attr in INSTANCE_DICTS:
+    for attr in _instance_dict_attrs(server):
         getattr(server, attr)[BASE_URL] = object()
 
     return server
@@ -39,7 +61,7 @@ def _server_with_active_session(logout_result):
 def _assert_fully_evicted(server):
     assert BASE_URL not in server.sessions
     assert BASE_URL not in server.syno_tokens
-    for attr in INSTANCE_DICTS:
+    for attr in _instance_dict_attrs(server):
         assert BASE_URL not in getattr(server, attr), f"{attr} still holds the logged-out session"
 
 
@@ -67,3 +89,29 @@ async def test_expired_session_logout_clears_all_service_instance_caches(error_c
     await server._handle_logout({"base_url": BASE_URL})
 
     _assert_fully_evicted(server)
+
+
+def test_every_instance_cache_is_registered_for_eviction():
+    """Every `*_instances` cache on the server must be in _service_instance_dicts().
+
+    Deliberately built from `vars(server)` rather than from
+    _service_instance_dicts(), because a cache that was never registered is
+    exactly what the derived scope above cannot see. Adding a new service and
+    forgetting this one line leaks a stale SID into the next session on that NAS.
+    """
+    from mcp_server import SynologyMCPServer
+
+    server = SynologyMCPServer()
+    registered = {id(d) for d in server._service_instance_dicts()}
+    unregistered = [
+        attr
+        for attr, value in vars(server).items()
+        if attr.endswith("_instances")
+        and isinstance(value, dict)
+        and attr not in NOT_EVICTED_ON_LOGOUT
+        and id(value) not in registered
+    ]
+    assert not unregistered, (
+        f"instance cache(s) not evicted on logout: {unregistered}. "
+        "Add them to SynologyMCPServer._service_instance_dicts()."
+    )
