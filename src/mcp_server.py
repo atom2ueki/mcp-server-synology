@@ -1249,19 +1249,42 @@ class SynologyMCPServer:
         except Exception:
             pass
 
+        # The key comes from caller-supplied arguments, so it is NOT a trusted
+        # set: a caller naming a different nas_name each time would grow this
+        # dict without bound, and every one of those names fails to resolve.
+        # A lock is therefore kept only for a key that actually resolved.
         key = arguments.get("nas_name") or arguments.get("base_url") or "\x00default"
         lock = self._login_locks.get(key)
+        created = lock is None
         if lock is None:
             lock = asyncio.Lock()
             self._login_locks[key] = lock
 
-        async with lock:
-            # Re-check: another handler may have logged in while we waited.
-            try:
-                return self._get_base_url(arguments, allow_login=False)
-            except Exception:
-                pass
-            return await asyncio.to_thread(self._get_base_url, arguments)
+        resolved = False
+        try:
+            async with lock:
+                # Re-check: another handler may have logged in while we waited.
+                try:
+                    return self._get_base_url(arguments, allow_login=False)
+                except Exception:
+                    pass
+                base_url = await asyncio.to_thread(self._get_base_url, arguments)
+                resolved = True
+                return base_url
+        finally:
+            # Drop a lock this call created for a key that did not resolve.
+            # `lock.locked()` is the test for "somebody else is still using it":
+            # a coroutine queued behind us has acquired it by the time this
+            # runs, and removing it then would let a third caller build a
+            # SECOND lock for the same key and log in concurrently -- which is
+            # the bug this lock exists to prevent.
+            if (
+                created
+                and not resolved
+                and not lock.locked()
+                and self._login_locks.get(key) is lock
+            ):
+                del self._login_locks[key]
 
     async def _handle_iscsi_call(
         self, arguments: dict, method_name: str
@@ -1317,7 +1340,7 @@ class SynologyMCPServer:
 
     async def _handle_lun_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting details for a single iSCSI LUN."""
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         name = arguments["name"]
         iscsi = self._get_iscsi(base_url)
         return self._emit(await asyncio.to_thread(iscsi.lun_get, name))

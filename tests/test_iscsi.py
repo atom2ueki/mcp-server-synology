@@ -1122,3 +1122,191 @@ class TestLazyLoginIsAlsoOffloaded:
 
         asyncio.run(main())
         assert set(server._login_locks) == {"nas1", "nas2"}
+
+
+class TestEveryIscsiHandlerResolvesOffLoop:
+    """No iSCSI handler may resolve its NAS synchronously.
+
+    This exists because the edit that introduced `_resolve_base_url` was
+    pattern-based: it rewrote `base_url = self._get_base_url(arguments)` only
+    where `iscsi = self._get_iscsi(base_url)` was the very next line.
+    `_handle_lun_get` has `name = arguments["name"]` in between, so it was
+    silently skipped -- and the edit reported the seven it changed, never the
+    one it missed. `synology_lun_get` therefore kept blocking the event loop on
+    a lazy login, in a change whose whole subject was not doing that.
+
+    So the scope here is DISCOVERED from the tool registry rather than listed.
+    A ninth iSCSI tool added tomorrow is covered the day it is registered; a
+    hardcoded list would be one more thing to remember to widen.
+    """
+
+    #: Prefixes identifying the tools this module owns. Deliberately a prefix
+    #: match on the REGISTRY, not a list of handler names.
+    ISCSI_TOOL_PREFIXES = ("synology_lun_", "synology_target_")
+
+    @staticmethod
+    def _server():
+        from mcp_server import SynologyMCPServer
+
+        return SynologyMCPServer()
+
+    def _iscsi_handlers(self):
+        """Source of each iSCSI handler, plus one level of delegation.
+
+        `_handle_target_map_lun` and its unmap twin are one-line wrappers around
+        `_map_luns`, which is where the resolution actually happens, so reading
+        the handler alone reports them as resolving nothing. The expansion is
+        deliberately ONE level: enough for the delegation that exists, and
+        honest about not being a call-graph analysis. A handler that hides its
+        resolution two levels down would be missed, and would deserve the
+        failure this test would then not give.
+        """
+        import functools
+        import inspect
+        import re
+
+        server = self._server()
+        found = {}
+        for name, (_tool, handler) in server._tool_registry.items():
+            if not name.startswith(self.ISCSI_TOOL_PREFIXES):
+                continue
+            fn = handler
+            while isinstance(fn, functools.partial):
+                fn = fn.func
+            src = inspect.getsource(fn)
+            for called in set(re.findall(r"self\.(_[A-Za-z0-9_]+)\(", src)):
+                # `_resolve_base_url` is the sanctioned wrapper: calling
+                # `_get_base_url` is its whole job, and inlining it here would
+                # make every handler look like an offender.
+                if called == "_resolve_base_url":
+                    continue
+                target = getattr(type(server), called, None)
+                if callable(target):
+                    try:
+                        src += "\n" + inspect.getsource(target)
+                    except (OSError, TypeError):
+                        pass
+            found[name] = src
+        return found
+
+    def test_the_registry_actually_yields_the_iscsi_tools(self):
+        """Guard the guard: a prefix that matches nothing would pass vacuously."""
+        handlers = self._iscsi_handlers()
+        assert len(handlers) >= 10, f"only found {sorted(handlers)}"
+        for expected in (
+            "synology_lun_list",
+            "synology_lun_get",
+            "synology_lun_create",
+            "synology_lun_delete",
+            "synology_target_list",
+            "synology_target_get",
+            "synology_target_create",
+            "synology_target_delete",
+            "synology_target_map_lun",
+            "synology_target_unmap_lun",
+        ):
+            assert expected in handlers, f"{expected} is not registered"
+
+    def test_no_iscsi_handler_calls_get_base_url_directly(self):
+        offenders = [
+            name
+            for name, src in self._iscsi_handlers().items()
+            if "self._get_base_url(" in src
+        ]
+        assert not offenders, (
+            f"{offenders} resolve the NAS synchronously, so a lazy DSM login "
+            "runs on the event loop. Use `await self._resolve_base_url(...)`."
+        )
+
+    def test_every_iscsi_handler_resolves_through_the_async_path(self):
+        """The positive half: absence of the bad call is not presence of the good one."""
+        missing = [
+            name
+            for name, src in self._iscsi_handlers().items()
+            if "_resolve_base_url(" not in src
+        ]
+        assert not missing, f"{missing} never resolve a base_url at all"
+
+
+class TestLoginLockIsNotAnUnboundedCache:
+    """The lock key is caller-supplied, so it is not a trusted set.
+
+    A caller naming a different nas_name on every call would otherwise grow
+    `_login_locks` without bound -- and every one of those names fails to
+    resolve, so nothing would ever remove them.
+    """
+
+    @staticmethod
+    def _server():
+        from mcp_server import SynologyMCPServer
+
+        return SynologyMCPServer()
+
+    def test_unresolvable_names_leave_no_lock_behind(self):
+        server = self._server()
+
+        def always_fails(arguments, *, allow_login=True):
+            raise Exception("NAS 'whatever' not found")
+
+        async def main():
+            with patch.object(server, "_get_base_url", side_effect=always_fails):
+                for i in range(50):
+                    with pytest.raises(Exception):
+                        await server._resolve_base_url({"nas_name": f"nope-{i}"})
+
+        asyncio.run(main())
+        assert server._login_locks == {}, (
+            f"{len(server._login_locks)} lock(s) retained for names that never "
+            "resolved; the dict grows without bound on caller-supplied keys"
+        )
+
+    def test_a_resolving_name_keeps_its_lock(self):
+        """The cleanup must not throw away the lock that does the serialising."""
+        server = self._server()
+
+        def resolves(arguments, *, allow_login=True):
+            if not allow_login:
+                raise Exception("no session")
+            return "https://nas.example"
+
+        async def main():
+            with patch.object(server, "_get_base_url", side_effect=resolves):
+                await server._resolve_base_url({"nas_name": "nas1"})
+
+        asyncio.run(main())
+        assert set(server._login_locks) == {"nas1"}
+
+    def test_cleanup_does_not_strand_a_waiting_caller(self):
+        """A failing call must not delete a lock another caller is queued on.
+
+        If it did, a third caller would build a SECOND lock for the same key and
+        log in concurrently -- the exact race the lock exists to prevent.
+        """
+        import time
+
+        server = self._server()
+        logins = []
+
+        def slow_then_fail(arguments, *, allow_login=True):
+            if not allow_login:
+                raise Exception("no session")
+            logins.append(arguments.get("nas_name"))
+            time.sleep(0.05)
+            raise Exception("login refused")
+
+        async def main():
+            with patch.object(server, "_get_base_url", side_effect=slow_then_fail):
+                results = await asyncio.gather(
+                    server._resolve_base_url({"nas_name": "nas1"}),
+                    server._resolve_base_url({"nas_name": "nas1"}),
+                    server._resolve_base_url({"nas_name": "nas1"}),
+                    return_exceptions=True,
+                )
+            return results
+
+        results = asyncio.run(main())
+        assert all(isinstance(r, Exception) for r in results)
+        # Serialised, so the logins are sequential rather than three at once.
+        assert len(logins) == 3
+        # And nothing is retained once they have all finished failing.
+        assert server._login_locks == {}
