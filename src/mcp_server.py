@@ -1226,7 +1226,7 @@ class SynologyMCPServer:
         """Generic handler for no-argument SAN Manager calls."""
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(getattr(iscsi, method_name)())
+        return self._emit(await asyncio.to_thread(getattr(iscsi, method_name)))
 
     @staticmethod
     def _is_confirmed(arguments: dict) -> bool:
@@ -1277,13 +1277,14 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         name = arguments["name"]
         iscsi = self._get_iscsi(base_url)
-        return self._emit(iscsi.lun_get(name))
+        return self._emit(await asyncio.to_thread(iscsi.lun_get, name))
 
     async def _handle_lun_create(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating an iSCSI LUN."""
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        result = iscsi.lun_create(
+        result = await asyncio.to_thread(
+            iscsi.lun_create,
             name=arguments["name"],
             location=arguments["location"],
             size=arguments["size"],
@@ -1298,13 +1299,15 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(iscsi.lun_delete(arguments["uuid"]))
+        return self._emit(await asyncio.to_thread(iscsi.lun_delete, arguments["uuid"]))
 
     async def _handle_target_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting a single iSCSI target."""
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(iscsi.target_get(arguments["target_id"]))
+        return self._emit(
+            await asyncio.to_thread(iscsi.target_get, arguments["target_id"])
+        )
 
     async def _handle_target_create(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating an iSCSI target.
@@ -1317,7 +1320,8 @@ class SynologyMCPServer:
         """
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        result = iscsi.target_create(
+        result = await asyncio.to_thread(
+            iscsi.target_create,
             name=arguments["name"],
             iqn=arguments.get("iqn"),
             chap_user=arguments.get("chap_user"),
@@ -1332,7 +1336,9 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(iscsi.target_delete(arguments["target_id"]))
+        return self._emit(
+            await asyncio.to_thread(iscsi.target_delete, arguments["target_id"])
+        )
 
     async def _handle_target_map_lun(self, arguments: dict) -> list[types.TextContent]:
         """Handle mapping LUNs to an iSCSI target."""
@@ -1359,6 +1365,10 @@ class SynologyMCPServer:
         uuid and a list of target_ids), so a request naming several LUNs is one
         call per LUN. Each result is reported separately rather than collapsed
         into a single boolean, so a partial failure names the LUN that failed.
+
+        The calls stay SEQUENTIAL -- they mutate one target's mapping table, and
+        issuing them together invites DSM to interleave them -- but each is
+        offloaded, so N LUNs no longer hold the event loop for N round trips.
         """
         target_id = arguments["target_id"]
         # Shape is checked before a session is resolved, so a malformed request
@@ -1392,7 +1402,7 @@ class SynologyMCPServer:
         results = []
         for uuid in lun_uuids:
             call = iscsi.lun_unmap_targets if unmap else iscsi.lun_map_targets
-            outcome = call(uuid, [target_id])
+            outcome = await asyncio.to_thread(call, uuid, [target_id])
             results.append({"lun_uuid": uuid, **outcome})
         payload = {
             "success": all(r.get("success") for r in results),

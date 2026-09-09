@@ -206,7 +206,13 @@ class SynologyAPIClient:
         # single transparent re-auth via the SynologyAuth registered for this
         # base_url. If it succeeds, refresh local SID/token and retry once. If no
         # auth is registered, the original error is returned to the caller.
-        if not result.get("success") and result.get("error", {}).get("code") in SESSION_EXPIRED_CODES:
+        # `error` is read defensively because annotate_error already treats a
+        # non-dict error as possible; assuming a dict here made the two paths
+        # disagree about the same payload, and the disagreement surfaced as an
+        # AttributeError escaping request() instead of a failure dict.
+        error = result.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        if not result.get("success") and code in SESSION_EXPIRED_CODES:
             new_sid, new_token = _try_relogin(self.base_url, attempted_sid)
             if new_sid:
                 self.session_id = new_sid

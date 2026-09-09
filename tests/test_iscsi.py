@@ -27,6 +27,7 @@ from iscsi.synology_iscsi import (  # noqa: E402
     TARGET_API,
     SynologyISCSI,
     _json_str,
+    _resolve_lun_type,
     _uuid_list,
 )
 from mcp_server import ToolFailure  # noqa: E402
@@ -759,3 +760,213 @@ class TestWriteTimeouts:
             post.return_value.raise_for_status = MagicMock()
             client.post(LUN_API, "create", 1, {"name": "x"}, timeout=120)
         assert post.call_args.kwargs["timeout"] == 120
+
+
+# ---------------------------------------------------------------------------
+# Raised in review of the upstream PR (2026-09-09)
+# ---------------------------------------------------------------------------
+
+
+class TestDeclaredButWrongType:
+    """Being declared is not being validated.
+
+    _dispatch_tool refuses an argument that was not DECLARED; it does not check
+    the type of one that was. A non-string `type` or `iqn` reached .strip() and
+    raised AttributeError, which the MCP wrapper renders as a generic
+    "Error executing ..." string - losing the structured invalid_argument
+    response every other bad input here gets.
+    """
+
+    @pytest.mark.parametrize("bad_type", [1, True, None, ["BLUN"], {"t": "BLUN"}])
+    def test_non_string_lun_type_is_refused_structurally(self, bad_type):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post") as mock:
+            result = iscsi.lun_create("dev", "/volume2", 1024, lun_type=bad_type)
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_argument"
+        mock.assert_not_called()
+
+    @pytest.mark.parametrize("bad_iqn", [1, True, ["iqn"], {"iqn": "x"}])
+    def test_non_string_iqn_is_refused_structurally(self, bad_iqn):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post") as mock:
+            result = iscsi.target_create("dev", iqn=bad_iqn)
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_argument"
+        mock.assert_not_called()
+
+    def test_resolve_lun_type_raises_rather_than_attributeerror(self):
+        with pytest.raises(ValueError):
+            _resolve_lun_type(1)
+
+
+class TestNonDictError:
+    """annotate_error tolerates a non-dict `error`; request() must agree.
+
+    They disagreed, and the disagreement did not degrade gracefully: `.get` on a
+    string raised AttributeError out of request(), so the caller got an
+    exception instead of the failure dict this client promises.
+    """
+
+    @pytest.mark.parametrize("weird", ["boom", ["boom"], 42, None])
+    def test_request_survives_a_non_dict_error(self, weird):
+        from utils.synology_api import SynologyAPIClient
+
+        client = SynologyAPIClient("https://nas.example", "sid")
+        with patch.object(
+            client, "_do_request", return_value={"success": False, "error": weird}
+        ):
+            result = client.request(LUN_API, "list")
+        assert result["success"] is False
+
+    def test_annotate_error_and_request_agree(self):
+        from utils.synology_api import annotate_error
+
+        annotated = annotate_error({"success": False, "error": "boom"}, LUN_API, "list", 1)
+        assert annotated["error"]["api"] == LUN_API
+
+
+class TestEventLoopIsNotBlocked:
+    """Synchronous `requests` calls must not run on the event loop.
+
+    These handlers are `async def`, so awaiting them runs their body ON the
+    loop. A LUN create holds it for up to LUN_WRITE_TIMEOUT (120s), during which
+    the server answers nothing at all - not even the MCP protocol. Raising that
+    timeout from 15s to 120s made this materially worse, so it is fixed here
+    rather than left as the pre-existing shape.
+    """
+
+    @staticmethod
+    def _server():
+        from mcp_server import SynologyMCPServer
+
+        return SynologyMCPServer()
+
+    def _ticks_during(self, coro_factory, blocking_call_duration=0.30):
+        """Run a handler whose network call sleeps; count event-loop ticks during it.
+
+        The measurement is the NUMBER OF TICKS the loop managed while the call
+        was in flight, not the largest gap between them. Gap size looked like
+        the obvious metric and is useless here: when the loop is blocked the
+        watchdog does not run at all, so it records nothing during the call, and
+        it is cancelled as soon as the handler returns -- before it can register
+        the one late tick. Measured directly: offloaded gives ~18 ticks with a
+        24ms worst gap; blocking gives 0 ticks and a 19ms worst gap. Asserting
+        on the gap therefore passed in BOTH cases.
+        """
+        import time
+
+        async def main():
+            gaps = []
+
+            async def watchdog():
+                last = time.perf_counter()
+                try:
+                    while True:
+                        await asyncio.sleep(0.01)
+                        now = time.perf_counter()
+                        gaps.append(now - last)
+                        last = now
+                except asyncio.CancelledError:
+                    raise
+
+            task = asyncio.ensure_future(watchdog())
+            # Let it tick before the handler starts, so "ticks during" is
+            # measured against a watchdog already running.
+            while len(gaps) < 2:
+                await asyncio.sleep(0.01)
+            before = len(gaps)
+            try:
+                await coro_factory(blocking_call_duration)
+            finally:
+                during = len(gaps) - before
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            return during
+
+        return asyncio.run(main())
+
+    def _sleeping_iscsi(self, duration_holder):
+        import time
+
+        iscsi = MagicMock()
+
+        def slow(*_a, **_k):
+            time.sleep(duration_holder[0])
+            return {"success": True, "data": {"uuid": "u", "lun_id": 1}}
+
+        for name in (
+            "lun_create",
+            "lun_delete",
+            "lun_list",
+            "lun_get",
+            "target_get",
+            "target_create",
+            "target_delete",
+            "lun_map_targets",
+            "lun_unmap_targets",
+        ):
+            getattr(iscsi, name).side_effect = slow
+        return iscsi
+
+    @pytest.mark.parametrize(
+        "handler_name,arguments",
+        [
+            ("_handle_lun_create", {"name": "n", "location": "/volume2", "size": 1024}),
+            ("_handle_lun_delete", {"uuid": "u", "confirm": True}),
+            ("_handle_target_create", {"name": "t"}),
+            ("_handle_target_delete", {"target_id": 1, "confirm": True}),
+            ("_handle_target_map_lun", {"target_id": 1, "lun_uuids": ["a"]}),
+            (
+                "_handle_target_unmap_lun",
+                {"target_id": 1, "lun_uuids": ["a"], "confirm": True},
+            ),
+        ],
+    )
+    def test_handler_does_not_hold_the_event_loop(self, handler_name, arguments):
+        server = self._server()
+        duration = [0.30]
+        iscsi = self._sleeping_iscsi(duration)
+
+        async def call(_d):
+            with (
+                patch.object(server, "_get_base_url", return_value="https://nas.example"),
+                patch.object(server, "_get_iscsi", return_value=iscsi),
+            ):
+                return await getattr(server, handler_name)(arguments)
+
+        ticks = self._ticks_during(call, duration[0])
+        # The call sleeps 300ms against a 10ms tick. Offloaded, the loop ticks
+        # ~18 times; blocking, exactly 0. Five is far below the former and far
+        # above the latter, so it does not depend on machine speed.
+        assert ticks >= 5, (
+            f"{handler_name} held the event loop: only {ticks} tick(s) during a "
+            f"{duration[0] * 1000:.0f}ms call. Its synchronous request is not offloaded."
+        )
+
+    def test_mapping_stays_sequential(self):
+        """Offloading must not turn one target's mapping into a race."""
+        server = self._server()
+        order = []
+        iscsi = MagicMock()
+
+        def record(uuid, _targets):
+            order.append(("start", uuid))
+            import time
+
+            time.sleep(0.02)
+            order.append(("end", uuid))
+            return {"success": True}
+
+        iscsi.lun_map_targets.side_effect = record
+        with (
+            patch.object(server, "_get_base_url", return_value="https://nas.example"),
+            patch.object(server, "_get_iscsi", return_value=iscsi),
+        ):
+            asyncio.run(
+                server._handle_target_map_lun({"target_id": 1, "lun_uuids": ["a", "b"]})
+            )
+        assert order == [("start", "a"), ("end", "a"), ("start", "b"), ("end", "b")]

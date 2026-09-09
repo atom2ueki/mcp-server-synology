@@ -74,6 +74,14 @@ def _resolve_lun_type(lun_type: str) -> str:
     forwarded as given so a DSM or volume with a type this list has never seen
     is still reachable.
     """
+    if not isinstance(lun_type, str):
+        # The tool schema says "string", but nothing between the caller and here
+        # checks a DECLARED argument's type -- only that it was declared. A
+        # non-string would reach .strip() and raise AttributeError, which the
+        # MCP wrapper turns into a generic "Error executing ..." string,
+        # bypassing the structured invalid_argument response every other bad
+        # input here gets.
+        raise ValueError(f"type must be a string, got {type(lun_type).__name__}")
     given = lun_type.strip()
     if given in DSM_LUN_TYPES:
         return given
@@ -259,9 +267,9 @@ class SynologyISCSI:
         """
         try:
             byte_size = _coerce_int(size, "size")
+            resolved_type = _resolve_lun_type(lun_type)
         except ValueError as exc:
             return _invalid("create", str(exc))
-        resolved_type = _resolve_lun_type(lun_type)
         params = {
             "name": name,
             "type": resolved_type,
@@ -386,6 +394,10 @@ class SynologyISCSI:
                     },
                 }
 
+        if iqn is not None and not isinstance(iqn, str):
+            return _invalid(
+                "create", f"iqn must be a string, got {type(iqn).__name__}", TARGET_API
+            )
         if iqn is not None and not iqn.strip():
             return _invalid(
                 "create",
