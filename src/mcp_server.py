@@ -75,6 +75,10 @@ class SynologyMCPServer:
         self.container_instances: Dict[str, SynologyContainer] = {}
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.iscsi_instances: Dict[str, SynologyISCSI] = {}
+        # One lock per NAS key, guarding the lazy login in _resolve_base_url.
+        # Created lazily and only ever touched from the event-loop thread, so
+        # the dict itself needs no locking.
+        self._login_locks: Dict[str, "asyncio.Lock"] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
         self._tool_registry: Dict[str, tuple[types.Tool, Callable]] = {}
@@ -1220,11 +1224,50 @@ class SynologyMCPServer:
         result = health.disk_smart_info(disk_id)
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
+    async def _resolve_base_url(self, arguments: dict) -> str:
+        """Resolve the target NAS without ever logging in on the event loop.
+
+        `_get_base_url` performs a lazy DSM login when a configured nas_name has
+        no session yet, and that login is a synchronous HTTP round trip. Called
+        straight from an `async def` handler it runs ON the loop, so the server
+        answers nothing at all until DSM replies -- the same defect the
+        `asyncio.to_thread` calls below fix, one step earlier in the same
+        handler, and not covered by them because it happens first.
+
+        The login is therefore offloaded, and serialised per NAS. Offloading
+        alone would be worse than the bug: two handlers arriving together with
+        no session would both miss it and both log in, and the second would
+        overwrite the first's SID and strand that session open on the NAS --
+        exactly what the existing guard inside `_get_base_url` exists to
+        prevent. The lock closes that window, and the state it protects is
+        mutated on the worker thread only while the lock is held.
+        """
+        # Fast path: a session already exists, so no network call is possible
+        # and there is nothing to offload or serialise.
+        try:
+            return self._get_base_url(arguments, allow_login=False)
+        except Exception:
+            pass
+
+        key = arguments.get("nas_name") or arguments.get("base_url") or "\x00default"
+        lock = self._login_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._login_locks[key] = lock
+
+        async with lock:
+            # Re-check: another handler may have logged in while we waited.
+            try:
+                return self._get_base_url(arguments, allow_login=False)
+            except Exception:
+                pass
+            return await asyncio.to_thread(self._get_base_url, arguments)
+
     async def _handle_iscsi_call(
         self, arguments: dict, method_name: str
     ) -> list[types.TextContent]:
         """Generic handler for no-argument SAN Manager calls."""
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         return self._emit(await asyncio.to_thread(getattr(iscsi, method_name)))
 
@@ -1281,7 +1324,7 @@ class SynologyMCPServer:
 
     async def _handle_lun_create(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating an iSCSI LUN."""
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         result = await asyncio.to_thread(
             iscsi.lun_create,
@@ -1297,13 +1340,13 @@ class SynologyMCPServer:
         """Handle deleting an iSCSI LUN. Refuses without confirm=true."""
         if not self._is_confirmed(arguments):
             raise self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         return self._emit(await asyncio.to_thread(iscsi.lun_delete, arguments["uuid"]))
 
     async def _handle_target_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting a single iSCSI target."""
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         return self._emit(
             await asyncio.to_thread(iscsi.target_get, arguments["target_id"])
@@ -1318,7 +1361,7 @@ class SynologyMCPServer:
         the next name nobody listed would still be dropped in silence, and a
         dropped credential here produces a target with no authentication.
         """
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         result = await asyncio.to_thread(
             iscsi.target_create,
@@ -1334,7 +1377,7 @@ class SynologyMCPServer:
         """Handle deleting an iSCSI target. Refuses without confirm=true."""
         if not self._is_confirmed(arguments):
             raise self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         return self._emit(
             await asyncio.to_thread(iscsi.target_delete, arguments["target_id"])
@@ -1397,7 +1440,7 @@ class SynologyMCPServer:
                     },
                 }
             )
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         results = []
         for uuid in lun_uuids:

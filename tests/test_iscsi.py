@@ -970,3 +970,155 @@ class TestEventLoopIsNotBlocked:
                 server._handle_target_map_lun({"target_id": 1, "lun_uuids": ["a", "b"]})
             )
         assert order == [("start", "a"), ("end", "a"), ("start", "b"), ("end", "b")]
+
+
+class TestLazyLoginIsAlsoOffloaded:
+    """The offload must cover the login, not just the DSM call after it.
+
+    Every iSCSI handler resolves the NAS before it offloads anything, and
+    `_get_base_url` performs a lazy DSM login when a configured nas_name has no
+    session yet. That login is a synchronous HTTP round trip, so it ran ON the
+    event loop -- the same defect as the calls below it, one step earlier in the
+    same handler.
+
+    TestEventLoopIsNotBlocked could not see it: it patches `_get_base_url`, so
+    its scope excluded exactly the path in question. This class removes that
+    patch, which is the whole point of it existing separately.
+    """
+
+    @staticmethod
+    def _server():
+        from mcp_server import SynologyMCPServer
+
+        return SynologyMCPServer()
+
+    @staticmethod
+    def _slow_login(server, duration, calls):
+        """Stand in for _get_base_url with a lazy login that takes `duration`.
+
+        Mirrors the real semantics: with allow_login=False it raises (no session
+        yet), and with a login permitted it performs a blocking round trip.
+        """
+        import time
+
+        def fake(arguments, *, allow_login=True):
+            if not allow_login:
+                raise Exception("No active session")
+            calls.append(1)
+            time.sleep(duration)
+            return "https://nas.example"
+
+        return patch.object(server, "_get_base_url", side_effect=fake)
+
+    def test_lazy_login_does_not_hold_the_event_loop(self):
+        import time
+
+        server = self._server()
+        calls = []
+        iscsi = MagicMock()
+        iscsi.lun_list.return_value = {"success": True, "data": {"luns": []}}
+
+        async def main():
+            gaps = []
+
+            async def watchdog():
+                last = time.perf_counter()
+                try:
+                    while True:
+                        await asyncio.sleep(0.01)
+                        gaps.append(time.perf_counter() - last)
+                        last = time.perf_counter()
+                except asyncio.CancelledError:
+                    raise
+
+            task = asyncio.ensure_future(watchdog())
+            while len(gaps) < 2:
+                await asyncio.sleep(0.01)
+            before = len(gaps)
+            try:
+                with (
+                    self._slow_login(server, 0.30, calls),
+                    patch.object(server, "_get_iscsi", return_value=iscsi),
+                ):
+                    await server._handle_iscsi_call({"nas_name": "nas1"}, "lun_list")
+            finally:
+                during = len(gaps) - before
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            return during
+
+        ticks = asyncio.run(main())
+        assert calls, "the lazy-login path was never taken - the test proves nothing"
+        assert ticks >= 5, (
+            f"the lazy login held the event loop: only {ticks} tick(s) during a "
+            "300ms login"
+        )
+
+    def test_concurrent_handlers_log_in_once(self):
+        """Offloading without a lock would strand a session on the NAS.
+
+        Two handlers arriving with no session would both miss it and both log
+        in, and the second would overwrite the first's SID -- leaving the first
+        session open on the NAS and unreachable by logout, which is what the
+        guard inside _get_base_url exists to prevent.
+        """
+        import time
+
+        server = self._server()
+        calls = []
+        iscsi = MagicMock()
+        iscsi.lun_list.return_value = {"success": True, "data": {"luns": []}}
+        logged_in = []
+
+        def fake(arguments, *, allow_login=True):
+            if not allow_login:
+                if logged_in:
+                    return "https://nas.example"
+                raise Exception("No active session")
+            calls.append(1)
+            time.sleep(0.20)
+            logged_in.append(1)
+            return "https://nas.example"
+
+        async def main():
+            with (
+                patch.object(server, "_get_base_url", side_effect=fake),
+                patch.object(server, "_get_iscsi", return_value=iscsi),
+            ):
+                await asyncio.gather(
+                    server._handle_iscsi_call({"nas_name": "nas1"}, "lun_list"),
+                    server._handle_iscsi_call({"nas_name": "nas1"}, "lun_list"),
+                    server._handle_iscsi_call({"nas_name": "nas1"}, "lun_list"),
+                )
+
+        asyncio.run(main())
+        assert len(calls) == 1, (
+            f"{len(calls)} concurrent logins for one NAS; each extra one strands "
+            "a session open on the NAS"
+        )
+
+    def test_different_nas_names_do_not_serialise_on_each_other(self):
+        """The lock is per NAS, not global -- one slow NAS must not block another."""
+        server = self._server()
+        assert server._login_locks == {}
+        iscsi = MagicMock()
+        iscsi.lun_list.return_value = {"success": True, "data": {"luns": []}}
+
+        def fake(arguments, *, allow_login=True):
+            if not allow_login:
+                raise Exception("No active session")
+            return "https://nas.example"
+
+        async def main():
+            with (
+                patch.object(server, "_get_base_url", side_effect=fake),
+                patch.object(server, "_get_iscsi", return_value=iscsi),
+            ):
+                await server._handle_iscsi_call({"nas_name": "nas1"}, "lun_list")
+                await server._handle_iscsi_call({"nas_name": "nas2"}, "lun_list")
+
+        asyncio.run(main())
+        assert set(server._login_locks) == {"nas1", "nas2"}
