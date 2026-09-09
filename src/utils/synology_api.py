@@ -54,6 +54,22 @@ DSM_ISCSI_ERRORS: Dict[int, str] = {
 # fixed by exactly the same action, so they share one recovery path.
 SESSION_EXPIRED_CODES = frozenset({106, 107, 119})
 
+# Seconds to wait for a DSM response. Fine for reads and for most writes.
+#
+# It is NOT enough for every write, and the failure is expensive rather than
+# merely slow: a client-side timeout does not cancel the request DSM is already
+# executing. On 2026-09-08 a SYNO.Core.ISCSI.LUN/create returned a read timeout
+# to the caller and created the LUN anyway, leaving a LUN whose uuid nobody had
+# -- invisible to the caller, and found only by listing. A caller doing a write
+# that DSM performs slowly should raise this rather than retry, because a retry
+# after a timeout can create a SECOND one.
+DEFAULT_TIMEOUT = 15
+
+# Provisioning a LUN allocates and initialises storage; on a busy volume it can
+# take well over the default. Deleting one reclaims it and is likewise not
+# instant.
+LUN_WRITE_TIMEOUT = 120
+
 
 def describe_error_code(code: Any) -> Optional[str]:
     """Human-readable description for a DSM error code, or None if unmapped."""
@@ -159,6 +175,7 @@ class SynologyAPIClient:
         version: int = 1,
         extra_params: Optional[Dict] = None,
         use_post: bool = False,
+        timeout: int = DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
         """Make an authenticated API call to /webapi/entry.cgi.
 
@@ -168,22 +185,33 @@ class SynologyAPIClient:
             version: API version number
             extra_params: Additional parameters for the API call
             use_post: Use POST instead of GET
+            timeout: Seconds to wait for a response. See DEFAULT_TIMEOUT.
 
         Returns:
             Dict with API response or error information
         """
-        result = self._do_request(api, method, version, extra_params, use_post)
+        # Capture the SID this request is about to USE, before sending it. Read
+        # back afterwards instead, and two concurrent calls on a shared client
+        # race: A can refresh the client from S0 to S1 while B is still in
+        # flight, and B -- which failed on S0 -- would then report S1 as the
+        # stale one. SynologyAuth.relogin() dedupes on the SID it is told about,
+        # so it would see a SID that is already current, decide no recovery is
+        # needed, and open a second session anyway. This client is now shared
+        # between SynologyHealth and its SynologyISCSI delegate, which makes
+        # concurrent use ordinary rather than theoretical.
+        attempted_sid = self.session_id
+        result = self._do_request(api, method, version, extra_params, use_post, timeout)
         # A session-lifecycle error (106 timeout, 107 displaced by a duplicate
         # login, 119 SID not found) means the server-side session is gone. Try a
         # single transparent re-auth via the SynologyAuth registered for this
         # base_url. If it succeeds, refresh local SID/token and retry once. If no
         # auth is registered, the original error is returned to the caller.
         if not result.get("success") and result.get("error", {}).get("code") in SESSION_EXPIRED_CODES:
-            new_sid, new_token = _try_relogin(self.base_url, self.session_id)
+            new_sid, new_token = _try_relogin(self.base_url, attempted_sid)
             if new_sid:
                 self.session_id = new_sid
                 self.syno_token = new_token
-                result = self._do_request(api, method, version, extra_params, use_post)
+                result = self._do_request(api, method, version, extra_params, use_post, timeout)
         return annotate_error(result, api, method, version)
 
     def _do_request(
@@ -193,6 +221,7 @@ class SynologyAPIClient:
         version: int = 1,
         extra_params: Optional[Dict] = None,
         use_post: bool = False,
+        timeout: int = DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
         """Internal: perform the HTTP call without any retry logic."""
         params = {
@@ -214,7 +243,7 @@ class SynologyAPIClient:
                     self._api_url,
                     data=params,
                     headers=headers,
-                    timeout=15,
+                    timeout=timeout,
                     verify=self.verify_ssl,
                 )
             else:
@@ -222,7 +251,7 @@ class SynologyAPIClient:
                     self._api_url,
                     params=params,
                     headers=headers,
-                    timeout=15,
+                    timeout=timeout,
                     verify=self.verify_ssl,
                 )
             resp.raise_for_status()
@@ -233,13 +262,23 @@ class SynologyAPIClient:
             return {"success": False, "error": {"code": "unknown_error", "message": str(e)}}
 
     def get(
-        self, api: str, method: str, version: int = 1, extra_params: Optional[Dict] = None
+        self,
+        api: str,
+        method: str,
+        version: int = 1,
+        extra_params: Optional[Dict] = None,
+        timeout: int = DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
         """Make a GET request to the API."""
-        return self.request(api, method, version, extra_params, use_post=False)
+        return self.request(api, method, version, extra_params, use_post=False, timeout=timeout)
 
     def post(
-        self, api: str, method: str, version: int = 1, extra_params: Optional[Dict] = None
+        self,
+        api: str,
+        method: str,
+        version: int = 1,
+        extra_params: Optional[Dict] = None,
+        timeout: int = DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
         """Make a POST request to the API."""
-        return self.request(api, method, version, extra_params, use_post=True)
+        return self.request(api, method, version, extra_params, use_post=True, timeout=timeout)

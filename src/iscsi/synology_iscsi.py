@@ -10,7 +10,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
-from utils.synology_api import SynologyAPIClient
+from utils.synology_api import LUN_WRITE_TIMEOUT, SynologyAPIClient
 
 LUN_API = "SYNO.Core.ISCSI.LUN"
 TARGET_API = "SYNO.Core.ISCSI.Target"
@@ -23,12 +23,13 @@ TARGET_API = "SYNO.Core.ISCSI.Target"
 #   ADV  -> 15                      legacy "advanced" (thin + snapshot support)
 #   FILE -> 3                       regular-file LUN
 #
-# BLUN_THICK, BLUN_SINK and ADV_THICK are recognised names but were refused with
-# 18990503 on this btrfs volume; THICK, VMWARE and RAW were refused with 18990500
-# as unrecognised. Nothing is validated client-side beyond the friendly aliases
-# below - this server may be pointed at another DSM or an ext4 volume where a
-# different set is legal, and a hard-coded allowlist would then be wrong in a way
-# the caller could not override.
+# BLUN_THICK, BLUN_SINK and ADV_THICK are recognised names but were refused
+# with 18990503 on the btrfs volume this was tested against; THICK, VMWARE and
+# RAW were refused with 18990500 as unrecognised. That is one volume on one
+# DSM build, not a platform rule, so nothing is validated client-side beyond
+# the friendly aliases below: another DSM or an ext4 volume may accept a
+# different set, and a hard-coded allowlist would then be wrong in a way the
+# caller could not override. DSM decides; its refusal is reported as given.
 LUN_TYPE_ALIASES = {
     "thin": "BLUN",
     "btrfs": "BLUN",
@@ -84,6 +85,56 @@ AUTH_NONE = 0
 AUTH_CHAP = 1
 
 DEFAULT_IQN_PREFIX = "iqn.2000-01.com.synology"
+
+
+def _invalid(method: str, message: str, api: str = LUN_API) -> Dict[str, Any]:
+    """Refuse a call on its arguments, before anything is sent."""
+    return {
+        "success": False,
+        "error": {"code": "invalid_argument", "message": message, "api": api, "method": method},
+    }
+
+
+def _coerce_int(value: Any, field: str) -> int:
+    """Return `value` as an int, refusing anything that would silently change it.
+
+    `int()` is too permissive for caller input here. `int(True)` is 1, so a JSON
+    `true` would become a one-byte LUN; `int(0.9)` is 0, so a fractional size
+    would be truncated without a word. Both hand back a LUN that is not the one
+    that was asked for, which is worse than an error.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a number, not a boolean")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"{field} must be a whole number, got {value}")
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.lstrip("-").isdigit():
+            raise ValueError(f"{field} must be a whole number, got {value!r}")
+        return int(text)
+    raise ValueError(f"{field} must be a number, got {type(value).__name__}")
+
+
+def _uuid_list(value: Any, field: str) -> List[str]:
+    """Validate a list of UUID strings.
+
+    Truthiness is not enough. A dict iterates over its KEYS, so
+    `{"<real-uuid>": false}` would map that LUN while discarding the value that
+    was meant to prevent it; a bare string iterates character by character.
+    Both reach a write having been read as something the caller did not mean.
+    """
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field} must be a list of UUID strings, got {type(value).__name__}")
+    out = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{field} must contain non-empty UUID strings, got {item!r}")
+        out.append(item.strip())
+    return out
 
 
 def _empty_selection(method: str, field: str) -> Dict[str, Any]:
@@ -143,8 +194,12 @@ class SynologyISCSI:
     def _get(self, api: str, method: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         return self._api.get(api, method, 1, params)
 
-    def _post(self, api: str, method: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        return self._api.post(api, method, 1, params)
+    def _post(
+        self, api: str, method: str, params: Optional[Dict] = None, timeout: Optional[int] = None
+    ) -> Dict[str, Any]:
+        if timeout is None:
+            return self._api.post(api, method, 1, params)
+        return self._api.post(api, method, 1, params, timeout=timeout)
 
     # ------------------------------------------------------------------
     # LUNs
@@ -160,7 +215,11 @@ class SynologyISCSI:
         them, despite reading like the obvious name; to see what a LUN is
         attached to, read `mapped_luns` from `target_list` instead.
         """
-        params = {"additional": json.dumps(additional or ["status", "is_mapped"])}
+        # `is None`, not `or`: an explicit empty list means "no extra fields",
+        # and silently replacing it with the default honours neither the request
+        # nor an error.
+        wanted = ["status", "is_mapped"] if additional is None else additional
+        params = {"additional": json.dumps(wanted)}
         return self._get(LUN_API, "list", params)
 
     def lun_get(self, name_or_uuid: str) -> Dict[str, Any]:
@@ -198,40 +257,53 @@ class SynologyISCSI:
 
         Returns {"success": true, "data": {"lun_id": N, "uuid": "..."}}.
         """
+        try:
+            byte_size = _coerce_int(size, "size")
+        except ValueError as exc:
+            return _invalid("create", str(exc))
         resolved_type = _resolve_lun_type(lun_type)
         params = {
             "name": name,
             "type": resolved_type,
             "location": location,
-            "size": str(int(size)),
+            "size": str(byte_size),
         }
         if description is not None:
             params["description"] = description
-        return self._post(LUN_API, "create", params)
+        # Creating a LUN allocates storage. The default 15s timeout is not
+        # enough on a busy volume, and a timeout here does NOT cancel the
+        # create -- it just loses the uuid, leaving a LUN nobody can name.
+        return self._post(LUN_API, "create", params, timeout=LUN_WRITE_TIMEOUT)
 
     def lun_delete(self, uuid: str) -> Dict[str, Any]:
         """Delete a LUN by UUID. Destroys the LUN and everything stored on it."""
-        return self._post(LUN_API, "delete", {"uuid": uuid})
+        return self._post(LUN_API, "delete", {"uuid": uuid}, timeout=LUN_WRITE_TIMEOUT)
+
+    def _map(self, method: str, uuid: str, target_ids: List[Any]) -> Dict[str, Any]:
+        """Shared body of map_target / unmap_target."""
+        if not target_ids:
+            return _empty_selection(method, "target_ids")
+        # A dict iterates over its keys and a string over its characters, so an
+        # argument of the wrong shape reaches the write read as something the
+        # caller never meant. Refuse the shape rather than coerce it.
+        if isinstance(target_ids, (str, bytes)) or not isinstance(target_ids, (list, tuple)):
+            return _invalid(
+                method,
+                f"target_ids must be a list, got {type(target_ids).__name__}",
+            )
+        try:
+            ids = [str(_coerce_int(t, "target_ids")) for t in target_ids]
+        except ValueError as exc:
+            return _invalid(method, str(exc))
+        return self._post(LUN_API, method, {"uuid": uuid, "target_ids": json.dumps(ids)})
 
     def lun_map_targets(self, uuid: str, target_ids: List[Any]) -> Dict[str, Any]:
         """Map a LUN to one or more targets."""
-        if not target_ids:
-            return _empty_selection("map_target", "target_ids")
-        return self._post(
-            LUN_API,
-            "map_target",
-            {"uuid": uuid, "target_ids": json.dumps([str(t) for t in target_ids])},
-        )
+        return self._map("map_target", uuid, target_ids)
 
     def lun_unmap_targets(self, uuid: str, target_ids: List[Any]) -> Dict[str, Any]:
         """Unmap a LUN from one or more targets."""
-        if not target_ids:
-            return _empty_selection("unmap_target", "target_ids")
-        return self._post(
-            LUN_API,
-            "unmap_target",
-            {"uuid": uuid, "target_ids": json.dumps([str(t) for t in target_ids])},
-        )
+        return self._map("unmap_target", uuid, target_ids)
 
     # ------------------------------------------------------------------
     # Targets
@@ -243,7 +315,8 @@ class SynologyISCSI:
         `mapped_lun` (singular) is the field name that populates `mapped_luns`
         in the response - `mapped_luns`, `luns` and `mapping` are all ignored.
         """
-        params = {"additional": json.dumps(additional or ["mapped_lun"])}
+        wanted = ["mapped_lun"] if additional is None else additional
+        params = {"additional": json.dumps(wanted)}
         return self._get(TARGET_API, "list", params)
 
     def target_get(self, target_id: Any) -> Dict[str, Any]:
@@ -268,27 +341,71 @@ class SynologyISCSI:
 
         `max_sessions` 0 means DSM's default (no explicit cap).
         """
-        if bool(chap_user) != bool(chap_password):
-            return {
-                "success": False,
-                "error": {
-                    "code": "chap_incomplete",
-                    "message": (
-                        "CHAP needs both chap_user and chap_password. Supply both to "
-                        "enable CHAP, or neither for a target with no authentication."
-                    ),
-                    "api": TARGET_API,
-                    "method": "create",
-                },
-            }
-        use_chap = bool(chap_user)
+        # Omitted and supplied-but-empty are DIFFERENT. Both are falsey, so a
+        # `bool()` test treats chap_user="" as "no CHAP wanted" and creates an
+        # OPEN target -- while the caller, who passed a credential field, has
+        # every reason to believe it asked for authentication. Only `is None`
+        # means omitted; an empty string is a malformed credential and is
+        # refused.
+        supplied = [
+            field
+            for field, value in (("chap_user", chap_user), ("chap_password", chap_password))
+            if value is not None
+        ]
+        if supplied:
+            blank = [
+                field
+                for field, value in (("chap_user", chap_user), ("chap_password", chap_password))
+                if value is not None and not str(value).strip()
+            ]
+            if blank:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "chap_incomplete",
+                        "message": (
+                            f"{', '.join(blank)} was supplied but empty, so no target was "
+                            "created. An empty credential would have produced a target with "
+                            "no authentication. Give a real value, or omit both fields."
+                        ),
+                        "api": TARGET_API,
+                        "method": "create",
+                    },
+                }
+            if len(supplied) != 2:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "chap_incomplete",
+                        "message": (
+                            "CHAP needs both chap_user and chap_password. Supply both to "
+                            "enable CHAP, or neither for a target with no authentication."
+                        ),
+                        "api": TARGET_API,
+                        "method": "create",
+                    },
+                }
+
+        if iqn is not None and not iqn.strip():
+            return _invalid(
+                "create",
+                "iqn was supplied but empty. Omit it to get the default "
+                f"{DEFAULT_IQN_PREFIX}:<name>, or give a real IQN.",
+                TARGET_API,
+            )
+        try:
+            sessions = _coerce_int(max_sessions, "max_sessions")
+        except ValueError as exc:
+            return _invalid("create", str(exc), TARGET_API)
+
+        use_chap = len(supplied) == 2
         params = {
             "name": name,
-            "iqn": iqn or f"{DEFAULT_IQN_PREFIX}:{name}",
+            "iqn": iqn if iqn is not None else f"{DEFAULT_IQN_PREFIX}:{name}",
             "auth_type": str(AUTH_CHAP if use_chap else AUTH_NONE),
             "user": chap_user or "",
             "password": chap_password or "",
-            "max_sessions": str(int(max_sessions)),
+            "max_sessions": str(sessions),
         }
         return self._post(TARGET_API, "create", params)
 

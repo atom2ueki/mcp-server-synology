@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### Added
+- **iSCSI provisioning (SAN Manager).** The iSCSI surface was read-only -
+  `synology_lun_list` and `synology_lun_get` and nothing else - so a LUN could
+  not be created through this server at all. Adds `synology_lun_create`,
+  `synology_lun_delete`, `synology_target_list`, `synology_target_get`,
+  `synology_target_create`, `synology_target_delete`, `synology_target_map_lun`
+  and `synology_target_unmap_lun` over `SYNO.Core.ISCSI.LUN` and
+  `SYNO.Core.ISCSI.Target`, in a new `src/iscsi/` module.
+  Deleting a LUN or a target, and unmapping a LUN, each require `confirm: true`.
+- **DSM error codes are described, and the failing call is named.** DSM answers a
+  failure with a bare number, so 105 (no permission), 106 (session expired) and
+  119 (dead SID) are indistinguishable and none of them says which API produced
+  it. Every failed response now carries `api`, `method` and `version`, plus a
+  `message` from DSM's published common-error table where the code is known. An
+  unmapped code gets the call recorded and no invented description.
+
+### Fixed
+- **Session recovery covered only one of DSM's three session-expiry codes.**
+  `SynologyAPIClient` re-authenticated and retried on 119 only, so **106**
+  ("session timeout") and **107** ("session interrupted by duplicated login")
+  were returned to the caller raw, with no recovery attempted. 107 is not
+  exotic for a server that holds one long-lived `session=webui` session: any
+  other login as the same account displaces it.
+- **Session recovery could name the wrong SID under concurrency.** The stale SID
+  was read off the client *after* the failed request, so with two calls in
+  flight one could report the other's freshly-refreshed SID as the dead one -
+  defeating the auth layer's de-duplication and opening a second session. The
+  SID a request actually used is now captured before it is sent.
+- **A slow LUN write timed out client-side while succeeding on the NAS.** The
+  15-second timeout was applied to every call. A `LUN/create` that exceeded it
+  returned a network error to the caller and created the LUN anyway, leaving a
+  LUN whose uuid nobody held. LUN create and delete now use a longer timeout,
+  and the per-call timeout is configurable.
+
+
 ## [1.6.0] - 2026-08-20
 
 ### Added

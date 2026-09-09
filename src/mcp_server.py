@@ -24,6 +24,22 @@ from downloadstation import SynologyDownloadStation
 from filestation import SynologyFileStation
 from health import SynologyHealth
 from iscsi import SynologyISCSI
+from iscsi.synology_iscsi import _uuid_list
+
+
+class ToolFailure(Exception):
+    """A tool operation that failed or was refused, with its JSON payload.
+
+    Raised rather than returned so the MCP layer can set the protocol's error
+    flag while still delivering the structured body: a caller that inspects
+    `isError` and a caller that parses the JSON then agree. Returning the
+    payload as ordinary content sets `isError` false, which reports a refusal
+    or a partial failure as a success.
+    """
+
+    def __init__(self, payload: dict):
+        super().__init__(payload.get("error", {}).get("message", "tool failed"))
+        self.payload = payload
 from nfs import SynologyNFS
 from usermanagement import SynologyUserManager
 
@@ -85,6 +101,20 @@ class SynologyMCPServer:
             try:
                 content = await self._dispatch_tool(params.name, params.arguments or {})
                 return CallToolResult(content=content)
+            except ToolFailure as failure:
+                # A refused or failed operation, carrying its structured payload.
+                # Returning it as ordinary content would leave the protocol's
+                # error flag FALSE, so a client that keys on isError -- rather
+                # than parsing our JSON -- would read a refusal, or a partial
+                # mapping failure, as a success.
+                return CallToolResult(
+                    content=[
+                        types.TextContent(
+                            type="text", text=json.dumps(failure.payload, indent=2)
+                        )
+                    ],
+                    is_error=True,
+                )
             except Exception as e:
                 return CallToolResult(
                     content=[types.TextContent(type="text", text=f"Error executing {params.name}: {e!s}")],
@@ -211,7 +241,7 @@ class SynologyMCPServer:
             "name": {"type": "string", "description": "LUN name, e.g. 'macmini-dev'"},
             "location": {"type": "string", "description": "Volume path to create it on, e.g. '/volume2'"},
             "size": {"type": "integer", "description": "Size in BYTES (e.g. 536870912000 for 500 GB)"},
-            "type": {"type": "string", "description": "LUN type. 'thin' (default, DSM 'BLUN') or 'advanced'/'file'; a raw DSM type name such as BLUN, ADV, THIN or FILE is passed through unchanged. Thick provisioning is not available on a btrfs volume."},
+            "type": {"type": "string", "description": "LUN type. 'thin' (default, DSM 'BLUN') or 'advanced'/'file'; a raw DSM type name such as BLUN, ADV, THIN or FILE is passed through unchanged. Note lowercase 'thin' means BLUN, while uppercase 'THIN' is the distinct legacy DSM type. Thick types were refused on the btrfs volume this was tested against; DSM decides, and its error is reported as given."},
             "description": {"type": "string", "description": "Optional free-text description stored on the LUN"},
         }, ["name", "location", "size"]), self._handle_lun_create)
         self._register_tool("synology_lun_delete", "DESTRUCTIVE. Permanently delete an iSCSI LUN and everything stored on it. Requires confirm=true.", TN_PR({
@@ -235,10 +265,11 @@ class SynologyMCPServer:
             "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
             "lun_uuids": {"type": "array", "items": {"type": "string"}, "description": "LUN UUIDs from synology_lun_list"},
         }, ["target_id", "lun_uuids"]), self._handle_target_map_lun)
-        self._register_tool("synology_target_unmap_lun", "Unmap one or more LUNs from an iSCSI target. The LUNs themselves are not deleted.", TN_PR({
+        self._register_tool("synology_target_unmap_lun", "DESTRUCTIVE. Unmap one or more LUNs from an iSCSI target, disconnecting them from any initiator currently using them. The LUNs themselves are not deleted. Requires confirm=true.", TN_PR({
             "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
             "lun_uuids": {"type": "array", "items": {"type": "string"}, "description": "LUN UUIDs from synology_lun_list"},
-        }, ["target_id", "lun_uuids"]), self._handle_target_unmap_lun)
+            "confirm": {"type": "boolean", "description": "Must be true. Unmapping takes storage away from a live initiator."},
+        }, ["target_id", "lun_uuids", "confirm"]), self._handle_target_unmap_lun)
 
         self._register_tool("synology_health_summary", "Get a combined health overview: system info, CPU/memory utilization, disk health, volume status, storage pools, network, and UPS — all in one call", TN, partial(self._handle_health_call, method_name="health_summary"))
 
@@ -566,6 +597,47 @@ class SynologyMCPServer:
             raise Exception("Auto-login failed for all configured NAS units — stopping server.")
         logger.info(f"Connected to {success_count}/{len(nas_names)} NAS unit(s)")
 
+    #: Tools whose arguments are checked against their declared schema before the
+    #: handler runs. An argument a handler does not read is otherwise DISCARDED
+    #: in silence, and for these tools that is not a failed call, it is a false
+    #: success: `chapUser`/`chapPassword` produce a target with no
+    #: authentication, and `lun_type` instead of `type` silently takes the
+    #: default. Enumerating misspellings cannot fix that -- only refusing what
+    #: was not declared can. Scoped to the tools added with this mechanism rather
+    #: than applied server-wide, because the older handlers have not been audited
+    #: for arguments they read without declaring.
+    _STRICT_ARG_TOOLS = frozenset(
+        {
+            "synology_lun_create",
+            "synology_lun_delete",
+            "synology_target_list",
+            "synology_target_get",
+            "synology_target_create",
+            "synology_target_delete",
+            "synology_target_map_lun",
+            "synology_target_unmap_lun",
+        }
+    )
+
+    def _reject_undeclared_arguments(self, name: str, arguments: dict) -> Optional[dict]:
+        """Return an error payload if `arguments` names anything undeclared."""
+        tool, _ = self._tool_registry[name]
+        declared = set((tool.input_schema or {}).get("properties", {}))
+        # Keys beginning with "_" belong to the protocol (_meta), not the tool.
+        unknown = sorted(k for k in arguments if k not in declared and not k.startswith("_"))
+        if not unknown:
+            return None
+        return {
+            "success": False,
+            "error": {
+                "code": "unknown_argument",
+                "message": (
+                    f"{name} does not accept {', '.join(unknown)}, so nothing was done. "
+                    f"Accepted arguments: {', '.join(sorted(declared))}."
+                ),
+            },
+        }
+
     async def _dispatch_tool(
         self, name: str, arguments: dict
     ) -> list[types.TextContent]:
@@ -575,6 +647,10 @@ class SynologyMCPServer:
             _, handler = self._tool_registry[name]
         except KeyError:
             raise ValueError(f"Unknown tool: {name}")
+        if name in self._STRICT_ARG_TOOLS:
+            refusal = self._reject_undeclared_arguments(name, arguments)
+            if refusal:
+                raise ToolFailure(refusal)
         return await handler(arguments)
 
     def _service_instance_dicts(self):
@@ -1150,8 +1226,7 @@ class SynologyMCPServer:
         """Generic handler for no-argument SAN Manager calls."""
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        result = getattr(iscsi, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(getattr(iscsi, method_name)())
 
     @staticmethod
     def _is_confirmed(arguments: dict) -> bool:
@@ -1166,38 +1241,43 @@ class SynologyMCPServer:
         return arguments.get("confirm") is True
 
     @staticmethod
-    def _refuse_unconfirmed(action: str) -> list[types.TextContent]:
-        """Response for a destructive tool called without confirm=true.
+    def _refuse_unconfirmed(action: str) -> "ToolFailure":
+        """The refusal for a destructive tool called without confirm=true.
 
-        Returned rather than raised: this is a normal, expected answer telling
-        the caller what to do next, not a server fault.
+        Raised, not returned: a refusal delivered as ordinary content leaves the
+        protocol's error flag false, so a caller that checks isError rather than
+        parsing the body reads "did not happen" as "done".
         """
-        return [
-            types.TextContent(
-                type="text",
-                text=json.dumps(
-                    {
-                        "success": False,
-                        "error": {
-                            "code": "confirmation_required",
-                            "message": (
-                                f"{action} is destructive and was not performed. "
-                                "Re-issue the call with confirm=true if that is intended."
-                            ),
-                        },
-                    },
-                    indent=2,
-                ),
-            )
-        ]
+        return ToolFailure(
+            {
+                "success": False,
+                "error": {
+                    "code": "confirmation_required",
+                    "message": (
+                        f"{action} is destructive and was not performed. "
+                        "Re-issue the call with confirm=true if that is intended."
+                    ),
+                },
+            }
+        )
+
+    @staticmethod
+    def _emit(result: dict) -> list[types.TextContent]:
+        """Render a tool result, raising when the operation did not succeed.
+
+        The structured body is kept either way; raising is only how the MCP
+        layer is told to set isError.
+        """
+        if result.get("success") is False:
+            raise ToolFailure(result)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     async def _handle_lun_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting details for a single iSCSI LUN."""
         base_url = self._get_base_url(arguments)
         name = arguments["name"]
         iscsi = self._get_iscsi(base_url)
-        result = iscsi.lun_get(name)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(iscsi.lun_get(name))
 
     async def _handle_lun_create(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating an iSCSI LUN."""
@@ -1210,58 +1290,31 @@ class SynologyMCPServer:
             lun_type=arguments.get("type", "thin"),
             description=arguments.get("description"),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_lun_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting an iSCSI LUN. Refuses without confirm=true."""
         if not self._is_confirmed(arguments):
-            return self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
+            raise self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        result = iscsi.lun_delete(arguments["uuid"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(iscsi.lun_delete(arguments["uuid"]))
 
     async def _handle_target_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting a single iSCSI target."""
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        result = iscsi.target_get(arguments["target_id"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
-
-    #: Names a caller might reasonably reach for when it means chap_user /
-    #: chap_password. Nothing validates arguments against the declared schema in
-    #: this server, so an unrecognised one is silently dropped - and dropping a
-    #: credential here does not fail, it creates a target with NO authentication
-    #: while the caller believes it supplied some. Refused by name instead.
-    _CHAP_ARG_ALIASES = frozenset(
-        {"user", "username", "password", "passwd", "chap", "chap_username", "secret"}
-    )
+        return self._emit(iscsi.target_get(arguments["target_id"]))
 
     async def _handle_target_create(self, arguments: dict) -> list[types.TextContent]:
-        """Handle creating an iSCSI target."""
-        misnamed = sorted(self._CHAP_ARG_ALIASES.intersection(arguments))
-        if misnamed:
-            return [
-                types.TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "success": False,
-                            "error": {
-                                "code": "unknown_argument",
-                                "message": (
-                                    f"No target was created. {', '.join(misnamed)} "
-                                    "is not read by this tool; CHAP credentials must be "
-                                    "given as chap_user and chap_password. Creating the "
-                                    "target while ignoring them would have left it "
-                                    "unauthenticated."
-                                ),
-                            },
-                        },
-                        indent=2,
-                    ),
-                )
-            ]
+        """Handle creating an iSCSI target.
+
+        A credential under a name this tool does not declare -- `user`,
+        `chapUser`, `auth_type` -- is refused by _dispatch_tool before this
+        runs. Enumerating misspellings was the first attempt and could not work:
+        the next name nobody listed would still be dropped in silence, and a
+        dropped credential here produces a target with no authentication.
+        """
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         result = iscsi.target_create(
@@ -1271,23 +1324,32 @@ class SynologyMCPServer:
             chap_password=arguments.get("chap_password"),
             max_sessions=arguments.get("max_sessions", 0),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_target_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting an iSCSI target. Refuses without confirm=true."""
         if not self._is_confirmed(arguments):
-            return self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
+            raise self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        result = iscsi.target_delete(arguments["target_id"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(iscsi.target_delete(arguments["target_id"]))
 
     async def _handle_target_map_lun(self, arguments: dict) -> list[types.TextContent]:
         """Handle mapping LUNs to an iSCSI target."""
         return await self._map_luns(arguments, unmap=False)
 
     async def _handle_target_unmap_lun(self, arguments: dict) -> list[types.TextContent]:
-        """Handle unmapping LUNs from an iSCSI target."""
+        """Handle unmapping LUNs from an iSCSI target. Refuses without confirm=true.
+
+        Unmapping is not a read: it takes storage away from any initiator using
+        it right now, which is the same consequence that makes deleting a target
+        destructive. It is gated the same way.
+        """
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed(
+                f"Unmapping {len(arguments.get('lun_uuids') or [])} LUN(s) from target "
+                f"{arguments.get('target_id')!r}"
+            )
         return await self._map_luns(arguments, unmap=True)
 
     async def _map_luns(self, arguments: dict, *, unmap: bool) -> list[types.TextContent]:
@@ -1299,30 +1361,32 @@ class SynologyMCPServer:
         into a single boolean, so a partial failure names the LUN that failed.
         """
         target_id = arguments["target_id"]
-        lun_uuids = arguments["lun_uuids"]
-        # Checked before resolving a session: an empty request is refused on its
-        # arguments alone, so it cannot depend on being logged in first.
+        # Shape is checked before a session is resolved, so a malformed request
+        # is refused on its arguments alone. Truthiness is not enough: a dict
+        # iterates over its KEYS, so {"<real-uuid>": false} would map that LUN
+        # while discarding the value meant to prevent it, and a bare string
+        # iterates character by character.
+        try:
+            lun_uuids = _uuid_list(arguments["lun_uuids"], "lun_uuids")
+        except ValueError as exc:
+            raise ToolFailure(
+                {"success": False, "error": {"code": "invalid_argument", "message": str(exc)}}
+            )
         if not lun_uuids:
             # all([]) is True, so this would otherwise touch the NAS not at all
             # and report success.
-            return [
-                types.TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "success": False,
-                            "error": {
-                                "code": "empty_selection",
-                                "message": (
-                                    "lun_uuids was empty, so nothing was changed. "
-                                    "Name at least one LUN."
-                                ),
-                            },
-                        },
-                        indent=2,
-                    ),
-                )
-            ]
+            raise ToolFailure(
+                {
+                    "success": False,
+                    "error": {
+                        "code": "empty_selection",
+                        "message": (
+                            "lun_uuids was empty, so nothing was changed. "
+                            "Name at least one LUN."
+                        ),
+                    },
+                }
+            )
         base_url = self._get_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
         results = []
@@ -1334,7 +1398,9 @@ class SynologyMCPServer:
             "success": all(r.get("success") for r in results),
             "data": {"target_id": target_id, "results": results},
         }
-        return [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
+        # A partial failure keeps every per-LUN result AND sets isError, so a
+        # caller reading the protocol flag and one parsing the body agree.
+        return self._emit(payload)
 
     async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting system log entries."""

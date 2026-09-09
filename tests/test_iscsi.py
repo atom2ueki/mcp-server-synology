@@ -27,7 +27,9 @@ from iscsi.synology_iscsi import (  # noqa: E402
     TARGET_API,
     SynologyISCSI,
     _json_str,
+    _uuid_list,
 )
+from mcp_server import ToolFailure  # noqa: E402
 from utils.synology_api import (  # noqa: E402
     SESSION_EXPIRED_CODES,
     annotate_error,
@@ -399,9 +401,10 @@ class TestEmptySelection:
 class TestDestructiveGating:
     """The confirm gate must be a gate, not a formality.
 
-    pytest-asyncio is not installed in this venv (four pre-existing tests in
-    test_logout.py fail for that reason), so the coroutine is driven directly
-    rather than through a marker that would silently skip.
+    pytest-asyncio is declared in the project's test extra, but the coroutines
+    here are driven directly anyway: a missing plugin turns an async test into a
+    silent skip, and a destructive-operation guard that quietly stops running is
+    the last thing that should be able to happen.
     """
 
     @staticmethod
@@ -410,12 +413,9 @@ class TestDestructiveGating:
 
         return SynologyMCPServer()
 
-    def _call(self, handler, arguments):
-        return json.loads(asyncio.run(handler(arguments))[0].text)
-
     @pytest.mark.parametrize("confirm", ["false", "true", 1, 0, "", "yes", None, [], "False"])
     def test_only_boolean_true_confirms(self, confirm):
-        """The JSON string "false" is truthy in Python - it must not confirm a delete."""
+        """The JSON string "false" is truthy in Python - it must not confirm."""
         server = self._server()
         assert server._is_confirmed({"confirm": confirm}) is (confirm is True)
 
@@ -425,27 +425,46 @@ class TestDestructiveGating:
     def test_absent_confirm_does_not_confirm(self):
         assert self._server()._is_confirmed({}) is False
 
-    def test_string_false_does_not_reach_the_nas(self):
+    @pytest.mark.parametrize(
+        "handler_name,arguments",
+        [
+            ("_handle_lun_delete", {"uuid": "u", "confirm": "false"}),
+            ("_handle_target_delete", {"target_id": 1, "confirm": "false"}),
+            ("_handle_target_unmap_lun", {"target_id": 1, "lun_uuids": ["u"], "confirm": "false"}),
+        ],
+    )
+    def test_string_false_does_not_reach_the_nas(self, handler_name, arguments):
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            result = self._call(server._handle_lun_delete, {"uuid": "u", "confirm": "false"})
-        assert result["success"] is False
-        assert result["error"]["code"] == "confirmation_required"
+            with pytest.raises(ToolFailure) as raised:
+                asyncio.run(getattr(server, handler_name)(arguments))
+        assert raised.value.payload["error"]["code"] == "confirmation_required"
         get_iscsi.assert_not_called()
 
-    def test_target_delete_gate_is_the_same_gate(self):
+    def test_unmapping_is_gated_too(self):
+        """Unmapping disconnects live storage; it is destructive."""
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            result = self._call(server._handle_target_delete, {"target_id": 1, "confirm": "false"})
-        assert result["error"]["code"] == "confirmation_required"
+            with pytest.raises(ToolFailure):
+                asyncio.run(
+                    server._handle_target_unmap_lun({"target_id": 1, "lun_uuids": ["u"]})
+                )
         get_iscsi.assert_not_called()
 
+    def test_refusal_sets_the_protocol_error_flag(self):
+        """A refusal must not arrive as a success at the MCP layer."""
+        failure = ToolFailure({"success": False, "error": {"code": "confirmation_required"}})
+        assert failure.payload["success"] is False
 
-class TestChapArgumentAliases:
-    """A credential under a name the handler does not read must be refused.
 
-    Discarding it does not fail - it creates a target with no authentication
-    while the caller believes it supplied some.
+class TestUndeclaredArguments:
+    """An argument the handler does not read must be refused, never dropped.
+
+    Dropping one is not a failed call: for target_create it produces a target
+    with NO authentication while the caller believes it supplied some, and for
+    lun_create it silently takes the default type. An enumerated denylist of
+    misspellings was the first attempt and could not work - the next name nobody
+    listed still went through - so the check is against the DECLARED schema.
     """
 
     @staticmethod
@@ -459,38 +478,163 @@ class TestChapArgumentAliases:
         [
             {"name": "t", "user": "u", "password": "p"},
             {"name": "t", "username": "u", "password": "p"},
-            {"name": "t", "password": "p"},
-            {"name": "t", "chap_username": "u", "chap_password": "p"},
+            {"name": "t", "chapUser": "u", "chapPassword": "p"},
+            {"name": "t", "auth_type": 1},
             {"name": "t", "secret": "p"},
+            {"name": "t", "CHAP_USER": "u"},
         ],
     )
     def test_misnamed_credentials_create_nothing(self, arguments):
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            result = json.loads(
-                asyncio.run(server._handle_target_create(arguments))[0].text
-            )
-        assert result["success"] is False
-        assert result["error"]["code"] == "unknown_argument"
+            with pytest.raises(ToolFailure) as raised:
+                asyncio.run(server._dispatch_tool("synology_target_create", arguments))
+        assert raised.value.payload["error"]["code"] == "unknown_argument"
         get_iscsi.assert_not_called()
 
-    def test_correctly_named_credentials_are_accepted(self):
+    def test_lun_type_instead_of_type_is_refused_not_defaulted(self):
+        """`lun_type` is the module's kwarg; the TOOL declares `type`."""
         server = self._server()
-        iscsi = MagicMock()
-        iscsi.target_create.return_value = {"success": True, "data": {"target_id": 1}}
-        with (
-            patch.object(server, "_get_base_url", return_value="https://nas.example"),
-            patch.object(server, "_get_iscsi", return_value=iscsi),
-        ):
-            result = json.loads(
+        with patch.object(server, "_get_iscsi") as get_iscsi:
+            with pytest.raises(ToolFailure) as raised:
                 asyncio.run(
-                    server._handle_target_create(
-                        {"name": "t", "chap_user": "u", "chap_password": "p" * 12}
+                    server._dispatch_tool(
+                        "synology_lun_create",
+                        {"name": "n", "location": "/volume2", "size": 1, "lun_type": "THIN"},
                     )
-                )[0].text
+                )
+        assert raised.value.payload["error"]["code"] == "unknown_argument"
+        get_iscsi.assert_not_called()
+
+    def test_the_message_lists_what_is_accepted(self):
+        server = self._server()
+        refusal = server._reject_undeclared_arguments("synology_target_create", {"user": "u"})
+        assert "chap_user" in refusal["error"]["message"]
+        assert "chap_password" in refusal["error"]["message"]
+
+    def test_declared_arguments_pass(self):
+        server = self._server()
+        assert (
+            server._reject_undeclared_arguments(
+                "synology_target_create",
+                {"name": "t", "chap_user": "u", "chap_password": "p", "nas_name": "x"},
             )
-        assert result["success"] is True
-        assert iscsi.target_create.call_args.kwargs["chap_user"] == "u"
+            is None
+        )
+
+    def test_protocol_meta_keys_are_not_refused(self):
+        server = self._server()
+        assert (
+            server._reject_undeclared_arguments("synology_target_create", {"_meta": {}}) is None
+        )
+
+    def test_every_new_tool_is_covered(self):
+        """The strict set must name every tool added with this mechanism.
+
+        Listed explicitly rather than derived from _STRICT_ARG_TOOLS, which
+        would make this test shrink exactly when the set does.
+        """
+        from mcp_server import SynologyMCPServer
+
+        expected = {
+            "synology_lun_create",
+            "synology_lun_delete",
+            "synology_target_list",
+            "synology_target_get",
+            "synology_target_create",
+            "synology_target_delete",
+            "synology_target_map_lun",
+            "synology_target_unmap_lun",
+        }
+        assert expected <= SynologyMCPServer._STRICT_ARG_TOOLS
+
+
+class TestChapCredentials:
+    """Omitted and supplied-but-empty are different things."""
+
+    @pytest.mark.parametrize(
+        "user,password",
+        [("u", None), (None, "p" * 12), ("u", ""), ("", "p" * 12), ("", ""), ("  ", "  ")],
+    )
+    def test_incomplete_or_blank_credentials_create_nothing(self, user, password):
+        """An empty credential must never become a target with no auth."""
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post") as mock:
+            result = iscsi.target_create("dev", chap_user=user, chap_password=password)
+        assert result["success"] is False
+        assert result["error"]["code"] == "chap_incomplete"
+        mock.assert_not_called()
+
+    def test_both_omitted_is_an_unauthenticated_target_on_purpose(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post", return_value={"success": True}) as mock:
+            iscsi.target_create("dev")
+        assert mock.call_args[0][3]["auth_type"] == "0"
+
+    def test_empty_iqn_is_refused_rather_than_replaced(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post") as mock:
+            result = iscsi.target_create("dev", iqn="")
+        assert result["error"]["code"] == "invalid_argument"
+        mock.assert_not_called()
+
+
+class TestInputCoercion:
+    """int() would silently change caller input; these must be refused."""
+
+    @pytest.mark.parametrize("bad_size", [True, False, 0.9, "abc", None, [1]])
+    def test_bad_size_is_refused_before_any_request(self, bad_size):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post") as mock:
+            result = iscsi.lun_create("dev", "/volume2", bad_size)
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_argument"
+        mock.assert_not_called()
+
+    def test_true_would_have_become_a_one_byte_lun(self):
+        """int(True) == 1. The regression guard for the coercion."""
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post") as mock:
+            iscsi.lun_create("dev", "/volume2", True)
+        mock.assert_not_called()
+
+    @pytest.mark.parametrize("good,expected", [(1073741824, "1073741824"), (1024.0, "1024"), ("2048", "2048")])
+    def test_whole_numbers_are_accepted(self, good, expected):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post", return_value={"success": True}) as mock:
+            iscsi.lun_create("dev", "/volume2", good)
+        assert mock.call_args[0][3]["size"] == expected
+
+    @pytest.mark.parametrize("bad", [{"uuid-1": False}, "uuid-1", 5, [""], [None], [123]])
+    def test_bad_uuid_list_shapes_are_refused(self, bad):
+        """A dict iterates its KEYS; a string iterates characters."""
+        with pytest.raises(ValueError):
+            _uuid_list(bad, "lun_uuids")
+
+    def test_good_uuid_list_is_stripped(self):
+        assert _uuid_list([" a ", "b"], "lun_uuids") == ["a", "b"]
+
+
+class TestExplicitOptionalValues:
+    """An explicitly supplied value is honoured, not replaced by the default."""
+
+    def test_empty_additional_is_honoured_not_defaulted(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "get", return_value={"success": True}) as mock:
+            iscsi.lun_list(additional=[])
+        assert mock.call_args[0][3] == {"additional": "[]"}
+
+    def test_empty_additional_on_targets_is_honoured(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "get", return_value={"success": True}) as mock:
+            iscsi.target_list(additional=[])
+        assert mock.call_args[0][3] == {"additional": "[]"}
+
+    def test_omitted_additional_still_gets_the_default(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "get", return_value={"success": True}) as mock:
+            iscsi.lun_list()
+        assert mock.call_args[0][3] == {"additional": '["status", "is_mapped"]'}
 
 
 class TestEmptyMappingRequest:
@@ -502,13 +646,116 @@ class TestEmptyMappingRequest:
 
     def test_empty_lun_uuids_is_refused_not_reported_as_success(self):
         server = self._server()
-        with patch.object(server, "_get_base_url", return_value="https://nas.example"):
-            with patch.object(server, "_get_iscsi") as get_iscsi:
-                result = json.loads(
-                    asyncio.run(
-                        server._handle_target_map_lun({"target_id": 1, "lun_uuids": []})
-                    )[0].text
+        with patch.object(server, "_get_iscsi") as get_iscsi:
+            with pytest.raises(ToolFailure) as raised:
+                asyncio.run(
+                    server._handle_target_map_lun({"target_id": 1, "lun_uuids": []})
                 )
-        assert result["success"] is False
-        assert result["error"]["code"] == "empty_selection"
+        assert raised.value.payload["error"]["code"] == "empty_selection"
         get_iscsi.assert_not_called()
+
+    def test_malformed_lun_uuids_never_reaches_a_write(self):
+        server = self._server()
+        with patch.object(server, "_get_iscsi") as get_iscsi:
+            with pytest.raises(ToolFailure) as raised:
+                asyncio.run(
+                    server._handle_target_map_lun(
+                        {"target_id": 1, "lun_uuids": {"real-uuid": False}}
+                    )
+                )
+        assert raised.value.payload["error"]["code"] == "invalid_argument"
+        get_iscsi.assert_not_called()
+
+    def test_partial_failure_sets_the_error_flag(self):
+        """One LUN maps, one fails: the call must not report success."""
+        server = self._server()
+        iscsi = MagicMock()
+        iscsi.lun_map_targets.side_effect = [
+            {"success": True},
+            {"success": False, "error": {"code": 105}},
+        ]
+        with (
+            patch.object(server, "_get_base_url", return_value="https://nas.example"),
+            patch.object(server, "_get_iscsi", return_value=iscsi),
+        ):
+            with pytest.raises(ToolFailure) as raised:
+                asyncio.run(
+                    server._handle_target_map_lun({"target_id": 1, "lun_uuids": ["a", "b"]})
+                )
+        payload = raised.value.payload
+        assert payload["success"] is False
+        # The per-LUN evidence must survive the raise.
+        assert [r["lun_uuid"] for r in payload["data"]["results"]] == ["a", "b"]
+        assert payload["data"]["results"][0]["success"] is True
+        assert payload["data"]["results"][1]["success"] is False
+
+
+class TestSessionRace:
+    """Recovery must name the SID the failed request actually used."""
+
+    def test_relogin_is_told_the_sid_that_was_attempted(self):
+        from utils.synology_api import SynologyAPIClient
+
+        client = SynologyAPIClient("https://nas.example", "S0", syno_token="t0")
+        expired = {"success": False, "error": {"code": 106}}
+
+        def displace(*_a, **_k):
+            # Another caller sharing this client recovers first, moving it to S1
+            # while our request is still in flight.
+            client.session_id = "S1"
+            return expired
+
+        with (
+            patch.object(client, "_do_request", side_effect=displace),
+            patch("utils.synology_api._try_relogin", return_value=(None, None)) as relogin,
+        ):
+            client.request(LUN_API, "list")
+
+        # S0 is the session that failed. Reporting S1 would tell the auth layer
+        # the CURRENT session is dead, so its dedupe guard would open a second
+        # session instead of reusing the good one.
+        relogin.assert_called_once_with("https://nas.example", "S0")
+
+
+class TestWriteTimeouts:
+    """A LUN write must not use the default read timeout.
+
+    Observed on 2026-09-08: SYNO.Core.ISCSI.LUN/create returned a read timeout
+    to the caller and created the LUN anyway. A client-side timeout does not
+    cancel what DSM is already doing, so the uuid was lost and the LUN was
+    invisible to the caller -- found only by listing everything.
+    """
+
+    def test_create_uses_the_long_timeout(self):
+        from utils.synology_api import DEFAULT_TIMEOUT, LUN_WRITE_TIMEOUT
+
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post", return_value={"success": True}) as mock:
+            iscsi.lun_create("dev", "/volume2", 1024)
+        assert mock.call_args.kwargs.get("timeout") == LUN_WRITE_TIMEOUT
+        assert LUN_WRITE_TIMEOUT > DEFAULT_TIMEOUT
+
+    def test_delete_uses_the_long_timeout(self):
+        from utils.synology_api import LUN_WRITE_TIMEOUT
+
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "post", return_value={"success": True}) as mock:
+            iscsi.lun_delete("uuid-1")
+        assert mock.call_args.kwargs.get("timeout") == LUN_WRITE_TIMEOUT
+
+    def test_reads_do_not_pay_the_long_timeout(self):
+        iscsi = _make_iscsi()
+        with patch.object(iscsi._api, "get", return_value={"success": True}) as mock:
+            iscsi.lun_list()
+        assert "timeout" not in mock.call_args.kwargs
+
+    def test_the_client_actually_passes_it_through(self):
+        """The parameter must reach requests, not just be accepted."""
+        from utils.synology_api import SynologyAPIClient
+
+        client = SynologyAPIClient("https://nas.example", "sid")
+        with patch("utils.synology_api.requests.post") as post:
+            post.return_value.json.return_value = {"success": True}
+            post.return_value.raise_for_status = MagicMock()
+            client.post(LUN_API, "create", 1, {"name": "x"}, timeout=120)
+        assert post.call_args.kwargs["timeout"] == 120
