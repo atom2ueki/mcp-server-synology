@@ -210,9 +210,12 @@ class SynologyConfig:
                 )
                 return False
 
-            # Build the allowlist of trusted trustee SIDs. We compare SIDs as
-            # strings (sid.__str__) for stability against pywin32's PySID
-            # object identity quirks.
+            # Build the allowlist of trusted trustee SIDs, comparing canonical
+            # "S-1-…" string forms on both sides. str(PySID) is NOT canonical
+            # — it returns a "PySID:"-prefixed repr — so comparing it against
+            # the literal entries below never matched SYSTEM/Administrators
+            # ACEs and failed the audit (#97). ConvertSidToStringSid is the
+            # canonical conversion.
             #
             # Use well-known SID *literals* rather than LookupAccountName:
             # account names are localized on non-English Windows (e.g. German
@@ -220,7 +223,7 @@ class SynologyConfig:
             # fail and drop S-1-5-32-544 from the allowlist — rejecting a
             # normal secured DACL. The SID strings are locale-independent.
             allowed_sid_strs = {
-                str(current_sid),
+                win32security.ConvertSidToStringSid(current_sid),
                 "S-1-5-18",       # NT AUTHORITY\SYSTEM
                 "S-1-5-32-544",   # BUILTIN\Administrators
             }
@@ -312,7 +315,7 @@ class SynologyConfig:
 
                 try:
                     trustee_sid = ace[trustee_index]
-                    trustee_sid_str = str(trustee_sid)
+                    trustee_sid_str = win32security.ConvertSidToStringSid(trustee_sid)
                 except Exception as e:
                     logger.warning(
                         f"{path} has an ACE whose trustee could not be read ({e}); "
