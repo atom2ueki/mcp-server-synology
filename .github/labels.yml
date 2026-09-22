@@ -3,9 +3,9 @@
 # reconciles labels via the GitHub API.
 #
 # Each label's `description` is a classification rubric (max 100 chars).
-# Claude triage reads them via `gh label list`.
+# Triage reads them via `gh label list`.
 
-# ---- TYPE axis ---- (Claude triage applies based on issue body)
+# ---- TYPE axis ---- (applies based on issue body)
 - name: bug
   description: Something isn't working as designed.
   color: "d73a4a"
@@ -22,7 +22,7 @@
   description: Open-ended exploration or unscoped concept; not yet ready to schedule.
   color: "ededed"
 
-# ---- PRIORITY axis ---- (Claude triage applies; REQUIRED on every classified issue)
+# ---- PRIORITY axis ---- (REQUIRED on every classified issue)
 - name: p1
   description: Showstopper. Production broken, data loss, or security incident. Drop other work.
   color: "b60205"
