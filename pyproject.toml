@@ -24,7 +24,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-server-synology"
-version = "1.7.0"
+version = "1.7.1"
 description = "MCP server for Synology NAS"
 readme = "README.md"
 authors = [{ name = "Tony Li" }]
