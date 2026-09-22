@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-22
+
 ### Fixed
 - **The Windows ACL audit rejected the very lockdown the README documents.** Trustee SIDs were stringified with `str()`, but pywin32's `PySID.__str__` returns a `PySID:`-prefixed repr (e.g. `PySID:S-1-5-32-544`), so the well-known allowlist literals for `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` never matched — only the current user's own ACE passed, and a DACL created with the README's own `icacls` script failed the fail-closed check at startup, steering users toward `SYNOLOGY_MCP_ALLOW_UNVERIFIED_WINDOWS_ACL=true`. Both sides of the comparison now go through `win32security.ConvertSidToStringSid`, which yields the canonical locale-independent `S-1-…` form (#97). The test fakes now model `PySID`'s prefixed `str()` and value equality, so this class of bug fails the suite instead of shipping.
 
