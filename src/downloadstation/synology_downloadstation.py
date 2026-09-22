@@ -205,12 +205,15 @@ class SynologyDownloadStation:
                 raise
 
         tasks = []
-        for task in data.get("tasks", []):
+        raw_tasks = data.get("tasks")
+        if raw_tasks is None:
+            raw_tasks = data.get("task", [])
+        for task in raw_tasks:
             task_info = {
-                "id": task.get("id"),
+                "id": task.get("id") or task.get("task_id"),
                 "type": task.get("type"),
                 "username": task.get("username"),
-                "title": task.get("title"),
+                "title": task.get("title") or task.get("filename"),
                 "size": task.get("size"),
                 "status": task.get("status"),
                 "status_extra": task.get("status_extra", {}),
@@ -268,6 +271,27 @@ class SynologyDownloadStation:
                 "bt_max_upload": 0,
             }
 
+    @staticmethod
+    def _new_task_ids(
+        tasks: List[Dict[str, Any]],
+        uri: str,
+        destination: str,
+        existing_task_ids: set[str],
+    ) -> List[str]:
+        """Find newly appeared URI matches, preferring the requested destination."""
+        candidates = [
+            task
+            for task in tasks
+            if task.get("id")
+            and task.get("uri") == uri
+            and task["id"] not in existing_task_ids
+        ]
+        destination_matches = [
+            task for task in candidates if task.get("destination") == destination
+        ]
+        selected = destination_matches or candidates
+        return [task["id"] for task in selected]
+
     def create_task(
         self,
         uri: str,
@@ -317,7 +341,9 @@ class SynologyDownloadStation:
         params = {
             "type": "url",
             "destination": destination,
-            "create_list": "true",
+            # `true` creates a preview list that the DSM UI later confirms via
+            # Task.List.Polling; it does not create a download task by itself.
+            "create_list": "false",
             "url": json.dumps([uri]),  # URL as JSON array
         }
 
@@ -327,24 +353,32 @@ class SynologyDownloadStation:
         if password:
             params["password"] = password
 
+        logger.debug("Creating task with real NAS format")
+        logger.debug(f"URI: {uri}")
+        logger.debug(f"Destination: {destination}")
+
+        existing_task_ids: Optional[set[str]]
         try:
-            logger.debug("Creating task with real NAS format")
-            logger.debug(f"URI: {uri}")
-            logger.debug(f"Destination: {destination}")
+            existing_tasks = self.list_tasks(limit=100).get("tasks", [])
+            existing_task_ids = {
+                task["id"]
+                for task in existing_tasks
+                if task.get("id") and task.get("uri") == uri
+            }
+        except Exception as lookup_error:
+            existing_task_ids = None
+            logger.warning(
+                "Could not capture task IDs before creation; ID synthesis will be skipped: %s",
+                lookup_error,
+            )
 
+        try:
             data = self._make_request(self.task_api, self.task_version, "create", **params)
-
-            logger.info("Task created successfully!")
-            logger.debug(f"Task IDs: {data.get('task_id', [])}")
-            logger.debug(f"List IDs: {data.get('list_id', [])}")
-
-            return data
-
         except Exception as e:
-            error_msg = str(e)
             logger.warning(f"Create task failed: {e}")
 
-            # Fallback: Try with version 1 if version 2 failed
+            # Only a failed create request may fall back. Once v2 succeeds,
+            # retrying creation can materialize the same download twice.
             if self.task_version != "1":
                 try:
                     logger.info("Trying with DownloadStation2.Task v1")
@@ -365,19 +399,53 @@ class SynologyDownloadStation:
                 f"Task creation failed: {e}. Make sure the URL is valid and you have permission to create downloads."
             )
 
+        task_ids = data.get("task_id", [])
+        if isinstance(task_ids, str):
+            task_ids = [task_ids]
+        if not task_ids and existing_task_ids is not None:
+            import time
+
+            try:
+                for _ in range(20):
+                    tasks = self.list_tasks(limit=100).get("tasks", [])
+                    task_ids = self._new_task_ids(
+                        tasks,
+                        uri,
+                        destination,
+                        existing_task_ids,
+                    )
+                    if task_ids:
+                        break
+                    time.sleep(0.25)
+            except Exception as lookup_error:
+                logger.warning(
+                    "Task was created, but its materialized ID could not be resolved: %s",
+                    lookup_error,
+                )
+        if task_ids:
+            data = {**data, "task_id": task_ids}
+
+        logger.info("Task created successfully!")
+        logger.debug(f"Task IDs: {data.get('task_id', [])}")
+        logger.debug(f"List IDs: {data.get('list_id', [])}")
+        return data
+
     def delete_tasks(self, task_ids: List[str], force_complete: bool = False) -> Dict[str, Any]:
         """Delete download tasks."""
-        params = {"id": ",".join(task_ids), "force_complete": force_complete}
+        params = {
+            "id": json.dumps(task_ids),
+            "force_complete": json.dumps(force_complete),
+        }
         return self._make_request(self.task_api, self.task_version, "delete", **params)
 
     def pause_tasks(self, task_ids: List[str]) -> Dict[str, Any]:
         """Pause download tasks."""
-        params = {"id": ",".join(task_ids)}
+        params = {"id": json.dumps(task_ids)}
         return self._make_request(self.task_api, self.task_version, "pause", **params)
 
     def resume_tasks(self, task_ids: List[str]) -> Dict[str, Any]:
         """Resume download tasks."""
-        params = {"id": ",".join(task_ids)}
+        params = {"id": json.dumps(task_ids)}
         return self._make_request(self.task_api, self.task_version, "resume", **params)
 
     def get_statistics(self) -> Dict[str, Any]:

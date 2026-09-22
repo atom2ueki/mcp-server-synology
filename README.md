@@ -403,9 +403,9 @@ docker-compose up
 - **`synology_container_resource`** - Get real-time resource usage for a Container Manager container
   - `name` (required): Container name
 - **`synology_container_project_list`** - List Container Manager projects
-- **`synology_container_project_get`** - Get a Container Manager project
+- **`synology_container_project_get`** - Get a Container Manager project (Compose, environment, and secret fields are omitted)
   - `name` (required): Project name
-- **`synology_container_project_create`** - Create a Container Manager project
+- **`synology_container_project_create`** - Create and save a Container Manager project definition
   - `name` (required): Project name
   - `share_path` (required): Project folder path on the NAS
   - `content` (required): Docker Compose YAML content
@@ -413,6 +413,7 @@ docker-compose up
   - `service_portal_name` (optional): Service portal name
   - `service_portal_port` (optional): Service portal port
   - `service_portal_protocol` (optional): Service portal protocol (default: `http`)
+  - Saves the Compose definition; call `synology_container_project_build` to materialize it.
 - **`synology_container_project_update`** - Update a Container Manager project
   - `name` (required): Project name
   - `content` (required): Docker Compose YAML content
@@ -426,7 +427,7 @@ docker-compose up
   - `name` (required): Project name
 - **`synology_container_project_restart`** - Restart a Container Manager project
   - `name` (required): Project name
-- **`synology_container_project_build`** - Build a Container Manager project
+- **`synology_container_project_build`** - Materialize or rebuild a saved Container Manager project
   - `name` (required): Project name
 - **`synology_container_project_clean`** - Clean a Container Manager project
   - `name` (required): Project name

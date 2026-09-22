@@ -24,6 +24,14 @@ def _successful_response(data=None):
     return fake_response
 
 
+def _successful_stream_response():
+    fake_response = MagicMock()
+    fake_response.iter_content.return_value = [b"working\n", b"Exit Code: 0\n"]
+    fake_response.raise_for_status = MagicMock()
+    fake_response.close = MagicMock()
+    return fake_response
+
+
 @pytest.mark.parametrize(
     ("method_name", "api_method"),
     [
@@ -51,6 +59,7 @@ def test_container_name_methods_quote_name_for_dsm(method_name, api_method):
 
     assert sent_headers is not None
     assert sent_headers.get("X-SYNO-TOKEN") == "tok_abc"
+    assert post.call_args.kwargs["timeout"] == 60
 
     expected_api = (
         "SYNO.Docker.Container.Resource"
@@ -132,10 +141,10 @@ def test_container_delete_wire_format_matches_dsm():
     ("method_name", "api_method"),
     [
         ("get_project", "get"),
-        ("start_project", "start"),
-        ("stop_project", "stop"),
-        ("restart_project", "restart"),
-        ("build_project", "build"),
+        ("start_project", "start_stream"),
+        ("stop_project", "stop_stream"),
+        ("restart_project", "restart_stream"),
+        ("build_project", "build_stream"),
         ("clean_project", "clean"),
         ("delete_project", "delete"),
     ],
@@ -144,6 +153,11 @@ def test_project_name_methods_find_project_id_before_calling_dsm(method_name, ap
     """Project methods are name-based for MCP callers and ID-based for DSM."""
     container = _container()
 
+    action_response = (
+        _successful_stream_response()
+        if api_method.endswith("_stream")
+        else _successful_response()
+    )
     with patch(
         "utils.synology_api.requests.post",
         side_effect=[
@@ -156,12 +170,13 @@ def test_project_name_methods_find_project_id_before_calling_dsm(method_name, ap
                     }
                 }
             ),
-            _successful_response(),
+            action_response,
         ],
     ) as post:
         result = getattr(container, method_name)("watchtower")
 
-    assert result == {"data": {}, "success": True}
+    expected_data = {"exit_code": 0} if api_method.endswith("_stream") else {}
+    assert result == {"data": expected_data, "success": True}
 
     list_data = post.call_args_list[0].kwargs["data"]
     assert list_data["api"] == "SYNO.Docker.Project"
@@ -170,7 +185,55 @@ def test_project_name_methods_find_project_id_before_calling_dsm(method_name, ap
     action_data = post.call_args_list[1].kwargs["data"]
     assert action_data["api"] == "SYNO.Docker.Project"
     assert action_data["method"] == api_method
-    assert action_data["id"] == "abc-123"
+    assert action_data["id"] == '"abc-123"'
+    if api_method.endswith("_stream"):
+        assert post.call_args_list[1].kwargs["stream"] is True
+        assert post.call_args_list[1].kwargs["timeout"] == (15, 300)
+
+
+def test_project_stream_failure_returns_structured_exit_code():
+    """A non-zero Compose exit must not be reported as a successful lifecycle call."""
+    container = _container()
+    failed = MagicMock()
+    failed.iter_content.return_value = [b"compose failed\nExit Code: 17\n"]
+    failed.raise_for_status = MagicMock()
+    failed.close = MagicMock()
+
+    with patch(
+        "utils.synology_api.requests.post",
+        side_effect=[
+            _successful_response({"abc-123": {"id": "abc-123", "name": "media"}}),
+            failed,
+        ],
+    ):
+        result = container.build_project("media")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "stream_exit_17"
+
+
+def test_project_stream_uses_final_exit_code_marker():
+    """Only DSM's final exit marker determines the streamed operation result."""
+    container = _container()
+    failed = MagicMock()
+    failed.iter_content.return_value = [
+        b"build output mentioned Exit Code: 0\n",
+        b"DSM final marker\nExit Code: 17\n",
+    ]
+    failed.raise_for_status = MagicMock()
+    failed.close = MagicMock()
+
+    with patch(
+        "utils.synology_api.requests.post",
+        side_effect=[
+            _successful_response({"abc-123": {"id": "abc-123", "name": "media"}}),
+            failed,
+        ],
+    ):
+        result = container.build_project("media")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "stream_exit_17"
 
 
 def test_project_create_wire_format_matches_dsm():
@@ -222,7 +285,7 @@ def test_project_create_wire_format_matches_dsm():
 
     update_data = post.call_args_list[3].kwargs["data"]
     assert update_data["method"] == "update"
-    assert update_data["id"] == "abc-123"
+    assert update_data["id"] == '"abc-123"'
     assert update_data["content"] == "services:\n  app:\n    image: caddy:alpine\n"
 
 
@@ -248,9 +311,46 @@ def test_project_update_finds_project_id_before_updating():
     update_data = post.call_args_list[1].kwargs["data"]
     assert update_data["api"] == "SYNO.Docker.Project"
     assert update_data["method"] == "update"
-    assert update_data["id"] == "abc-123"
+    assert update_data["id"] == '"abc-123"'
     assert update_data["content"] == "services:\n  app:\n    image: caddy:latest\n"
     assert update_data["enable_service_portal"] == "false"
+
+
+def test_project_get_omits_compose_environment_and_secret_fields():
+    """Read-only project details must not expose Compose or container credentials."""
+    container = _container()
+
+    with patch(
+        "utils.synology_api.requests.post",
+        side_effect=[
+            _successful_response({"abc-123": {"id": "abc-123", "name": "media"}}),
+            _successful_response(
+                {
+                    "id": "abc-123",
+                    "name": "media",
+                    "content": "services:\n  app:\n    environment:\n      TOKEN: secret",
+                    "containers": [
+                        {
+                            "name": "media-app",
+                            "status": "running",
+                            "env": ["TOKEN=secret"],
+                            "password": "secret",
+                        }
+                    ],
+                }
+            ),
+        ],
+    ):
+        result = container.get_project("media")
+
+    assert result == {
+        "success": True,
+        "data": {
+            "id": "abc-123",
+            "name": "media",
+            "containers": [{"name": "media-app", "status": "running"}],
+        },
+    }
 
 
 def test_project_update_quotes_service_portal_params_like_create():
@@ -794,6 +894,65 @@ def test_container_tools_are_registered():
     }.issubset(names)
 
     assert "synology_container_api_call" not in names
+
+
+def test_project_tool_schemas_require_handler_inputs():
+    """Schema-valid project writes must include every directly indexed argument."""
+    from mcp_server import SynologyMCPServer
+
+    server = SynologyMCPServer()
+    tools = {tool.name: tool for tool in server._get_tool_definitions()}
+
+    assert tools["synology_container_project_create"].input_schema["required"] == [
+        "name",
+        "share_path",
+        "content",
+    ]
+    assert tools["synology_container_project_update"].input_schema["required"] == [
+        "name",
+        "content",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_project_stream_operation_keeps_event_loop_responsive():
+    """A blocked DSM stream runs outside the MCP event loop."""
+    import asyncio
+    import threading
+
+    from mcp_server import SynologyMCPServer
+
+    server = SynologyMCPServer()
+    container = MagicMock()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_build(name):
+        assert name == "media"
+        started.set()
+        release.wait(timeout=1)
+        return {"success": True, "data": {"exit_code": 0}}
+
+    container.build_project.side_effect = blocking_build
+
+    with (
+        patch.object(server, "_get_base_url", return_value="https://nas.example.com:5001"),
+        patch.object(server, "_get_container", return_value=container),
+    ):
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        task = asyncio.create_task(
+            server._handle_container_call({"name": "media"}, method_name="project_build")
+        )
+        try:
+            await asyncio.sleep(0.02)
+            assert started.is_set()
+            assert loop.time() - started_at < 0.5
+        finally:
+            release.set()
+        result = await task
+
+    assert json.loads(result[0].text)["success"] is True
 
 
 @pytest.mark.asyncio

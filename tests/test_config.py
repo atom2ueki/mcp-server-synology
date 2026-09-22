@@ -62,17 +62,20 @@ class TestSynologyConfig:
         reload_config()
 
         with clear_env():
-            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
-                with patch.object(Path, "exists", return_value=False):
-                    from config import SynologyConfig
+            with patch("dotenv.load_dotenv"):
+                import config as config_module
 
-                    config = SynologyConfig()
+                with patch.object(
+                    config_module, "SETTINGS_FILE", Path("/nonexistent/secrets.json")
+                ):
+                    with patch.object(Path, "exists", return_value=False):
+                        config = config_module.SynologyConfig()
 
-                    assert config.server_name == "synology-mcp-server"
-                    assert config.server_version == "1.0.0"
-                    assert config.default_session_timeout == 3600
-                    assert config.auto_login is True
-                    assert config.verify_ssl is False
+                        assert config.server_name == "synology-mcp-server"
+                        assert config.server_version == "1.0.0"
+                        assert config.default_session_timeout == 3600
+                        assert config.auto_login is True
+                        assert config.verify_ssl is False
 
     def test_has_credentials_with_secrets(self, tmp_path):
         """Test credential detection with secrets.json."""
@@ -167,16 +170,19 @@ class TestSynologyConfig:
         # is in the developer's local .env. Patch os.path.exists so the loader
         # treats the project as having no .env.
         with clear_env():
-            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
-                with patch("config.os.path.exists", return_value=False):
-                    with patch.object(Path, "exists", return_value=False):
-                        from config import SynologyConfig
+            with patch("dotenv.load_dotenv"):
+                import config as config_module
 
-                        cfg = SynologyConfig()
+                with patch.object(
+                    config_module, "SETTINGS_FILE", Path("/nonexistent/secrets.json")
+                ):
+                    with patch.object(config_module.os.path, "exists", return_value=False):
+                        with patch.object(Path, "exists", return_value=False):
+                            cfg = config_module.SynologyConfig()
 
-                        errors = cfg.validate_config()
-                        assert len(errors) > 0
-                        assert "No Synology credentials" in errors[0]
+                            errors = cfg.validate_config()
+                            assert len(errors) > 0
+                            assert "No Synology credentials" in errors[0]
 
     def test_validate_config_timeout_too_low(self):
         """Test validation fails with low timeout."""

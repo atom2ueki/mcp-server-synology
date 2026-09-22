@@ -1,6 +1,6 @@
 """NFS management module tests."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -156,6 +156,203 @@ def test_nfs_set_nfs_permission_parameter_validation():
     assert isinstance(result, dict)
 
     print("✅ Parameter validation tests passed")
+
+
+def test_nfs_set_permission_wire_format_matches_dsm_7_3_2(tmp_path, monkeypatch):
+    """NFS rules use DSM's SharePrivilege load/save API and preserve other clients."""
+    import json
+
+    from nfs.synology_nfs import SynologyNFS
+
+    monkeypatch.setattr(SynologyNFS, "_lock_directory", tmp_path)
+
+    nfs = SynologyNFS(
+        "https://nas.example.com:5001",
+        "sid_xyz",
+        verify_ssl=False,
+        syno_token="tok_abc",
+    )
+    existing_rule = {
+        "client": "192.0.2.2",
+        "privilege": "rw",
+        "root_squash": "root",
+        "async": True,
+        "insecure": False,
+        "crossmnt": False,
+        "security_flavor": {"sys": True},
+    }
+    load_response = MagicMock()
+    load_response.json.return_value = {
+        "success": True,
+        "data": {"rule": [existing_rule]},
+    }
+    load_response.raise_for_status = MagicMock()
+    save_response = MagicMock()
+    save_response.json.return_value = {"success": True, "data": {}}
+    save_response.raise_for_status = MagicMock()
+
+    with (
+        patch("utils.synology_api.requests.get", return_value=load_response) as get,
+        patch("utils.synology_api.requests.post", return_value=save_response) as post,
+    ):
+        result = nfs.set_nfs_permission(
+            "audit",
+            "192.0.2.1",
+            privilege="readonly",
+            squash="root_squash",
+            security="sys",
+        )
+
+    assert result["success"] is True
+    load_data = get.call_args.kwargs["params"]
+    assert load_data["api"] == "SYNO.Core.FileServ.NFS.SharePrivilege"
+    assert load_data["method"] == "load"
+    assert load_data["share_name"] == "audit"
+
+    save_data = post.call_args.kwargs["data"]
+    assert save_data["api"] == "SYNO.Core.FileServ.NFS.SharePrivilege"
+    assert save_data["method"] == "save"
+    assert save_data["share_name"] == "audit"
+    assert post.call_args.kwargs["headers"]["X-SYNO-TOKEN"] == "tok_abc"
+    assert json.loads(save_data["rule"]) == [
+        existing_rule,
+        {
+            "client": "192.0.2.1",
+            "privilege": "ro",
+            "root_squash": "guest",
+            "async": True,
+            "insecure": False,
+            "crossmnt": False,
+            "security_flavor": {
+                "sys": True,
+                "kerberos": False,
+                "kerberos_integrity": False,
+                "kerberos_privacy": False,
+            },
+        },
+    ]
+
+
+def test_nfs_set_permission_serializes_same_nas_share(tmp_path, monkeypatch):
+    """Two local MCP processes cannot lose each other's NFS rule updates."""
+    import json
+    import threading
+    import time
+
+    from nfs.synology_nfs import SynologyNFS
+
+    monkeypatch.setattr(SynologyNFS, "_lock_directory", tmp_path)
+    monkeypatch.setattr(SynologyNFS, "_lock_timeout_seconds", 2)
+
+    first = SynologyNFS("https://nas.example.com:5001", "sid-1")
+    second = SynologyNFS("https://nas.example.com:5001", "sid-2")
+    state = {"rules": []}
+    state_guard = threading.Lock()
+    first_save_started = threading.Event()
+    release_first_save = threading.Event()
+    results = []
+    errors = []
+    load_count = 0
+
+    def fake_api_call(api, method, version=1, extra_params=None, use_post=False):
+        nonlocal load_count
+        assert api == "SYNO.Core.FileServ.NFS.SharePrivilege"
+        if method == "load":
+            with state_guard:
+                load_count += 1
+                rules = json.loads(json.dumps(state["rules"]))
+            return {"success": True, "data": {"rule": rules}}
+
+        assert method == "save"
+        assert use_post is True
+        proposed = json.loads(extra_params["rule"])
+        if any(rule.get("client") == "192.0.2.1" for rule in proposed):
+            first_save_started.set()
+            release_first_save.wait(timeout=1)
+        with state_guard:
+            state["rules"] = proposed
+        return {"success": True, "data": {}}
+
+    first._api_call = fake_api_call
+    second._api_call = fake_api_call
+
+    def update(nfs, client_ip):
+        try:
+            results.append(nfs.set_nfs_permission("audit", client_ip))
+        except Exception as exc:
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=update, args=(first, "192.0.2.1"))
+    second_thread = threading.Thread(target=update, args=(second, "192.0.2.2"))
+    first_thread.start()
+    assert first_save_started.wait(timeout=0.5)
+    second_thread.start()
+
+    time.sleep(0.05)
+    assert load_count == 1
+    release_first_save.set()
+    first_thread.join(timeout=1)
+    second_thread.join(timeout=1)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert errors == []
+    assert all(result["success"] for result in results)
+    assert {rule["client"] for rule in state["rules"]} == {"192.0.2.1", "192.0.2.2"}
+
+
+@pytest.mark.parametrize("data", [{}, {"rule": {}}, {"rule": ["malformed"]}])
+def test_nfs_set_permission_rejects_malformed_existing_rules(data, tmp_path, monkeypatch):
+    """Malformed load data must never be replaced by a one-rule save."""
+    from nfs.synology_nfs import SynologyNFS
+
+    monkeypatch.setattr(SynologyNFS, "_lock_directory", tmp_path)
+    nfs = SynologyNFS("https://nas.example.com:5001", "sid")
+    nfs._api_call = MagicMock(return_value={"success": True, "data": data})
+
+    result = nfs.set_nfs_permission("audit", "192.0.2.1")
+
+    assert result == {
+        "success": False,
+        "error": {
+            "code": "invalid_response",
+            "message": "DSM returned malformed NFS rule data; no changes were saved",
+        },
+    }
+    nfs._api_call.assert_called_once_with(
+        "SYNO.Core.FileServ.NFS.SharePrivilege",
+        "load",
+        extra_params={"share_name": "audit"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_nfs_set_permission_handler_uses_worker_thread():
+    """Waiting for the cross-process lock must not block the MCP event loop."""
+    from mcp_server import SynologyMCPServer
+
+    server = SynologyMCPServer()
+    nfs = MagicMock()
+    to_thread = AsyncMock(return_value={"success": True})
+
+    with (
+        patch.object(server, "_get_base_url", return_value="https://nas.example.com:5001"),
+        patch.object(server, "_get_nfs", return_value=nfs),
+        patch("mcp_server.asyncio.to_thread", to_thread),
+    ):
+        result = await server._handle_nfs_set_permission(
+            {"share_name": "audit", "client_ip": "192.0.2.1"}
+        )
+
+    to_thread.assert_awaited_once_with(
+        nfs.set_nfs_permission,
+        share_name="audit",
+        client_ip="192.0.2.1",
+        privilege="readwrite",
+        squash="root_squash",
+        security="sys",
+    )
+    assert result[0].text == '{\n  "success": true\n}'
 
 
 def test_create_share_wire_format_matches_dsm_7_3_2():

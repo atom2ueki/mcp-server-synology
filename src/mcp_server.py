@@ -226,13 +226,13 @@ class SynologyMCPServer:
         self._register_tool("synology_container_logs", "Get logs from a container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}, "since": {"type": "string", "description": "Return logs since this timestamp (optional)"}, "offset": {"type": "integer", "description": "Pagination offset (default: 0)", "minimum": 0}, "limit": {"type": "integer", "description": "Max lines to return (default: 1000)", "minimum": 1}}, "required": ["name"]}, partial(self._handle_container_call, method_name="logs"))
         self._register_tool("synology_container_resource", "Get resource usage for a container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="resource"))
         self._register_tool("synology_container_project_list", "List Docker Compose projects", CI, partial(self._handle_container_call, method_name="project_list"))
-        self._register_tool("synology_container_project_get", "Get details of a Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_get"))
-        self._register_tool("synology_container_project_create", "Create a new Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}, "content": {"type": "string", "description": "Docker Compose YAML content"}, "share_path": {"type": "string", "description": "Share path where the compose file is stored"}, "enable_service_portal": {"type": "boolean", "description": "Enable Synology service portal (default: false)"}, "service_portal_name": {"type": "string", "description": "Optional service portal name"}, "service_portal_port": {"type": "integer", "description": "Optional service portal port"}, "service_portal_protocol": {"type": "string", "description": "Service portal protocol (default: http)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_create"))
-        self._register_tool("synology_container_project_update", "Update a Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}, "content": {"type": "string", "description": "New Docker Compose YAML content"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_update"))
+        self._register_tool("synology_container_project_get", "Get Docker Compose project details with Compose, environment, and secret fields omitted", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_get"))
+        self._register_tool("synology_container_project_create", "Create and save a Docker Compose project definition; run project_build to materialize it", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}, "content": {"type": "string", "description": "Docker Compose YAML content"}, "share_path": {"type": "string", "description": "Share path where the compose file is stored"}, "enable_service_portal": {"type": "boolean", "description": "Enable Synology service portal (default: false)"}, "service_portal_name": {"type": "string", "description": "Optional service portal name"}, "service_portal_port": {"type": "integer", "description": "Optional service portal port"}, "service_portal_protocol": {"type": "string", "description": "Service portal protocol (default: http)"}}, "required": ["name", "share_path", "content"]}, partial(self._handle_container_call, method_name="project_create"))
+        self._register_tool("synology_container_project_update", "Update a Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}, "content": {"type": "string", "description": "New Docker Compose YAML content"}}, "required": ["name", "content"]}, partial(self._handle_container_call, method_name="project_update"))
         self._register_tool("synology_container_project_start", "Start Docker Compose project services", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_start"))
         self._register_tool("synology_container_project_stop", "Stop Docker Compose project services", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_stop"))
         self._register_tool("synology_container_project_restart", "Restart Docker Compose project services", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_restart"))
-        self._register_tool("synology_container_project_build", "Build Docker Compose project images", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_build"))
+        self._register_tool("synology_container_project_build", "Materialize or rebuild a saved Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_build"))
         self._register_tool("synology_container_project_clean", "Clean Docker Compose project resources", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_clean"))
         self._register_tool("synology_container_project_delete", "Delete a Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_delete"))
         self._register_tool("synology_container_image_list", "List Docker images", CI, partial(self._handle_container_call, method_name="image_list"))
@@ -1000,7 +1000,9 @@ class SynologyMCPServer:
         password = arguments.get("password")
 
         downloadstation = self._get_downloadstation(base_url)
-        result = downloadstation.create_task(uri, destination, username, password)
+        result = await asyncio.to_thread(
+            downloadstation.create_task, uri, destination, username, password
+        )
 
         return [
             types.TextContent(
@@ -1132,7 +1134,8 @@ class SynologyMCPServer:
         """Handle setting NFS permissions on a share."""
         base_url = self._get_base_url(arguments)
         nfs = self._get_nfs(base_url)
-        result = nfs.set_nfs_permission(
+        result = await asyncio.to_thread(
+            nfs.set_nfs_permission,
             share_name=arguments["share_name"],
             client_ip=arguments["client_ip"],
             privilege=arguments.get("privilege", "readwrite"),
@@ -1277,7 +1280,15 @@ class SynologyMCPServer:
                 "project_build": container.build_project,
                 "project_clean": container.clean_project,
             }[method_name]
-            result = project_method(arguments["name"])
+            if method_name in {
+                "project_start",
+                "project_stop",
+                "project_restart",
+                "project_build",
+            }:
+                result = await asyncio.to_thread(project_method, arguments["name"])
+            else:
+                result = project_method(arguments["name"])
         elif method_name in {"get", "start", "stop", "restart", "resource"}:
             container_method = {
                 "get": container.get_container,

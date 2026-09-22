@@ -1,8 +1,222 @@
 """Real Download Station functionality tests."""
 
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def test_list_tasks_accepts_dsm_singular_task_payload():
+    """DSM 7.3.2 returns `task` and may use `task_id`/`filename`."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._make_request = MagicMock(
+        return_value={
+            "total": 1,
+            "task": [
+                {
+                    "task_id": "dbid_1",
+                    "filename": "audit.bin",
+                    "status": "downloading",
+                    "additional": {"detail": {"uri": "https://example.com/audit.bin"}},
+                }
+            ],
+        }
+    )
+
+    result = station.list_tasks()
+
+    assert result["total"] == 1
+    assert result["tasks"][0]["id"] == "dbid_1"
+    assert result["tasks"][0]["title"] == "audit.bin"
+    assert result["tasks"][0]["uri"] == "https://example.com/audit.bin"
+
+
+def test_create_task_starts_download_instead_of_preview_list():
+    """Direct MCP creation must use create_list=false and return the materialized task ID."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._check_destination_exists = MagicMock(return_value=True)
+    station._make_request = MagicMock(
+        side_effect=[
+            {},
+            {},
+            {
+                "total": 1,
+                "task": [
+                    {
+                        "id": "dbid_2",
+                        "title": "audit.bin",
+                        "additional": {
+                            "detail": {"uri": "https://example.com/audit.bin"}
+                        },
+                    }
+                ],
+            },
+        ]
+    )
+
+    result = station.create_task(
+        "https://example.com/audit.bin",
+        destination="downloads",
+    )
+
+    create_call = station._make_request.call_args_list[1]
+    assert create_call.args == ("SYNO.DownloadStation2.Task", "2", "create")
+    assert create_call.kwargs["create_list"] == "false"
+    assert create_call.kwargs["url"] == '["https://example.com/audit.bin"]'
+    assert result["task_id"] == ["dbid_2"]
+
+
+def test_create_task_does_not_retry_after_successful_v2_create():
+    """A failed ID lookup must not issue a second create request."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._check_destination_exists = MagicMock(return_value=True)
+    station._make_request = MagicMock(return_value={})
+    station.list_tasks = MagicMock(side_effect=RuntimeError("lookup unavailable"))
+
+    result = station.create_task(
+        "https://example.com/audit.bin",
+        destination="downloads",
+    )
+
+    assert result == {}
+    station._make_request.assert_called_once_with(
+        "SYNO.DownloadStation2.Task",
+        "2",
+        "create",
+        type="url",
+        destination="downloads",
+        create_list="false",
+        url='["https://example.com/audit.bin"]',
+    )
+    station.list_tasks.assert_called_once_with(limit=100)
+
+
+def test_create_task_returns_only_new_destination_match():
+    """An existing URI match must never be returned as the newly created task."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    uri = "https://example.com/audit.bin"
+
+    def raw_task(task_id, destination):
+        return {
+            "id": task_id,
+            "title": "audit.bin",
+            "additional": {"detail": {"uri": uri, "destination": destination}},
+        }
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._check_destination_exists = MagicMock(return_value=True)
+    station._make_request = MagicMock(
+        side_effect=[
+            {"total": 1, "task": [raw_task("existing", "downloads")]},
+            {},
+            {
+                "total": 3,
+                "task": [
+                    raw_task("existing", "downloads"),
+                    raw_task("new-other", "archive"),
+                    raw_task("new-requested", "downloads"),
+                ],
+            },
+        ]
+    )
+
+    result = station.create_task(uri, destination="downloads")
+
+    assert result["task_id"] == ["new-requested"]
+
+
+def test_create_task_does_not_reuse_existing_uri_id():
+    """If no new ID appears, preserve success without inventing task_id."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    uri = "https://example.com/audit.bin"
+    existing = {
+        "id": "existing",
+        "title": "audit.bin",
+        "additional": {"detail": {"uri": uri, "destination": "downloads"}},
+    }
+    task_list = {"total": 1, "task": [existing]}
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._check_destination_exists = MagicMock(return_value=True)
+    station._make_request = MagicMock(side_effect=[task_list, {}, *([task_list] * 20)])
+
+    with patch("time.sleep"):
+        result = station.create_task(uri, destination="downloads")
+
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_create_task_handler_keeps_event_loop_responsive():
+    """Task-ID polling runs outside the MCP event loop."""
+    import asyncio
+    import threading
+
+    from mcp_server import SynologyMCPServer
+
+    server = SynologyMCPServer()
+    station = MagicMock()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_create(*args):
+        started.set()
+        release.wait(timeout=1)
+        return {}
+
+    station.create_task.side_effect = blocking_create
+
+    with (
+        patch.object(server, "_get_base_url", return_value="https://nas.example.com:5001"),
+        patch.object(server, "_get_downloadstation", return_value=station),
+    ):
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        task = asyncio.create_task(
+            server._handle_ds_create_task(
+                {"uri": "https://example.com/audit.bin", "destination": "downloads"}
+            )
+        )
+        try:
+            await asyncio.sleep(0.02)
+            assert started.is_set()
+            assert loop.time() - started_at < 0.5
+        finally:
+            release.set()
+        result = await task
+
+    station.create_task.assert_called_once_with(
+        "https://example.com/audit.bin", "downloads", None, None
+    )
+    assert result[0].text == "Create task result: {}"
+
+
+def test_task_actions_json_encode_id_arrays_and_boolean():
+    """DSM 7.3.2 expects task IDs as JSON arrays, not comma strings."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    station = SynologyDownloadStation("https://nas.example.com:5001", "sid")
+    station._make_request = MagicMock(return_value={})
+
+    station.pause_tasks(["dbid_1", "dbid_2"])
+    station.resume_tasks(["dbid_1", "dbid_2"])
+    station.delete_tasks(["dbid_1", "dbid_2"], force_complete=True)
+
+    pause, resume, delete = station._make_request.call_args_list
+    assert pause.kwargs == {"id": '["dbid_1", "dbid_2"]'}
+    assert resume.kwargs == {"id": '["dbid_1", "dbid_2"]'}
+    assert delete.kwargs == {
+        "id": '["dbid_1", "dbid_2"]',
+        "force_complete": "true",
+    }
 
 
 @pytest.mark.real_nas
@@ -221,6 +435,7 @@ class TestRealDownloadStation:
 
 
 # Simple connectivity test that can run quickly
+@pytest.mark.real_nas
 def test_basic_connectivity(download_station):
     """Quick test to verify basic Download Station connectivity."""
     try:

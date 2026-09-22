@@ -76,10 +76,16 @@ class SynologyContainer:
         session_id: str,
         verify_ssl: bool = False,
         syno_token: Optional[str] = None,
-
     ):
-        self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)
-
+        # Docker's graceful stop/restart can legitimately take more than the
+        # shared 15-second default (measured at 15-22 seconds on DSM 7.3.2).
+        self._api = SynologyAPIClient(
+            base_url,
+            session_id,
+            verify_ssl,
+            syno_token=syno_token,
+            request_timeout=60,
+        )
         self.container_api = "SYNO.Docker.Container"
         self.container_version = 1
         self.project_api = "SYNO.Docker.Project"
@@ -229,7 +235,16 @@ class SynologyContainer:
         project_id, error = self._project_id(name)
         if error:
             return error
-        return self._make_request(self.project_api, self.project_version, method, id=project_id)
+        # SYNO.Docker.Project expects IDs as JSON strings, matching DSM's web UI.
+        params = {"id": json.dumps(project_id)}
+        if method.endswith("_stream"):
+            return self._api.post_stream(
+                self.project_api,
+                method,
+                self.project_version,
+                params,
+            )
+        return self._make_request(self.project_api, self.project_version, method, **params)
 
     def _ensure_project_folder(self, share_path: str) -> Dict[str, Any]:
         """Create the project folder DSM requires before project creation."""
@@ -253,24 +268,53 @@ class SynologyContainer:
         )
 
     def get_project(self, name: str) -> Dict[str, Any]:
-        """Get a Container Manager project by name."""
-        return self._project_id_request("get", name)
+        """Get a project without exposing Compose, environment, or secret fields."""
+        result = self._project_id_request("get", name)
+        if not result.get("success"):
+            return result
+        return self._sanitize_project_details(result)
+
+    @classmethod
+    def _sanitize_project_details(cls, value: Any) -> Any:
+        """Recursively omit fields that can contain credentials or Compose source."""
+        sensitive_keys = {
+            "compose",
+            "content",
+            "credential",
+            "credentials",
+            "env",
+            "environment",
+            "passwd",
+            "password",
+            "secret",
+            "secrets",
+            "token",
+        }
+        if isinstance(value, dict):
+            return {
+                key: cls._sanitize_project_details(item)
+                for key, item in value.items()
+                if str(key).lower() not in sensitive_keys
+            }
+        if isinstance(value, list):
+            return [cls._sanitize_project_details(item) for item in value]
+        return value
 
     def start_project(self, name: str) -> Dict[str, Any]:
         """Start a Container Manager project by name."""
-        return self._project_id_request("start", name)
+        return self._project_id_request("start_stream", name)
 
     def stop_project(self, name: str) -> Dict[str, Any]:
         """Stop a Container Manager project by name."""
-        return self._project_id_request("stop", name)
+        return self._project_id_request("stop_stream", name)
 
     def restart_project(self, name: str) -> Dict[str, Any]:
         """Restart a Container Manager project by name."""
-        return self._project_id_request("restart", name)
+        return self._project_id_request("restart_stream", name)
 
     def build_project(self, name: str) -> Dict[str, Any]:
         """Build a Container Manager project by name."""
-        return self._project_id_request("build", name)
+        return self._project_id_request("build_stream", name)
 
     def clean_project(self, name: str) -> Dict[str, Any]:
         """Clean a Container Manager project by name."""
@@ -327,7 +371,7 @@ class SynologyContainer:
         if error:
             return error
 
-        params = {"id": project_id, "content": content}
+        params = {"id": json.dumps(project_id), "content": content}
         if enable_service_portal is not None:
             params["enable_service_portal"] = json.dumps(enable_service_portal)
         if service_portal_name is not None:
