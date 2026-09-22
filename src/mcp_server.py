@@ -24,6 +24,23 @@ from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
 from filestation import SynologyFileStation
 from health import SynologyHealth
+from iscsi import SynologyISCSI
+from iscsi.synology_iscsi import _uuid_list
+
+
+class ToolFailure(Exception):
+    """A tool operation that failed or was refused, with its JSON payload.
+
+    Raised rather than returned so the MCP layer can set the protocol's error
+    flag while still delivering the structured body: a caller that inspects
+    `isError` and a caller that parses the JSON then agree. Returning the
+    payload as ordinary content sets `isError` false, which reports a refusal
+    or a partial failure as a success.
+    """
+
+    def __init__(self, payload: dict):
+        super().__init__(payload.get("error", {}).get("message", "tool failed"))
+        self.payload = payload
 from nfs import SynologyNFS
 from usermanagement import SynologyUserManager
 
@@ -58,6 +75,11 @@ class SynologyMCPServer:
         self.health_instances: Dict[str, SynologyHealth] = {}
         self.container_instances: Dict[str, SynologyContainer] = {}
         self.nfs_instances: Dict[str, SynologyNFS] = {}
+        self.iscsi_instances: Dict[str, SynologyISCSI] = {}
+        # One lock per NAS key, guarding the lazy login in _resolve_base_url.
+        # Created lazily and only ever touched from the event-loop thread, so
+        # the dict itself needs no locking.
+        self._login_locks: Dict[str, "asyncio.Lock"] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
         self._session_locks: Dict[str, threading.RLock] = {}
@@ -86,6 +108,20 @@ class SynologyMCPServer:
             try:
                 content = await self._dispatch_tool(params.name, params.arguments or {})
                 return CallToolResult(content=content)
+            except ToolFailure as failure:
+                # A refused or failed operation, carrying its structured payload.
+                # Returning it as ordinary content would leave the protocol's
+                # error flag FALSE, so a client that keys on isError -- rather
+                # than parsing our JSON -- would read a refusal, or a partial
+                # mapping failure, as a success.
+                return CallToolResult(
+                    content=[
+                        types.TextContent(
+                            type="text", text=json.dumps(failure.payload, indent=2)
+                        )
+                    ],
+                    is_error=True,
+                )
             except Exception as e:
                 return CallToolResult(
                     content=[types.TextContent(type="text", text=f"Error executing {params.name}: {e!s}")],
@@ -202,12 +238,47 @@ class SynologyMCPServer:
         self._register_tool("synology_disk_smart", "Get detailed S.M.A.R.T. attributes for a specific physical disk", TN_PR({"disk_id": {"type": "string", "description": "Disk identifier from synology_disk_health output — either the disk id (e.g. \'sata1\', \'sda\', \'nvme0n1\') or its device path (e.g. \'/dev/sata1\')"}}, ["disk_id"]), self._handle_disk_smart)
         self._register_tool("synology_volume_status", "List all volumes/filesystems with status, total size, used space, and RAID info", TN, partial(self._handle_health_call, method_name="volume_list"))
         self._register_tool("synology_storage_pool", "List RAID/storage pools with RAID level, status, and member disks", TN, partial(self._handle_health_call, method_name="storage_pool_list"))
-        self._register_tool("synology_lun_list", "List all iSCSI LUNs with name, UUID, size, used space, status, mapped targets, and backing volume", TN, partial(self._handle_health_call, method_name="lun_list"))
+        self._register_tool("synology_lun_list", "List all iSCSI LUNs with name, UUID, size, type, status and backing volume. To see which target a LUN is attached to, use synology_target_list.", TN, partial(self._handle_iscsi_call, method_name="lun_list"))
         self._register_tool("synology_lun_get", "Get details for a single iSCSI LUN by name or UUID", TN_PR({"name": {"type": "string", "description": "LUN name or UUID from synology_lun_list output"}}, ["name"]), self._handle_lun_get)
         self._register_tool("synology_network", "Get network interface status and transfer rates", TN, partial(self._handle_health_call, method_name="network_info"))
         self._register_tool("synology_ups", "Get UPS (uninterruptible power supply) status, battery level, and power info", TN, partial(self._handle_health_call, method_name="ups_info"))
         self._register_tool("synology_services", "List installed packages/services and their running status", TN, partial(self._handle_health_call, method_name="package_list"))
         self._register_tool("synology_system_log", "Get recent system log entries for diagnosing issues", TN_P({"offset": {"type": "integer", "description": "Starting offset (default: 0)"}, "limit": {"type": "integer", "description": "Max entries to return (default: 50)"}}), self._handle_system_log)
+        # SAN Manager (iSCSI) - LUN and target provisioning
+        self._register_tool("synology_lun_create", "Create an iSCSI LUN on a volume. Returns its uuid and lun_id. On a btrfs volume DSM provisions thin by default.", TN_PR({
+            "name": {"type": "string", "description": "LUN name, e.g. 'macmini-dev'"},
+            "location": {"type": "string", "description": "Volume path to create it on, e.g. '/volume2'"},
+            "size": {"type": "integer", "description": "Size in BYTES (e.g. 536870912000 for 500 GB)"},
+            "type": {"type": "string", "description": "LUN type. 'thin' (default, DSM 'BLUN') or 'advanced'/'file'; a raw DSM type name such as BLUN, ADV, THIN or FILE is passed through unchanged. Note lowercase 'thin' means BLUN, while uppercase 'THIN' is the distinct legacy DSM type. Thick types were refused on the btrfs volume this was tested against; DSM decides, and its error is reported as given."},
+            "description": {"type": "string", "description": "Optional free-text description stored on the LUN"},
+        }, ["name", "location", "size"]), self._handle_lun_create)
+        self._register_tool("synology_lun_delete", "DESTRUCTIVE. Permanently delete an iSCSI LUN and everything stored on it. Requires confirm=true.", TN_PR({
+            "uuid": {"type": "string", "description": "LUN UUID from synology_lun_list"},
+            "confirm": {"type": "boolean", "description": "Must be true. Guards against deleting a LUN by accident; there is no undo."},
+        }, ["uuid", "confirm"]), self._handle_lun_delete)
+        self._register_tool("synology_target_list", "List iSCSI targets with IQN, auth type, enabled state and the LUNs mapped to each", TN, partial(self._handle_iscsi_call, method_name="target_list"))
+        self._register_tool("synology_target_get", "Get a single iSCSI target by its numeric target_id", TN_PR({"target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"}}, ["target_id"]), self._handle_target_get)
+        self._register_tool("synology_target_create", "Create an iSCSI target. Returns its target_id. Leave chap_user/chap_password unset for a target with no authentication.", TN_PR({
+            "name": {"type": "string", "description": "Target name, e.g. 'macmini-dev'"},
+            "iqn": {"type": "string", "description": "Full IQN. Defaults to iqn.2000-01.com.synology:<name>."},
+            "chap_user": {"type": "string", "description": "CHAP username. Must be given together with chap_password; supplying only one is refused rather than silently creating an unauthenticated target."},
+            "chap_password": {"type": "string", "description": "CHAP password (12-16 chars per DSM). Must be given together with chap_user."},
+            "max_sessions": {"type": "integer", "description": "Max concurrent sessions; 0 (default) means DSM's default, no explicit cap."},
+        }, ["name"]), self._handle_target_create)
+        self._register_tool("synology_target_delete", "DESTRUCTIVE. Delete an iSCSI target. Mapped LUNs survive but become unreachable over iSCSI. Requires confirm=true.", TN_PR({
+            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
+            "confirm": {"type": "boolean", "description": "Must be true. Guards against disconnecting a live initiator by accident."},
+        }, ["target_id", "confirm"]), self._handle_target_delete)
+        self._register_tool("synology_target_map_lun", "Map one or more LUNs to an iSCSI target, making them visible to initiators that connect to it", TN_PR({
+            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
+            "lun_uuids": {"type": "array", "items": {"type": "string"}, "description": "LUN UUIDs from synology_lun_list"},
+        }, ["target_id", "lun_uuids"]), self._handle_target_map_lun)
+        self._register_tool("synology_target_unmap_lun", "DESTRUCTIVE. Unmap one or more LUNs from an iSCSI target, disconnecting them from any initiator currently using them. The LUNs themselves are not deleted. Requires confirm=true.", TN_PR({
+            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
+            "lun_uuids": {"type": "array", "items": {"type": "string"}, "description": "LUN UUIDs from synology_lun_list"},
+            "confirm": {"type": "boolean", "description": "Must be true. Unmapping takes storage away from a live initiator."},
+        }, ["target_id", "lun_uuids", "confirm"]), self._handle_target_unmap_lun)
+
         self._register_tool("synology_health_summary", "Get a combined health overview: system info, CPU/memory utilization, disk health, volume status, storage pools, network, and UPS — all in one call", TN, partial(self._handle_health_call, method_name="health_summary"))
 
         # Container Manager
@@ -476,6 +547,22 @@ class SynologyMCPServer:
 
         return self.nfs_instances[base_url]
 
+    def _get_iscsi(self, base_url: str) -> SynologyISCSI:
+        """Get or create SAN Manager (iSCSI) instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.iscsi_instances:
+            session_id = self.sessions[base_url]
+            self.iscsi_instances[base_url] = SynologyISCSI(
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl_for(base_url),
+                syno_token=self.syno_tokens.get(base_url),
+            )
+
+        return self.iscsi_instances[base_url]
+
     def _get_usermgr(self, base_url: str) -> SynologyUserManager:
         """Get or create UserManager instance for a base URL."""
         if base_url not in self.sessions:
@@ -525,6 +612,47 @@ class SynologyMCPServer:
             raise Exception("Auto-login failed for all configured NAS units — stopping server.")
         logger.info(f"Connected to {success_count}/{len(nas_names)} NAS unit(s)")
 
+    #: Tools whose arguments are checked against their declared schema before the
+    #: handler runs. An argument a handler does not read is otherwise DISCARDED
+    #: in silence, and for these tools that is not a failed call, it is a false
+    #: success: `chapUser`/`chapPassword` produce a target with no
+    #: authentication, and `lun_type` instead of `type` silently takes the
+    #: default. Enumerating misspellings cannot fix that -- only refusing what
+    #: was not declared can. Scoped to the tools added with this mechanism rather
+    #: than applied server-wide, because the older handlers have not been audited
+    #: for arguments they read without declaring.
+    _STRICT_ARG_TOOLS = frozenset(
+        {
+            "synology_lun_create",
+            "synology_lun_delete",
+            "synology_target_list",
+            "synology_target_get",
+            "synology_target_create",
+            "synology_target_delete",
+            "synology_target_map_lun",
+            "synology_target_unmap_lun",
+        }
+    )
+
+    def _reject_undeclared_arguments(self, name: str, arguments: dict) -> Optional[dict]:
+        """Return an error payload if `arguments` names anything undeclared."""
+        tool, _ = self._tool_registry[name]
+        declared = set((tool.input_schema or {}).get("properties", {}))
+        # Keys beginning with "_" belong to the protocol (_meta), not the tool.
+        unknown = sorted(k for k in arguments if k not in declared and not k.startswith("_"))
+        if not unknown:
+            return None
+        return {
+            "success": False,
+            "error": {
+                "code": "unknown_argument",
+                "message": (
+                    f"{name} does not accept {', '.join(unknown)}, so nothing was done. "
+                    f"Accepted arguments: {', '.join(sorted(declared))}."
+                ),
+            },
+        }
+
     async def _dispatch_tool(
         self, name: str, arguments: dict
     ) -> list[types.TextContent]:
@@ -534,6 +662,10 @@ class SynologyMCPServer:
             _, handler = self._tool_registry[name]
         except KeyError:
             raise ValueError(f"Unknown tool: {name}")
+        if name in self._STRICT_ARG_TOOLS:
+            refusal = self._reject_undeclared_arguments(name, arguments)
+            if refusal:
+                raise ToolFailure(refusal)
         return await handler(arguments)
 
     def _service_instance_dicts(self):
@@ -548,6 +680,7 @@ class SynologyMCPServer:
             self.health_instances,
             self.container_instances,
             self.nfs_instances,
+            self.iscsi_instances,
             self.usermgr_instances,
         )
 
@@ -1136,13 +1269,259 @@ class SynologyMCPServer:
         result = health.disk_smart_info(disk_id)
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
+    async def _resolve_base_url(self, arguments: dict) -> str:
+        """Resolve the target NAS without ever logging in on the event loop.
+
+        `_get_base_url` performs a lazy DSM login when a configured nas_name has
+        no session yet, and that login is a synchronous HTTP round trip. Called
+        straight from an `async def` handler it runs ON the loop, so the server
+        answers nothing at all until DSM replies -- the same defect the
+        `asyncio.to_thread` calls below fix, one step earlier in the same
+        handler, and not covered by them because it happens first.
+
+        The login is therefore offloaded, and serialised per NAS. Offloading
+        alone would be worse than the bug: two handlers arriving together with
+        no session would both miss it and both log in, and the second would
+        overwrite the first's SID and strand that session open on the NAS --
+        exactly what the existing guard inside `_get_base_url` exists to
+        prevent. The lock closes that window, and the state it protects is
+        mutated on the worker thread only while the lock is held.
+        """
+        # Fast path: a session already exists, so no network call is possible
+        # and there is nothing to offload or serialise.
+        try:
+            return self._get_base_url(arguments, allow_login=False)
+        except Exception:
+            pass
+
+        # The key comes from caller-supplied arguments, so it is NOT a trusted
+        # set: a caller naming a different nas_name each time would grow this
+        # dict without bound, and every one of those names fails to resolve.
+        # A lock is therefore kept only for a key that actually resolved.
+        key = arguments.get("nas_name") or arguments.get("base_url") or "\x00default"
+        lock = self._login_locks.get(key)
+        created = lock is None
+        if lock is None:
+            lock = asyncio.Lock()
+            self._login_locks[key] = lock
+
+        resolved = False
+        try:
+            async with lock:
+                # Re-check: another handler may have logged in while we waited.
+                try:
+                    return self._get_base_url(arguments, allow_login=False)
+                except Exception:
+                    pass
+                base_url = await asyncio.to_thread(self._get_base_url, arguments)
+                resolved = True
+                return base_url
+        finally:
+            # Drop a lock this call created for a key that did not resolve.
+            # `lock.locked()` is the test for "somebody else is still using it":
+            # a coroutine queued behind us has acquired it by the time this
+            # runs, and removing it then would let a third caller build a
+            # SECOND lock for the same key and log in concurrently -- which is
+            # the bug this lock exists to prevent.
+            if (
+                created
+                and not resolved
+                and not lock.locked()
+                and self._login_locks.get(key) is lock
+            ):
+                del self._login_locks[key]
+
+    async def _handle_iscsi_call(
+        self, arguments: dict, method_name: str
+    ) -> list[types.TextContent]:
+        """Generic handler for no-argument SAN Manager calls."""
+        base_url = await self._resolve_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        return self._emit(await asyncio.to_thread(getattr(iscsi, method_name)))
+
+    @staticmethod
+    def _is_confirmed(arguments: dict) -> bool:
+        """True only for a real boolean true.
+
+        Not `arguments.get("confirm")`: the JSON string "false" is truthy in
+        Python, and nothing between the caller and here validates an argument
+        against the tool's declared schema. A client that stringifies its
+        booleans would have had every destructive guard wave it through while
+        appearing to decline.
+        """
+        return arguments.get("confirm") is True
+
+    @staticmethod
+    def _refuse_unconfirmed(action: str) -> "ToolFailure":
+        """The refusal for a destructive tool called without confirm=true.
+
+        Raised, not returned: a refusal delivered as ordinary content leaves the
+        protocol's error flag false, so a caller that checks isError rather than
+        parsing the body reads "did not happen" as "done".
+        """
+        return ToolFailure(
+            {
+                "success": False,
+                "error": {
+                    "code": "confirmation_required",
+                    "message": (
+                        f"{action} is destructive and was not performed. "
+                        "Re-issue the call with confirm=true if that is intended."
+                    ),
+                },
+            }
+        )
+
+    @staticmethod
+    def _emit(result: dict) -> list[types.TextContent]:
+        """Render a tool result, raising when the operation did not succeed.
+
+        The structured body is kept either way; raising is only how the MCP
+        layer is told to set isError.
+        """
+        if result.get("success") is False:
+            raise ToolFailure(result)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
     async def _handle_lun_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting details for a single iSCSI LUN."""
-        base_url = self._get_base_url(arguments)
+        base_url = await self._resolve_base_url(arguments)
         name = arguments["name"]
-        health = self._get_health(base_url)
-        result = health.lun_get(name)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        iscsi = self._get_iscsi(base_url)
+        return self._emit(await asyncio.to_thread(iscsi.lun_get, name))
+
+    async def _handle_lun_create(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating an iSCSI LUN."""
+        base_url = await self._resolve_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        result = await asyncio.to_thread(
+            iscsi.lun_create,
+            name=arguments["name"],
+            location=arguments["location"],
+            size=arguments["size"],
+            lun_type=arguments.get("type", "thin"),
+            description=arguments.get("description"),
+        )
+        return self._emit(result)
+
+    async def _handle_lun_delete(self, arguments: dict) -> list[types.TextContent]:
+        """Handle deleting an iSCSI LUN. Refuses without confirm=true."""
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
+        base_url = await self._resolve_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        return self._emit(await asyncio.to_thread(iscsi.lun_delete, arguments["uuid"]))
+
+    async def _handle_target_get(self, arguments: dict) -> list[types.TextContent]:
+        """Handle getting a single iSCSI target."""
+        base_url = await self._resolve_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        return self._emit(
+            await asyncio.to_thread(iscsi.target_get, arguments["target_id"])
+        )
+
+    async def _handle_target_create(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating an iSCSI target.
+
+        A credential under a name this tool does not declare -- `user`,
+        `chapUser`, `auth_type` -- is refused by _dispatch_tool before this
+        runs. Enumerating misspellings was the first attempt and could not work:
+        the next name nobody listed would still be dropped in silence, and a
+        dropped credential here produces a target with no authentication.
+        """
+        base_url = await self._resolve_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        result = await asyncio.to_thread(
+            iscsi.target_create,
+            name=arguments["name"],
+            iqn=arguments.get("iqn"),
+            chap_user=arguments.get("chap_user"),
+            chap_password=arguments.get("chap_password"),
+            max_sessions=arguments.get("max_sessions", 0),
+        )
+        return self._emit(result)
+
+    async def _handle_target_delete(self, arguments: dict) -> list[types.TextContent]:
+        """Handle deleting an iSCSI target. Refuses without confirm=true."""
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
+        base_url = await self._resolve_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        return self._emit(
+            await asyncio.to_thread(iscsi.target_delete, arguments["target_id"])
+        )
+
+    async def _handle_target_map_lun(self, arguments: dict) -> list[types.TextContent]:
+        """Handle mapping LUNs to an iSCSI target."""
+        return await self._map_luns(arguments, unmap=False)
+
+    async def _handle_target_unmap_lun(self, arguments: dict) -> list[types.TextContent]:
+        """Handle unmapping LUNs from an iSCSI target. Refuses without confirm=true.
+
+        Unmapping is not a read: it takes storage away from any initiator using
+        it right now, which is the same consequence that makes deleting a target
+        destructive. It is gated the same way.
+        """
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed(
+                f"Unmapping {len(arguments.get('lun_uuids') or [])} LUN(s) from target "
+                f"{arguments.get('target_id')!r}"
+            )
+        return await self._map_luns(arguments, unmap=True)
+
+    async def _map_luns(self, arguments: dict, *, unmap: bool) -> list[types.TextContent]:
+        """Map or unmap LUNs against one target.
+
+        DSM maps from the LUN side (SYNO.Core.ISCSI.LUN/map_target takes one
+        uuid and a list of target_ids), so a request naming several LUNs is one
+        call per LUN. Each result is reported separately rather than collapsed
+        into a single boolean, so a partial failure names the LUN that failed.
+
+        The calls stay SEQUENTIAL -- they mutate one target's mapping table, and
+        issuing them together invites DSM to interleave them -- but each is
+        offloaded, so N LUNs no longer hold the event loop for N round trips.
+        """
+        target_id = arguments["target_id"]
+        # Shape is checked before a session is resolved, so a malformed request
+        # is refused on its arguments alone. Truthiness is not enough: a dict
+        # iterates over its KEYS, so {"<real-uuid>": false} would map that LUN
+        # while discarding the value meant to prevent it, and a bare string
+        # iterates character by character.
+        try:
+            lun_uuids = _uuid_list(arguments["lun_uuids"], "lun_uuids")
+        except ValueError as exc:
+            raise ToolFailure(
+                {"success": False, "error": {"code": "invalid_argument", "message": str(exc)}}
+            )
+        if not lun_uuids:
+            # all([]) is True, so this would otherwise touch the NAS not at all
+            # and report success.
+            raise ToolFailure(
+                {
+                    "success": False,
+                    "error": {
+                        "code": "empty_selection",
+                        "message": (
+                            "lun_uuids was empty, so nothing was changed. "
+                            "Name at least one LUN."
+                        ),
+                    },
+                }
+            )
+        base_url = await self._resolve_base_url(arguments)
+        iscsi = self._get_iscsi(base_url)
+        results = []
+        for uuid in lun_uuids:
+            call = iscsi.lun_unmap_targets if unmap else iscsi.lun_map_targets
+            outcome = await asyncio.to_thread(call, uuid, [target_id])
+            results.append({"lun_uuid": uuid, **outcome})
+        payload = {
+            "success": all(r.get("success") for r in results),
+            "data": {"target_id": target_id, "results": results},
+        }
+        # A partial failure keeps every per-LUN result AND sets isError, so a
+        # caller reading the protocol flag and one parsing the body agree.
+        return self._emit(payload)
 
     async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting system log entries."""

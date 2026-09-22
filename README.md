@@ -380,10 +380,43 @@ for databases that may be changing during the copy.
 - **`synology_disk_smart`** - Get detailed SMART attributes for a specific disk
 - **`synology_volume_status`** - List all volumes with status, size, usage, filesystem type
 - **`synology_storage_pool`** - List RAID/storage pools with level, status, member disks
-- **`synology_lun_list`** - List all iSCSI LUNs with name, UUID, size, usage, status, mapped targets, and backing volume
+- **`synology_lun_list`** - List all iSCSI LUNs with name, UUID, size, type, status and backing volume. To see which target a LUN is attached to, use `synology_target_list` - DSM does not report mappings on the LUN side.
 - **`synology_lun_get`** - Get details for a single iSCSI LUN
   - `name` (required): LUN name or UUID from `synology_lun_list` output
 - **`synology_network`** - Get network interface status and transfer rates
+
+### SAN Manager (iSCSI provisioning)
+
+Wraps `SYNO.Core.ISCSI.LUN` and `SYNO.Core.ISCSI.Target`. Verified against DSM
+7.3.2-86009 Update 4 on an RS1221+; other DSM builds may differ, and DSM's own
+refusal is reported as given rather than second-guessed.
+
+- **`synology_lun_create`** - Create a LUN on a volume; returns its `uuid` and `lun_id`
+  - `name`, `location` (e.g. `/volume2`), `size` (**in bytes**) required
+  - `type` (optional): `thin` (default, DSM `BLUN`), `advanced`, `file`, or a raw
+    DSM type name. Note `thin` and `THIN` are **different**: lowercase is the
+    friendly alias for `BLUN`, uppercase is DSM's distinct legacy type. Thick
+    types were refused on the btrfs volume this was tested against.
+  - `description` (optional)
+- **`synology_lun_delete`** - **DESTRUCTIVE.** Delete a LUN and everything on it
+  - `uuid` and `confirm: true` required
+- **`synology_target_list`** - List targets with IQN, auth type, and the LUNs mapped to each
+- **`synology_target_get`** - Get one target by `target_id`
+- **`synology_target_create`** - Create a target; returns its `target_id`
+  - `name` required; `iqn` defaults to `iqn.2000-01.com.synology:<name>`
+  - `chap_user` + `chap_password` enable CHAP. **Supply both or neither** -
+    one alone, or an empty string, is refused rather than quietly producing a
+    target with no authentication. **With neither, the target accepts any
+    initiator that can reach it.**
+  - `max_sessions` (optional, 0 = DSM default)
+- **`synology_target_map_lun`** - Map LUNs to a target (`target_id`, `lun_uuids`)
+- **`synology_target_unmap_lun`** - **DESTRUCTIVE.** Unmap LUNs, disconnecting any
+  initiator using them (`target_id`, `lun_uuids`, `confirm: true`)
+
+These tools reject any argument they do not declare, rather than ignoring it: a
+misspelled `chap_user` would otherwise create an unauthenticated target, and a
+misspelled `type` would silently take the default.
+
 - **`synology_ups`** - Get UPS status, battery level, power readings
 - **`synology_services`** - List installed packages and their running status
 - **`synology_system_log`** - Get recent system log entries

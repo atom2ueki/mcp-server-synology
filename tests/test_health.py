@@ -403,7 +403,12 @@ class TestLunList:
         with patch.object(health._api, "get", return_value=self.LUN_LIST_OK) as mock_get:
             result = health.lun_list()
         assert result == self.LUN_LIST_OK
-        mock_get.assert_called_once_with("SYNO.Core.ISCSI.LUN", "list", 1, None)
+        # `additional` asks DSM for status and is_mapped, which the plain list
+        # omits. DSM silently ignores an unrecognised field name, so the exact
+        # spelling is part of the contract and is asserted here.
+        mock_get.assert_called_once_with(
+            "SYNO.Core.ISCSI.LUN", "list", 1, {"additional": '["status", "is_mapped"]'}
+        )
 
     def test_failure_propagates(self):
         """A failed list call is returned unchanged."""
