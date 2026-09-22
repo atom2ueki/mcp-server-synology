@@ -322,6 +322,10 @@ docker-compose up
   - `path` (required): Directory path starting with `/`
 - **`get_file_info`** - Get detailed file/directory information
   - `path` (required): File path starting with `/`
+- **`get_file_content`** - Read strict UTF-8 text or lossless base64 content
+  - `path` (required): File path starting with `/`
+  - `encoding` (optional): `text` (default) or `base64`
+  - `max_bytes` (optional): Maximum raw bytes to read (default 1 MiB, hard limit 8 MiB)
 - **`search_files`** - Recursively search for files and folders by name
   - `path` (required): Search directory
   - `pattern` (required): Case-insensitive substring of the name (e.g., `invoice`, `.pdf`). Wildcards are not special — DSM matches `report` and `*report*` identically.
@@ -329,6 +333,7 @@ docker-compose up
   - `path` (required): Full file path starting with `/`
   - `content` (optional): File content (default: empty string)
   - `overwrite` (optional): Overwrite existing files (default: false)
+  - `encoding` (optional): `text` (default) or strict `base64`; decoded content is limited to 8 MiB
 - **`create_directory`** - Create new directories
   - `folder_path` (required): Parent directory path starting with `/`
   - `name` (required): New directory name
@@ -342,6 +347,14 @@ docker-compose up
   - `source_path` (required): Source file path
   - `destination_path` (required): Destination path
   - `overwrite` (optional): Overwrite existing files
+- **`copy_file`** - Copy a regular file inside the NAS without sending its bytes through the MCP client
+  - `source_path` (required): Source file path
+  - `destination_folder` (required): Existing destination directory; the filename is preserved
+  - `overwrite` (optional): Overwrite an existing same-named file (default: false)
+
+`copy_file` verifies the destination path and byte count. It is not a consistent
+backup method for a live SQLite database; use SQLite's online backup mechanism
+for databases that may be changing during the copy.
 
 ### 📥 Download Station Management
 - **`ds_get_info`** - Get Download Station information
@@ -706,7 +719,7 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 // Search for PDFs
 {
   "path": "/volume1/documents", 
-  "pattern": "*.pdf"
+  "pattern": ".pdf"
 }
 
 // Create new file

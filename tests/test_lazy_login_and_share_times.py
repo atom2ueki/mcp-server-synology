@@ -14,8 +14,10 @@ through this server:
 
 No NAS required: auth and HTTP are mocked.
 """
+import asyncio
 import os
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,6 +42,31 @@ def server():
 
 
 class TestOnDemandLogin:
+    @pytest.mark.asyncio
+    async def test_concurrent_file_calls_share_one_lazy_session(self, server, monkeypatch):
+        """Worker-thread resolution must not race two first-use logins."""
+        cfg = {"base_url": "https://nas:5001", "username": "u", "password": "p"}
+        auth = MagicMock()
+
+        def delayed_login(*args, **kwargs):
+            time.sleep(0.05)
+            return _ok_login("sid-shared")
+
+        auth.login.side_effect = delayed_login
+        monkeypatch.setattr(SynologyFileStation, "list_shares", lambda self: [])
+        with patch("mcp_server.config.nas_configs", {"admin": cfg}), \
+             patch("mcp_server.config.get_synology_config", return_value=cfg), \
+             patch("mcp_server.SynologyAuth", return_value=auth):
+            await asyncio.gather(
+                server._handle_list_shares({"nas_name": "admin"}),
+                server._handle_list_shares({"nas_name": "admin"}),
+            )
+
+        base_url = "https://nas:5001"
+        assert auth.login.call_count == 1
+        assert server.sessions[base_url] == "sid-shared"
+        assert server.filestation_instances[base_url].session_id == "sid-shared"
+
     def test_nas_name_logs_in_when_map_is_empty(self, server):
         cfg = {"base_url": "https://nas:5001", "username": "u", "password": "p"}
         auth = MagicMock()

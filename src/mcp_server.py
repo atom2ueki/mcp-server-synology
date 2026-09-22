@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import threading
 from functools import partial
 from typing import Callable, Dict, Optional
 
@@ -59,6 +60,8 @@ class SynologyMCPServer:
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
+        self._session_locks: Dict[str, threading.RLock] = {}
+        self._session_locks_guard = threading.Lock()
         self._tool_registry: Dict[str, tuple[types.Tool, Callable]] = {}
         self.server = self._create_server()
         self._register_all_tools()
@@ -174,10 +177,11 @@ class SynologyMCPServer:
         self._register_tool("list_directory", "List contents of a directory on the Synology NAS. Returns detailed information about files and folders including name, type, size, and timestamps.", TN_PR({"path": {"type": "string", "description": "Directory path to list (must start with /)"}}, ["path"]), self._handle_list_directory)
         self._register_tool("get_file_info", "Get detailed information about a specific file or directory", TN_PR({"path": {"type": "string", "description": "File or directory path (must start with /)"}}, ["path"]), self._handle_get_file_info)
         self._register_tool("search_files", "Recursively search a directory for files and folders whose name contains the given text (case-insensitive substring match). Wildcards are not special - searching for \'report\' and \'*report*\' return the same matches.", TN_PR({"path": {"type": "string", "description": "Directory path to search in (must start with /)"}, "pattern": {"type": "string", "description": "Text to look for in the name, e.g. \'invoice\' or \'.pdf\' (case-insensitive substring)"}}, ["path", "pattern"]), self._handle_search_files)
-        self._register_tool("get_file_content", "Get the content of a file", TN_PR({"path": {"type": "string", "description": "File path (must start with /)"}}, ["path"]), self._handle_get_file_content)
+        self._register_tool("get_file_content", "Read a file as strict UTF-8 text or lossless structured base64", TN_PR({"path": {"type": "string", "description": "File path (must start with /)"}, "encoding": {"type": "string", "enum": ["text", "base64"], "description": "Return strict UTF-8 text (default) or structured lossless base64"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608, "description": "Maximum raw bytes to read (default: 1048576; hard maximum: 8388608)"}}, ["path"]), self._handle_get_file_content)
         self._register_tool("rename_file", "Rename a file or directory on the Synology NAS", TN_PR({"path": {"type": "string", "description": "Full path to the file/directory to rename (must start with /)"}, "new_name": {"type": "string", "description": "New name for the file/directory (just the name, not full path)"}}, ["path", "new_name"]), self._handle_rename_file)
         self._register_tool("move_file", "Move a file or directory to a new location on the Synology NAS", TN_PR({"source_path": {"type": "string", "description": "Full path to the file/directory to move (must start with /)"}, "destination_path": {"type": "string", "description": "Where to move it (must start with /): an existing directory to move into, or a full path whose last segment is the new name"}, "overwrite": {"type": "boolean", "description": "Whether to overwrite existing files at destination (default: false)"}}, ["source_path", "destination_path"]), self._handle_move_file)
-        self._register_tool("create_file", "Create a new file with specified content on the Synology NAS", TN_PR({"path": {"type": "string", "description": "Full path where the file should be created (must start with /)"}, "content": {"type": "string", "description": "Content to write to the file (default: empty string)"}, "overwrite": {"type": "boolean", "description": "Whether to overwrite existing file (default: false)"}}, ["path"]), self._handle_create_file)
+        self._register_tool("copy_file", "Copy one regular file server-side into an existing NAS directory and verify target path and byte count; not a transactionally consistent backup of a live database", TN_PR({"source_path": {"type": "string", "description": "Full path to the regular file to copy (must start with /)"}, "destination_folder": {"type": "string", "description": "Existing destination directory (must start with /); the filename is preserved"}, "overwrite": {"type": "boolean", "description": "Whether to overwrite an existing same-named file (default: false)"}}, ["source_path", "destination_folder"]), self._handle_copy_file)
+        self._register_tool("create_file", "Create a UTF-8 text or lossless base64-encoded file on the Synology NAS", TN_PR({"path": {"type": "string", "description": "Full path where the file should be created (must start with /)"}, "content": {"type": "string", "description": "Text or strict base64 content (default: empty string)"}, "encoding": {"type": "string", "enum": ["text", "base64"], "description": "Interpret content as UTF-8 text (default) or strict base64; decoded content is limited to 8388608 bytes"}, "overwrite": {"type": "boolean", "description": "Whether to overwrite existing file (default: false)"}}, ["path"]), self._handle_create_file)
         self._register_tool("create_directory", "Create a new directory on the Synology NAS", TN_PR({"folder_path": {"type": "string", "description": "Parent directory path where the new folder should be created (must start with /)"}, "name": {"type": "string", "description": "Name of the new directory to create"}, "force_parent": {"type": "boolean", "description": "Whether to create parent directories if they don\'t exist (default: false)"}}, ["folder_path", "name"]), self._handle_create_directory)
         self._register_tool("delete", "Delete a file or directory on the Synology NAS (auto-detects type)", TN_PR({"path": {"type": "string", "description": "Full path to the file/directory to delete (must start with /)"}}, ["path"]), self._handle_delete)
 
@@ -305,6 +309,11 @@ class SynologyMCPServer:
         """Get tool definitions from the registry."""
         return [tool for tool, _ in self._tool_registry.values()]
 
+    def _session_lock(self, base_url: str) -> threading.RLock:
+        """Return the shared re-entrant lock for one normalized NAS URL."""
+        normalized = base_url.rstrip("/")
+        with self._session_locks_guard:
+            return self._session_locks.setdefault(normalized, threading.RLock())
 
     def _login_nas(self, nas_name: Optional[str]) -> str:
         """Log in to a configured NAS and return its base_url.
@@ -386,19 +395,21 @@ class SynologyMCPServer:
 
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
-        if base_url not in self.sessions:
-            raise Exception(f"No active session for {base_url}. Please login first.")
+        base_url = base_url.rstrip("/")
+        with self._session_lock(base_url):
+            if base_url not in self.sessions:
+                raise Exception(f"No active session for {base_url}. Please login first.")
 
-        if base_url not in self.filestation_instances:
-            session_id = self.sessions[base_url]
-            self.filestation_instances[base_url] = SynologyFileStation(
-                base_url,
-                session_id,
-                verify_ssl=config.verify_ssl_for(base_url),
-                syno_token=self.syno_tokens.get(base_url),
-            )
+            if base_url not in self.filestation_instances:
+                session_id = self.sessions[base_url]
+                self.filestation_instances[base_url] = SynologyFileStation(
+                    base_url,
+                    session_id,
+                    verify_ssl=config.verify_ssl_for(base_url),
+                    syno_token=self.syno_tokens.get(base_url),
+                )
 
-        return self.filestation_instances[base_url]
+            return self.filestation_instances[base_url]
 
     def _get_downloadstation(self, base_url: str) -> SynologyDownloadStation:
         """Get or create DownloadStation instance for a base URL."""
@@ -583,15 +594,19 @@ class SynologyMCPServer:
                     # trailing slash) matches the stripped key under which
                     # _login_nas / _handle_login store sessions.
                     target_url = target_url.rstrip("/")
-                    # A session may already exist for this URL without the name
-                    # being mapped -- synology_login establishes one but does
-                    # not touch nas_name_map. Logging in again would overwrite
-                    # the tracked SID and strand that first session, leaving it
-                    # open on the NAS and unreachable by logout.
-                    if target_url in self.sessions:
-                        self.nas_name_map[nas_name] = target_url
-                        return target_url
-                    return self._login_nas(configured_name)
+                    # File Station handlers resolve targets in worker threads.
+                    # Serialize first use so concurrent calls cannot both log
+                    # in and leave one cached client holding an overwritten SID.
+                    with self._session_lock(target_url):
+                        # A session may already exist for this URL without the name
+                        # being mapped -- synology_login establishes one but does
+                        # not touch nas_name_map. Logging in again would overwrite
+                        # the tracked SID and strand that first session, leaving it
+                        # open on the NAS and unreachable by logout.
+                        if target_url in self.sessions:
+                            self.nas_name_map[nas_name] = target_url
+                            return target_url
+                        return self._login_nas(configured_name)
             raise Exception(
                 f"NAS '{nas_name}' not found. Available: {list(self.nas_name_map.keys())}"
             )
@@ -856,62 +871,69 @@ class SynologyMCPServer:
 
     async def _handle_list_shares(self, arguments: dict) -> list[types.TextContent]:
         """Handle listing shares."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         filestation = self._get_filestation(base_url)
 
-        shares = filestation.list_shares()
+        shares = await asyncio.to_thread(filestation.list_shares)
 
         return [types.TextContent(type="text", text=json.dumps(shares, indent=2))]
 
     async def _handle_list_directory(self, arguments: dict) -> list[types.TextContent]:
         """Handle listing directory contents."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
 
         filestation = self._get_filestation(base_url)
-        files = filestation.list_directory(path)
+        files = await asyncio.to_thread(filestation.list_directory, path)
 
         return [types.TextContent(type="text", text=json.dumps(files, indent=2))]
 
     async def _handle_get_file_info(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting file information."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
 
         filestation = self._get_filestation(base_url)
-        info = filestation.get_file_info(path)
+        info = await asyncio.to_thread(filestation.get_file_info, path)
 
         return [types.TextContent(type="text", text=json.dumps(info, indent=2))]
 
     async def _handle_search_files(self, arguments: dict) -> list[types.TextContent]:
         """Handle searching files."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
         pattern = arguments["pattern"]
 
         filestation = self._get_filestation(base_url)
-        results = filestation.search_files(path, pattern)
+        results = await asyncio.to_thread(filestation.search_files, path, pattern)
 
         return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
     async def _handle_get_file_content(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting file content."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
+        encoding = arguments.get("encoding", "text")
+        max_bytes = arguments.get("max_bytes", SynologyFileStation.DEFAULT_MAX_BYTES)
 
         filestation = self._get_filestation(base_url)
-        content = filestation.get_file_content(path)
+        content = await asyncio.to_thread(
+            filestation.get_file_content, path, encoding, max_bytes
+        )
+
+        if isinstance(content, dict):
+            content = json.dumps(content, indent=2)
 
         return [types.TextContent(type="text", text=content)]
 
     async def _handle_rename_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle renaming a file or directory."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
         new_name = arguments["new_name"]
 
         filestation = self._get_filestation(base_url)
-        result = filestation.rename_file(path, new_name)
+        result = await asyncio.to_thread(filestation.rename_file, path, new_name)
 
         return [
             types.TextContent(type="text", text=f"Rename result: {json.dumps(result, indent=2)}")
@@ -919,25 +941,44 @@ class SynologyMCPServer:
 
     async def _handle_move_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle moving a file or directory."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         source_path = arguments["source_path"]
         destination_path = arguments["destination_path"]
         overwrite = arguments.get("overwrite", False)  # Default to False if not provided
 
         filestation = self._get_filestation(base_url)
-        result = filestation.move_file(source_path, destination_path, overwrite)
+        result = await asyncio.to_thread(
+            filestation.move_file, source_path, destination_path, overwrite
+        )
 
         return [types.TextContent(type="text", text=f"Move result: {json.dumps(result, indent=2)}")]
 
-    async def _handle_create_file(self, arguments: dict) -> list[types.TextContent]:
-        """Handle creating a new file with specified content on the Synology NAS."""
-        base_url = self._get_base_url(arguments)
-        path = arguments["path"]
-        content = arguments.get("content", "")
+    async def _handle_copy_file(self, arguments: dict) -> list[types.TextContent]:
+        """Handle a verified, server-side copy of one regular file."""
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        source_path = arguments["source_path"]
+        destination_folder = arguments["destination_folder"]
         overwrite = arguments.get("overwrite", False)
 
         filestation = self._get_filestation(base_url)
-        result = filestation.create_file(path, content, overwrite)
+        result = await asyncio.to_thread(
+            filestation.copy_file, source_path, destination_folder, overwrite
+        )
+
+        return [types.TextContent(type="text", text=f"Copy result: {json.dumps(result, indent=2)}")]
+
+    async def _handle_create_file(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating a new file with specified content on the Synology NAS."""
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        path = arguments["path"]
+        content = arguments.get("content", "")
+        overwrite = arguments.get("overwrite", False)
+        encoding = arguments.get("encoding", "text")
+
+        filestation = self._get_filestation(base_url)
+        result = await asyncio.to_thread(
+            filestation.create_file, path, content, overwrite, encoding
+        )
 
         return [
             types.TextContent(
@@ -947,13 +988,15 @@ class SynologyMCPServer:
 
     async def _handle_create_directory(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new directory on the Synology NAS."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         folder_path = arguments["folder_path"]
         name = arguments["name"]
         force_parent = arguments.get("force_parent", False)
 
         filestation = self._get_filestation(base_url)
-        result = filestation.create_directory(folder_path, name, force_parent)
+        result = await asyncio.to_thread(
+            filestation.create_directory, folder_path, name, force_parent
+        )
 
         return [
             types.TextContent(
@@ -963,11 +1006,11 @@ class SynologyMCPServer:
 
     async def _handle_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting a file or directory on the Synology NAS."""
-        base_url = self._get_base_url(arguments)
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
 
         filestation = self._get_filestation(base_url)
-        result = filestation.delete(path)
+        result = await asyncio.to_thread(filestation.delete, path)
 
         return [
             types.TextContent(type="text", text=f"Delete result: {json.dumps(result, indent=2)}")
