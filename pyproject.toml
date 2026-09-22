@@ -23,10 +23,25 @@ requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "synology-mcp"
-version = "0.1.0"
+name = "mcp-server-synology"
+version = "1.7.0"
 description = "MCP server for Synology NAS"
+readme = "README.md"
+authors = [{ name = "Tony Li" }]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["synology", "nas", "dsm", "mcp", "model-context-protocol", "claude"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "filelock>=3.12",
     "pycryptodome",
@@ -36,6 +51,12 @@ dependencies = [
     "websockets>=17.0.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/atom2ueki/mcp-server-synology"
+Repository = "https://github.com/atom2ueki/mcp-server-synology"
+Issues = "https://github.com/atom2ueki/mcp-server-synology/issues"
+Changelog = "https://github.com/atom2ueki/mcp-server-synology/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 test = [
     "pytest>=9.1.1",
@@ -44,6 +65,7 @@ test = [
 
 [project.scripts]
 synology-mcp = "mcp_server:cli"
+mcp-server-synology = "mcp_server:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -6,6 +6,38 @@ A Model Context Protocol (MCP) server for Synology NAS devices. Enables AI assis
 
 **🌟 NEW: Unified server supports both Claude/Cursor (stdio) and Xiaozhi (WebSocket) simultaneously!**
 
+## 📦 Install from PyPI
+
+No need to clone the repository — install the package directly from PyPI:
+
+```bash
+# With pip
+pip install mcp-server-synology
+
+# Or with pipx (isolated environment)
+pipx install mcp-server-synology
+
+# Or with uv
+uv tool install mcp-server-synology
+```
+
+This installs two equivalent commands: `synology-mcp` and `mcp-server-synology`.
+
+For MCP clients, `uvx` is the simplest option — it downloads and caches the package automatically, no manual install or local clone required:
+
+```json
+{
+  "mcpServers": {
+    "synology": {
+      "command": "uvx",
+      "args": ["mcp-server-synology"]
+    }
+  }
+}
+```
+
+Configuration lives outside the package, so it works the same as a source checkout: create `~/.config/synology-mcp/settings.json` as described in [Configuration Options](#️-configuration-options).
+
 ## 🚀 Quick Start with Docker
 
 ### 1️⃣ Setup Environment
@@ -67,14 +99,16 @@ docker-compose up -d --build
 ### 4️⃣ Alternative: Local Python
 
 ```bash
-# Install the package and its dependencies
-pip install .
+# Install the package and its dependencies (from PyPI, or from a clone with 'pip install .')
+pip install mcp-server-synology
 
 # Run with environment control
 python main.py
 ```
 
 ## 🔌 Client Setup
+
+The examples below use Docker with a local clone of this repository. If you installed from PyPI, use the `uvx` configuration from [Install from PyPI](#-install-from-pypi) instead — it works for Claude Desktop, Cursor, Continue and Codeium alike, with no local paths to adjust.
 
 ### 🤖 Claude Desktop
 

@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-22
+
 ### Added
+- **Published to PyPI as [`mcp-server-synology`](https://pypi.org/project/mcp-server-synology/).** The
+  distribution was renamed from `synology-mcp` (already taken on PyPI by an unrelated project);
+  the `synology-mcp` console script keeps its name, and `mcp-server-synology` is installed as an
+  equivalent alias so `uvx mcp-server-synology` works in MCP client configs with no local clone.
+  Pushing a semver tag (`1.7.0` or `v1.7.0`) now builds and publishes the package via GitHub
+  Actions, using PyPI trusted publishing (no upload token in repo secrets).
 - `copy_file` performs a server-side File Station copy of one regular file and reports success only after verifying the target path and byte count. It avoids routing binary data through the model, but is deliberately documented as unsuitable for transactionally consistent backups of live SQLite databases.
 - `get_file_content` supports lossless structured base64 reads with raw size, MIME type and SHA-256, while text mode now decodes UTF-8 strictly. `create_file` accepts strictly validated base64 uploads. Both directions enforce explicit size limits.
 - **iSCSI provisioning (SAN Manager).** The iSCSI surface was read-only -
