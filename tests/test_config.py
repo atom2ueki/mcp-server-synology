@@ -431,10 +431,43 @@ class TestWindowsAclFallback:
     ModuleNotFoundError, which we use for the missing-pywin32 tests.
     """
 
-    CURRENT_SID = "S-1-5-21-currentuser"
-    SYSTEM_SID = "S-1-5-18"
-    ADMINS_SID = "S-1-5-32-544"
-    EVERYONE_SID = "S-1-1-0"
+    class _FakePySID:
+        """Stand-in for pywin32's PySID object.
+
+        Reproduces the two behaviors the ACL audit depends on:
+
+        - ``str()`` returns the *prefixed* repr (``PySID:S-1-…``), exactly
+          like the real object — the trap behind issue #97, where allowlist
+          literals were compared against this prefixed form and never
+          matched. Plain-string fakes cannot catch that class of bug.
+        - equality compares SID values, like ``PySID.__eq__`` (used by the
+          owner check).
+        """
+
+        def __init__(self, sid_string):
+            self.sid_string = sid_string
+
+        def __str__(self):
+            return f"PySID:{self.sid_string}"
+
+        __repr__ = __str__
+
+        def __eq__(self, other):
+            return (
+                isinstance(other, TestWindowsAclFallback._FakePySID)
+                and self.sid_string == other.sid_string
+            )
+
+        def __ne__(self, other):
+            return not self.__eq__(other)
+
+        def __hash__(self):
+            return hash(("PySID", self.sid_string))
+
+    CURRENT_SID = _FakePySID("S-1-5-21-currentuser")
+    SYSTEM_SID = _FakePySID("S-1-5-18")
+    ADMINS_SID = _FakePySID("S-1-5-32-544")
+    EVERYONE_SID = _FakePySID("S-1-1-0")
 
     def _load_fresh_config(self):
         """Import a fresh SynologyConfig class (avoids module-level caching)."""
@@ -444,7 +477,7 @@ class TestWindowsAclFallback:
         return config_mod
 
     @staticmethod
-    def _ace(trustee_sid_str, ace_type=0, ace_flags=0):
+    def _ace(trustee_sid, ace_type=0, ace_flags=0):
         """Build a fake ACE tuple matching pywin32's real shape.
 
         Real pywin32 ACE shapes returned by PyACL.GetAce(i):
@@ -462,8 +495,8 @@ class TestWindowsAclFallback:
         mask = 0x1F01FF  # full control placeholder
         if ace_type in (5, 6):
             # Object ACE: ((type, flags), mask, obj_type, inh_obj_type, sid)
-            return (header, mask, None, None, trustee_sid_str)
-        return (header, mask, trustee_sid_str)
+            return (header, mask, None, None, trustee_sid)
+        return (header, mask, trustee_sid)
 
     def _build_fakes(self, *, owner_sid, dacl_aces=None, dacl_is_null=False):
         """Build fake win32security/win32api/ntsecuritycon modules.
@@ -517,6 +550,17 @@ class TestWindowsAclFallback:
             self.CURRENT_SID,
             0,
         )
+
+        def _convert_sid_to_string_sid(sid):
+            # Real pywin32: PySID -> canonical "S-1-…" string. Passing a
+            # plain string raises here, as real pywin32 would, and lands in
+            # the outer fail-closed handler; a regression to str(sid) instead
+            # shows up as an allowlist mismatch in the tests that pin #97.
+            if not isinstance(sid, TestWindowsAclFallback._FakePySID):
+                raise TypeError("ConvertSidToStringSid expects a PySID")
+            return sid.sid_string
+
+        fake_win32security.ConvertSidToStringSid = _convert_sid_to_string_sid
 
         def _lookup(_sys, name):
             # Map well-known names back to their SIDs.
@@ -633,6 +677,22 @@ class TestWindowsAclFallback:
             "windows acl check passed" in rec.message.lower() for rec in caplog.records
         )
 
+    def test_fake_pysid_str_is_prefixed_like_real_pywin32(self):
+        """Guard the guard: the fake must reproduce PySID's prefixed str().
+
+        If the SID constants were ever "simplified" back to plain strings,
+        issue #97's failure mode (allowlist literals compared against
+        PySID:S-… reprs) would become untestable again. This pins the
+        property that made the bug invisible to the old string fakes.
+        """
+        assert str(self.ADMINS_SID) == "PySID:S-1-5-32-544"
+        assert str(self.ADMINS_SID) != "S-1-5-32-544"
+        # PySID value equality, independent of the repr.
+        assert self.CURRENT_SID == TestWindowsAclFallback._FakePySID(
+            "S-1-5-21-currentuser"
+        )
+        assert self.CURRENT_SID != self.SYSTEM_SID
+
     def test_owner_mismatch_returns_false(self, tmp_path, caplog):
         """Owner SID != current user → fail."""
         import logging
@@ -642,7 +702,7 @@ class TestWindowsAclFallback:
         secrets_file.write_text("{}")
 
         fakes = self._build_fakes(
-            owner_sid="S-1-5-21-someone-else",
+            owner_sid=self._FakePySID("S-1-5-21-someone-else"),
             dacl_aces=[self._ace(self.CURRENT_SID)],
         )
 
