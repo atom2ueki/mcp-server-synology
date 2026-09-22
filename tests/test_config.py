@@ -477,7 +477,7 @@ class TestWindowsAclFallback:
         return config_mod
 
     @staticmethod
-    def _ace(trustee_sid_str, ace_type=0, ace_flags=0):
+    def _ace(trustee_sid, ace_type=0, ace_flags=0):
         """Build a fake ACE tuple matching pywin32's real shape.
 
         Real pywin32 ACE shapes returned by PyACL.GetAce(i):
@@ -495,8 +495,8 @@ class TestWindowsAclFallback:
         mask = 0x1F01FF  # full control placeholder
         if ace_type in (5, 6):
             # Object ACE: ((type, flags), mask, obj_type, inh_obj_type, sid)
-            return (header, mask, None, None, trustee_sid_str)
-        return (header, mask, trustee_sid_str)
+            return (header, mask, None, None, trustee_sid)
+        return (header, mask, trustee_sid)
 
     def _build_fakes(self, *, owner_sid, dacl_aces=None, dacl_is_null=False):
         """Build fake win32security/win32api/ntsecuritycon modules.
@@ -552,10 +552,10 @@ class TestWindowsAclFallback:
         )
 
         def _convert_sid_to_string_sid(sid):
-            # Real pywin32: PySID -> canonical "S-1-…" string. Rejecting
-            # non-PySID inputs keeps the fake faithful — if the production
-            # code ever regresses to str(sid) or passes a plain string, the
-            # TypeError lands in the outer fail-closed handler.
+            # Real pywin32: PySID -> canonical "S-1-…" string. Passing a
+            # plain string raises here, as real pywin32 would, and lands in
+            # the outer fail-closed handler; a regression to str(sid) instead
+            # shows up as an allowlist mismatch in the tests that pin #97.
             if not isinstance(sid, TestWindowsAclFallback._FakePySID):
                 raise TypeError("ConvertSidToStringSid expects a PySID")
             return sid.sid_string
