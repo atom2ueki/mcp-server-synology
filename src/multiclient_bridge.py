@@ -30,6 +30,54 @@ import websockets
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Keys whose VALUE is a credential, wherever it appears in a JSON-RPC frame.
+# The full-frame DEBUG logs below are the only place this process writes tool
+# arguments to disk, and a `tools/call` for synology_login, synology_create_user
+# or ds_create_task carries a live password in exactly these fields. LOG_LEVEL
+# is a documented setting and ./logs is a mounted volume, so at DEBUG those
+# passwords outlived the call in a file the user never thinks of as secret.
+_REDACTED_KEYS = frozenset(
+    {
+        "_sid",
+        "authorization",
+        "credential",
+        "credentials",
+        "device_id",
+        "did",
+        "otp_code",
+        "passwd",
+        "password",
+        "secret",
+        "secrets",
+        "session_id",
+        "sid",
+        "syno_token",
+        "synotoken",
+        "token",
+    }
+)
+
+
+def _redact(value: Any) -> Any:
+    """Copy a decoded JSON-RPC frame with credential values masked.
+
+    Masks rather than drops, so the frame keeps the shape that makes it worth
+    logging: you can still see that a password WAS sent, and where.
+
+    This is key-based, so it cannot mask a secret that appears inside a free
+    text value -- notably a `tools/call` RESULT, whose content is one JSON
+    string. Tool results are therefore still logged verbatim at DEBUG; treat
+    DEBUG logs as sensitive regardless.
+    """
+    if isinstance(value, dict):
+        return {
+            key: ("***" if str(key).lower() in _REDACTED_KEYS else _redact(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
+
 
 class MCPBridge:
     """Clean multi-client MCP bridge."""
@@ -166,7 +214,7 @@ class MCPBridge:
             emoji_out = "🤖" if "XIAOZHI" in client_type else "📤"
 
             logger.info(f"{emoji_in} {client_type}: {method}")
-            logger.debug(f"📋 {client_type} full message: {message}")
+            logger.debug(f"📋 {client_type} full message: {json.dumps(_redact(data))}")
 
             # Process request
             response_data = await self._process_mcp_request(data)
@@ -178,7 +226,9 @@ class MCPBridge:
 
             response = json.dumps(response_data)
             logger.info(f"{emoji_out} {client_type}: response sent")
-            logger.debug(f"📋 {client_type} full response: {response}")
+            logger.debug(
+                f"📋 {client_type} full response: {json.dumps(_redact(response_data))}"
+            )
             return response
 
         except json.JSONDecodeError:
