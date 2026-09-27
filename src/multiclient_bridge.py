@@ -23,8 +23,9 @@ if TYPE_CHECKING:
     from mcp_server import SynologyMCPServer
 from urllib.parse import urlparse
 
-from config import config
 import websockets
+
+from config import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

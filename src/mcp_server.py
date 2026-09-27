@@ -28,7 +28,7 @@ from iscsi import SynologyISCSI
 from iscsi.synology_iscsi import _uuid_list
 
 
-class ToolFailure(Exception):
+class ToolFailureError(Exception):
     """A tool operation that failed or was refused, with its JSON payload.
 
     Raised rather than returned so the MCP layer can set the protocol's error
@@ -108,7 +108,7 @@ class SynologyMCPServer:
             try:
                 content = await self._dispatch_tool(params.name, params.arguments or {})
                 return CallToolResult(content=content)
-            except ToolFailure as failure:
+            except ToolFailureError as failure:
                 # A refused or failed operation, carrying its structured payload.
                 # Returning it as ordinary content would leave the protocol's
                 # error flag FALSE, so a client that keys on isError -- rather
@@ -157,9 +157,14 @@ class SynologyMCPServer:
         co-locates the definition and implementation so that adding a new
         tool means adding one entry here — no separate if/elif chain needed.
         """
+        # The five names below are deliberately terse and uppercase: they are
+        # local schema-shape constants, and each is repeated on nearly every one
+        # of the ~90 _register_tool lines that follow. Lowercasing them satisfies
+        # N806 at the cost of churning every registration in the file, so the rule
+        # is waived per-line instead -- a new lowercase local still gets flagged.
         # Base target properties reused across many tools
-        T = {"type": "object", "properties": {}, "required": []}
-        TN = {
+        T = {"type": "object", "properties": {}, "required": []}  # noqa: N806
+        TN = {  # noqa: N806
             "type": "object",
             "properties": {
                 "nas_name": {
@@ -173,7 +178,7 @@ class SynologyMCPServer:
             },
             "required": [],
         }
-        TN_P = lambda props: {  # noqa: E731
+        TN_P = lambda props: {  # noqa: E731, N806
             "type": "object",
             "properties": {
                 "nas_name": {
@@ -188,7 +193,7 @@ class SynologyMCPServer:
             },
             "required": [],
         }
-        TN_PR = lambda props, required: {  # noqa: E731
+        TN_PR = lambda props, required: {  # noqa: E731, N806
             "type": "object",
             "properties": {
                 "nas_name": {
@@ -282,7 +287,7 @@ class SynologyMCPServer:
         self._register_tool("synology_health_summary", "Get a combined health overview: system info, CPU/memory utilization, disk health, volume status, storage pools, network, and UPS — all in one call", TN, partial(self._handle_health_call, method_name="health_summary"))
 
         # Container Manager
-        CI = {
+        CI = {  # noqa: N806
             "type": "object",
             "properties": {
                 "nas_name": {"type": "string", "description": "NAS identifier from secrets.json (e.g. \'nas1\', \'nas2\')"},
@@ -665,7 +670,7 @@ class SynologyMCPServer:
         if name in self._STRICT_ARG_TOOLS:
             refusal = self._reject_undeclared_arguments(name, arguments)
             if refusal:
-                raise ToolFailure(refusal)
+                raise ToolFailureError(refusal)
         return await handler(arguments)
 
     def _service_instance_dicts(self):
@@ -1352,14 +1357,14 @@ class SynologyMCPServer:
         return arguments.get("confirm") is True
 
     @staticmethod
-    def _refuse_unconfirmed(action: str) -> "ToolFailure":
+    def _refuse_unconfirmed(action: str) -> "ToolFailureError":
         """The refusal for a destructive tool called without confirm=true.
 
         Raised, not returned: a refusal delivered as ordinary content leaves the
         protocol's error flag false, so a caller that checks isError rather than
         parsing the body reads "did not happen" as "done".
         """
-        return ToolFailure(
+        return ToolFailureError(
             {
                 "success": False,
                 "error": {
@@ -1380,7 +1385,7 @@ class SynologyMCPServer:
         layer is told to set isError.
         """
         if result.get("success") is False:
-            raise ToolFailure(result)
+            raise ToolFailureError(result)
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     async def _handle_lun_get(self, arguments: dict) -> list[types.TextContent]:
@@ -1490,13 +1495,13 @@ class SynologyMCPServer:
         try:
             lun_uuids = _uuid_list(arguments["lun_uuids"], "lun_uuids")
         except ValueError as exc:
-            raise ToolFailure(
+            raise ToolFailureError(
                 {"success": False, "error": {"code": "invalid_argument", "message": str(exc)}}
             )
         if not lun_uuids:
             # all([]) is True, so this would otherwise touch the NAS not at all
             # and report success.
-            raise ToolFailure(
+            raise ToolFailureError(
                 {
                     "success": False,
                     "error": {

@@ -13,7 +13,6 @@ DSM 7.3.2-86009 Update 4, not to a guess about the API:
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -30,7 +29,7 @@ from iscsi.synology_iscsi import (  # noqa: E402
     _resolve_lun_type,
     _uuid_list,
 )
-from mcp_server import ToolFailure  # noqa: E402
+from mcp_server import ToolFailureError  # noqa: E402
 from utils.synology_api import (  # noqa: E402
     SESSION_EXPIRED_CODES,
     annotate_error,
@@ -437,7 +436,7 @@ class TestDestructiveGating:
     def test_string_false_does_not_reach_the_nas(self, handler_name, arguments):
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            with pytest.raises(ToolFailure) as raised:
+            with pytest.raises(ToolFailureError) as raised:
                 asyncio.run(getattr(server, handler_name)(arguments))
         assert raised.value.payload["error"]["code"] == "confirmation_required"
         get_iscsi.assert_not_called()
@@ -446,7 +445,7 @@ class TestDestructiveGating:
         """Unmapping disconnects live storage; it is destructive."""
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            with pytest.raises(ToolFailure):
+            with pytest.raises(ToolFailureError):
                 asyncio.run(
                     server._handle_target_unmap_lun({"target_id": 1, "lun_uuids": ["u"]})
                 )
@@ -454,7 +453,7 @@ class TestDestructiveGating:
 
     def test_refusal_sets_the_protocol_error_flag(self):
         """A refusal must not arrive as a success at the MCP layer."""
-        failure = ToolFailure({"success": False, "error": {"code": "confirmation_required"}})
+        failure = ToolFailureError({"success": False, "error": {"code": "confirmation_required"}})
         assert failure.payload["success"] is False
 
 
@@ -488,7 +487,7 @@ class TestUndeclaredArguments:
     def test_misnamed_credentials_create_nothing(self, arguments):
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            with pytest.raises(ToolFailure) as raised:
+            with pytest.raises(ToolFailureError) as raised:
                 asyncio.run(server._dispatch_tool("synology_target_create", arguments))
         assert raised.value.payload["error"]["code"] == "unknown_argument"
         get_iscsi.assert_not_called()
@@ -497,7 +496,7 @@ class TestUndeclaredArguments:
         """`lun_type` is the module's kwarg; the TOOL declares `type`."""
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            with pytest.raises(ToolFailure) as raised:
+            with pytest.raises(ToolFailureError) as raised:
                 asyncio.run(
                     server._dispatch_tool(
                         "synology_lun_create",
@@ -648,7 +647,7 @@ class TestEmptyMappingRequest:
     def test_empty_lun_uuids_is_refused_not_reported_as_success(self):
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            with pytest.raises(ToolFailure) as raised:
+            with pytest.raises(ToolFailureError) as raised:
                 asyncio.run(
                     server._handle_target_map_lun({"target_id": 1, "lun_uuids": []})
                 )
@@ -658,7 +657,7 @@ class TestEmptyMappingRequest:
     def test_malformed_lun_uuids_never_reaches_a_write(self):
         server = self._server()
         with patch.object(server, "_get_iscsi") as get_iscsi:
-            with pytest.raises(ToolFailure) as raised:
+            with pytest.raises(ToolFailureError) as raised:
                 asyncio.run(
                     server._handle_target_map_lun(
                         {"target_id": 1, "lun_uuids": {"real-uuid": False}}
@@ -679,7 +678,7 @@ class TestEmptyMappingRequest:
             patch.object(server, "_get_base_url", return_value="https://nas.example"),
             patch.object(server, "_get_iscsi", return_value=iscsi),
         ):
-            with pytest.raises(ToolFailure) as raised:
+            with pytest.raises(ToolFailureError) as raised:
                 asyncio.run(
                     server._handle_target_map_lun({"target_id": 1, "lun_uuids": ["a", "b"]})
                 )
