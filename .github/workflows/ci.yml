@@ -1,0 +1,68 @@
+name: CI
+
+# Lint and unit tests on every PR and every push to main. Until this existed,
+# nothing enforced the ruff rule set configured in pyproject.toml and nothing
+# ran the test suite before a release tag, so both drifted.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# This workflow only reads the repo. Without an explicit block the jobs inherit
+# the repository default, which on older repos is write-all.
+permissions:
+  contents: read
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pinned deliberately. An unpinned ruff gains rules on its own release
+      # schedule and turns a green PR red with no change to the code, which
+      # teaches everyone to ignore the job. Bump it in its own commit;
+      # dependabot already watches this file's actions.
+      - run: pip install ruff==0.16.9
+      - run: ruff check src/ tests/
+
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Report every version's result; one old-version failure should not hide
+      # the others.
+      fail-fast: false
+      matrix:
+        # The floor from requires-python, through the newest classifier.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install ".[test]"
+      - name: Run unit tests
+        # Deselect anything that talks to a real NAS. Two independent things
+        # have to hold for that to be safe, so both are in place:
+        #
+        #  1. No credentials reach this runner, so conftest's `env_check`
+        #     fixture skips every live test on its own.
+        #  2. This marker filter, which holds even if someone later wires
+        #     secrets in.
+        #
+        # The filter is the weaker of the two on its own -- it is only as good
+        # as the markers. `test_auth_connectivity` was unmarked and reached the
+        # NAS, and it logs in with deliberately wrong credentials, which feeds
+        # DSM's auto-block counter; it is marked in this commit.
+        run: pytest -m "not real_nas and not destructive"

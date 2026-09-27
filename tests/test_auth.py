@@ -197,6 +197,12 @@ class TestSynologyAuth:
 
 
 # Quick connectivity test
+#
+# real_nas: this reaches the configured NAS, and it does so by attempting a
+# login with deliberately wrong credentials. Every run therefore adds a failed
+# login to DSM's auto-block counter for the client IP, so it must never run
+# unattended. It was the only test using a live fixture without a marker.
+@pytest.mark.real_nas
 def test_auth_connectivity(env_check):
     """Quick test to verify auth service is reachable."""
     from auth.synology_auth import SynologyAuth
