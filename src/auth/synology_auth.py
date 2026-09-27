@@ -24,6 +24,43 @@ _AUTH_REGISTRY: Dict[str, "SynologyAuth"] = {}
 AUTH_TIMEOUT = 15
 
 
+def _refuse_redirect(response, endpoint: str) -> Dict[str, Any]:
+    """Build the failure returned when auth.cgi answers with a 3xx.
+
+    Redirects are not followed on these two calls, and a 3xx is treated as a
+    failure rather than a retry, for one reason: requests replays the method
+    and body verbatim on a 307/308, so following a Location that points at
+    another host hands it this request's body -- the password, the OTP, the
+    device token, or the SID. `verify_ssl` defaults to False in this project,
+    which puts forging that redirect within reach of anyone who can sit on the
+    link.
+
+    `raise_for_status()` does not help here: it raises for 4xx and 5xx only and
+    lets a 3xx through untouched, so the check has to be explicit.
+    """
+    location = response.headers.get("Location", "<no Location header>")
+    logger.error(
+        "%s answered with HTTP %s redirecting to %s. Not following it: a 307/308 "
+        "would replay this request's body, credentials included, to that target.",
+        endpoint,
+        response.status_code,
+        location,
+    )
+    return {
+        "success": False,
+        "error": {
+            "code": "unexpected_redirect",
+            "message": (
+                f"{endpoint} returned HTTP {response.status_code} (a redirect), which "
+                "was refused, so no credentials were sent to the redirect target. "
+                "The usual cause is the wrong URL configured for this NAS -- an "
+                "http:// URL against a DSM that redirects to HTTPS, or a reverse "
+                "proxy in front of it. Configure the final https:// URL directly."
+            ),
+        },
+    }
+
+
 def get_auth_for_url(base_url: str) -> Optional["SynologyAuth"]:
     """Return the SynologyAuth instance registered for `base_url`, if any.
 
@@ -157,7 +194,13 @@ class SynologyAuth:
                     data=payload,
                     verify=self.verify_ssl,
                     timeout=AUTH_TIMEOUT,
+                    allow_redirects=False,
                 )
+                # Returned, not `continue`d. A redirect says nothing about the
+                # API version, so retrying the remaining versions would only
+                # put three more copies of the password on the wire.
+                if 300 <= response.status_code < 400:
+                    return _refuse_redirect(response, "SYNO.API.Auth login")
                 response.raise_for_status()
                 result = response.json()
 
@@ -295,7 +338,12 @@ class SynologyAuth:
                     data=payload,
                     verify=self.verify_ssl,
                     timeout=AUTH_TIMEOUT,
+                    allow_redirects=False,
                 )
+                # The logout body carries a live SID, so it gets the same
+                # treatment as login, and likewise stops rather than retrying.
+                if 300 <= response.status_code < 400:
+                    return _refuse_redirect(response, "SYNO.API.Auth logout")
                 response.raise_for_status()
                 result = response.json()
 

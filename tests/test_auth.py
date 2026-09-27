@@ -274,10 +274,18 @@ def test_relogin_skips_when_session_already_refreshed():
 
 
 class _FakeResponse:
-    """Minimal stand-in for requests.Response used by the OTP payload tests."""
+    """Minimal stand-in for requests.Response used by the OTP payload tests.
 
-    def __init__(self, payload):
+    `status_code` and `headers` exist so a redirect can be simulated.
+    raise_for_status() is a no-op for 3xx on purpose -- that is what the real
+    one does, and it is why the redirect check in synology_auth has to be
+    explicit rather than relying on raise_for_status().
+    """
+
+    def __init__(self, payload, status_code=200, headers=None):
         self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
         return None
@@ -301,16 +309,19 @@ def _patch_requests_post(monkeypatch, payloads):
 
     calls = []
 
-    def _fake_post(url, data=None, verify=None, timeout=None):
+    def _fake_post(url, data=None, verify=None, timeout=None, allow_redirects=None):
         calls.append(
             {
                 "url": url,
                 "payload": dict(data or {}),
                 "verify": verify,
                 "timeout": timeout,
+                "allow_redirects": allow_redirects,
             }
         )
-        return _FakeResponse(payloads.pop(0) if payloads else {"success": False})
+        nxt = payloads.pop(0) if payloads else {"success": False}
+        # A payload may be a ready-made _FakeResponse (used to simulate a 3xx).
+        return nxt if isinstance(nxt, _FakeResponse) else _FakeResponse(nxt)
 
     def _forbid_get(*args, **kwargs):
         raise AssertionError(
@@ -337,6 +348,9 @@ def test_login_uses_post_with_a_timeout(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["payload"]["passwd"] == "pw"
     assert calls[0]["timeout"] == AUTH_TIMEOUT
+    # requests follows redirects by default, and replays the body verbatim on
+    # a 307/308 -- which would hand this password to the redirect target.
+    assert calls[0]["allow_redirects"] is False
 
 
 def test_logout_uses_post_with_a_timeout(monkeypatch):
@@ -355,6 +369,56 @@ def test_logout_uses_post_with_a_timeout(monkeypatch):
     assert len(calls) == 2
     assert calls[1]["payload"]["_sid"] == "SID_1"
     assert calls[1]["timeout"] == AUTH_TIMEOUT
+    assert calls[1]["allow_redirects"] is False
+
+
+def test_login_refuses_a_redirect_without_retrying(monkeypatch):
+    """A 3xx is a failure, and must not be retried across API versions.
+
+    Following it would replay the password to the Location target on a
+    307/308. Retrying the remaining versions would put three more copies of
+    that password on the wire, so the loop has to stop on the first one.
+    """
+    from auth.synology_auth import SynologyAuth
+
+    redirect = _FakeResponse(
+        {}, status_code=307, headers={"Location": "https://attacker.example/steal"}
+    )
+    calls = _patch_requests_post(monkeypatch, [redirect])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "hunter2")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unexpected_redirect"
+    # One attempt only -- not one per API version.
+    assert len(calls) == 1
+    # Nothing was cached, so a later relogin cannot replay the credentials.
+    assert auth.current_session_id is None
+    assert auth._credentials is None
+
+
+def test_logout_refuses_a_redirect(monkeypatch):
+    """The logout body carries a live SID, so it gets the same treatment."""
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post(
+        monkeypatch,
+        [
+            {"success": True, "data": {"sid": "SID_1"}},
+            _FakeResponse(
+                {}, status_code=302, headers={"Location": "https://attacker.example/"}
+            ),
+        ],
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw")
+    result = auth.logout()
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unexpected_redirect"
+    assert len(calls) == 2  # login + one refused logout, no version retries
 
 
 def test_login_with_otp_code_adds_otp_and_device_token_request(monkeypatch):
