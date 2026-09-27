@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 # Without this, the client's SID stays dead until the process restarts.
 _AUTH_REGISTRY: Dict[str, "SynologyAuth"] = {}
 
+# Seconds to wait for auth.cgi. Matches the DEFAULT_TIMEOUT the service modules
+# use. Without it these two calls wait forever: a NAS that accepts the TCP
+# connection and then stalls hangs the startup auto-login loop, and hangs
+# relogin() while it holds `_relogin_lock`, which wedges session recovery for
+# every caller behind it.
+AUTH_TIMEOUT = 15
+
 
 def get_auth_for_url(base_url: str) -> Optional["SynologyAuth"]:
     """Return the SynologyAuth instance registered for `base_url`, if any.
@@ -140,7 +147,17 @@ class SynologyAuth:
                 payload["enable_device_token"] = "yes"
 
             try:
-                response = requests.get(login_url, params=payload, verify=self.verify_ssl)
+                # POST, not GET: `passwd` and `otp_code` in a query string are
+                # written verbatim to DSM's own nginx access log and to the log
+                # of every proxy in between, where they outlive the session.
+                # auth.cgi reads the same parameters from a form body, which is
+                # what the DSM web UI sends.
+                response = requests.post(
+                    login_url,
+                    data=payload,
+                    verify=self.verify_ssl,
+                    timeout=AUTH_TIMEOUT,
+                )
                 response.raise_for_status()
                 result = response.json()
 
@@ -273,7 +290,12 @@ class SynologyAuth:
             }
 
             try:
-                response = requests.get(logout_url, params=payload, verify=self.verify_ssl)
+                response = requests.post(
+                    logout_url,
+                    data=payload,
+                    verify=self.verify_ssl,
+                    timeout=AUTH_TIMEOUT,
+                )
                 response.raise_for_status()
                 result = response.json()
 

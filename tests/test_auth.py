@@ -286,22 +286,75 @@ class _FakeResponse:
         return self._payload
 
 
-def _patch_requests_get(monkeypatch, payloads):
-    """Replace requests.get in synology_auth with a recorder.
+def _patch_requests_post(monkeypatch, payloads):
+    """Replace requests.post in synology_auth with a recorder.
 
     `payloads` is a list of dicts; each call pops the head. Every call also
-    records the params it was called with into `calls` for assertions.
+    records the form body it was called with into `calls` for assertions.
+
+    auth.cgi is called with POST + a form body, not GET + a query string, so
+    the credentials never reach DSM's access log. `get` is patched alongside it
+    to raise: a GET from this module would be that regression coming back, and
+    a recorder that quietly accepted both would not notice.
     """
     import auth.synology_auth as mod
 
     calls = []
 
-    def _fake_get(url, params=None, verify=None):
-        calls.append({"url": url, "params": dict(params or {}), "verify": verify})
+    def _fake_post(url, data=None, verify=None, timeout=None):
+        calls.append(
+            {
+                "url": url,
+                "payload": dict(data or {}),
+                "verify": verify,
+                "timeout": timeout,
+            }
+        )
         return _FakeResponse(payloads.pop(0) if payloads else {"success": False})
 
-    monkeypatch.setattr(mod.requests, "get", _fake_get)
+    def _forbid_get(*args, **kwargs):
+        raise AssertionError(
+            "synology_auth must not send credentials via GET (query strings are "
+            "logged by DSM and by every proxy in between)"
+        )
+
+    monkeypatch.setattr(mod.requests, "post", _fake_post)
+    monkeypatch.setattr(mod.requests, "get", _forbid_get)
     return calls
+
+
+def test_login_uses_post_with_a_timeout(monkeypatch):
+    """Credentials go in the form body, and the call cannot hang forever."""
+    from auth.synology_auth import AUTH_TIMEOUT, SynologyAuth
+
+    calls = _patch_requests_post(
+        monkeypatch, [{"success": True, "data": {"sid": "SID_1"}}]
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw")
+
+    assert len(calls) == 1
+    assert calls[0]["payload"]["passwd"] == "pw"
+    assert calls[0]["timeout"] == AUTH_TIMEOUT
+
+
+def test_logout_uses_post_with_a_timeout(monkeypatch):
+    """Logout carries a live SID, so it takes the same treatment as login."""
+    from auth.synology_auth import AUTH_TIMEOUT, SynologyAuth
+
+    calls = _patch_requests_post(
+        monkeypatch,
+        [{"success": True, "data": {"sid": "SID_1"}}, {"success": True}],
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw")
+    auth.logout()
+
+    assert len(calls) == 2
+    assert calls[1]["payload"]["_sid"] == "SID_1"
+    assert calls[1]["timeout"] == AUTH_TIMEOUT
 
 
 def test_login_with_otp_code_adds_otp_and_device_token_request(monkeypatch):
@@ -313,13 +366,13 @@ def test_login_with_otp_code_adds_otp_and_device_token_request(monkeypatch):
         "success": True,
         "data": {"sid": "SID_123", "synotoken": "SYNO_TOK", "did": "DID_abc"},
     }
-    calls = _patch_requests_get(monkeypatch, [success_payload])
+    calls = _patch_requests_post(monkeypatch, [success_payload])
 
     auth = SynologyAuth("https://nas.example.test:5001")
     auth.login("alice", "pw", otp_code="123456")
 
     assert len(calls) == 1
-    params = calls[0]["params"]
+    params = calls[0]["payload"]
     # Bootstrap prefers v6: v7 succeeds but returns no `did` on DSM 7.x.
     assert params["version"] == "6"
     assert params["otp_code"] == "123456"
@@ -335,13 +388,13 @@ def test_login_with_device_id_trusted_device_path(monkeypatch):
     from auth.synology_auth import SynologyAuth
 
     success_payload = {"success": True, "data": {"sid": "SID_456", "synotoken": "T"}}
-    calls = _patch_requests_get(monkeypatch, [success_payload])
+    calls = _patch_requests_post(monkeypatch, [success_payload])
 
     auth = SynologyAuth("https://nas.example.test:5001")
     auth.login("alice", "pw", device_id="DID_abc")
 
     assert len(calls) == 1
-    params = calls[0]["params"]
+    params = calls[0]["payload"]
     # Steady-state logins keep preferring v7; only the OTP bootstrap reorders.
     assert params["version"] == "7"
     assert params["device_id"] == "DID_abc"
@@ -355,12 +408,12 @@ def test_device_id_wins_over_otp_code(monkeypatch):
     from auth.synology_auth import SynologyAuth
 
     success_payload = {"success": True, "data": {"sid": "SID_789", "synotoken": "T"}}
-    calls = _patch_requests_get(monkeypatch, [success_payload])
+    calls = _patch_requests_post(monkeypatch, [success_payload])
 
     auth = SynologyAuth("https://nas.example.test:5001")
     auth.login("alice", "pw", otp_code="123456", device_id="DID_abc")
 
-    params = calls[0]["params"]
+    params = calls[0]["payload"]
     assert params["device_id"] == "DID_abc"
     assert "otp_code" not in params
     assert "enable_device_token" not in params
@@ -375,7 +428,7 @@ def test_successful_otp_login_caches_did_for_relogin(monkeypatch):
         "success": True,
         "data": {"sid": "SID_1", "synotoken": "T", "did": "DID_persisted"},
     }
-    _patch_requests_get(monkeypatch, [success_payload])
+    _patch_requests_post(monkeypatch, [success_payload])
 
     auth = SynologyAuth("https://nas.example.test:5001")
     auth.login("alice", "pw", otp_code="123456")
@@ -390,7 +443,7 @@ def test_successful_login_without_device_token_leaves_cache_empty(monkeypatch):
     from auth.synology_auth import SynologyAuth
 
     success_payload = {"success": True, "data": {"sid": "SID_2", "synotoken": "T"}}
-    _patch_requests_get(monkeypatch, [success_payload])
+    _patch_requests_post(monkeypatch, [success_payload])
 
     auth = SynologyAuth("https://nas.example.test:5001")
     auth.login("alice", "pw")
@@ -409,7 +462,7 @@ def test_login_with_explicit_device_id_seeds_cache_for_relogin(monkeypatch):
 
     # DSM response on the device_id path: no `did` field echoed.
     success_payload = {"success": True, "data": {"sid": "SID_steady", "synotoken": "T"}}
-    calls = _patch_requests_get(monkeypatch, [success_payload, success_payload])
+    calls = _patch_requests_post(monkeypatch, [success_payload, success_payload])
 
     auth = SynologyAuth("https://nas.example.test:5001")
     auth.login("alice", "pw", device_id="DID_from_settings")
@@ -422,7 +475,7 @@ def test_login_with_explicit_device_id_seeds_cache_for_relogin(monkeypatch):
     auth.current_session_id = "SID_ABOUT_TO_EXPIRE"
     assert auth.relogin() is True
 
-    relogin_params = calls[1]["params"]
+    relogin_params = calls[1]["payload"]
     assert relogin_params["device_id"] == "DID_from_settings"
     assert "otp_code" not in relogin_params
 
@@ -440,7 +493,7 @@ def test_relogin_reuses_cached_device_id(monkeypatch):
         "success": True,
         "data": {"sid": "SID_NEW", "synotoken": "T_NEW", "did": "DID_reuse"},
     }
-    calls = _patch_requests_get(monkeypatch, [initial, refreshed])
+    calls = _patch_requests_post(monkeypatch, [initial, refreshed])
 
     auth = SynologyAuth("https://nas.example.test:5001")
     auth.login("alice", "pw", otp_code="111222")
@@ -453,7 +506,7 @@ def test_relogin_reuses_cached_device_id(monkeypatch):
     assert auth.relogin() is True
 
     # Second call (relogin) must include device_id; no otp_code/enable_device_token.
-    relogin_params = calls[1]["params"]
+    relogin_params = calls[1]["payload"]
     assert relogin_params["device_id"] == "DID_reuse"
     assert "otp_code" not in relogin_params
     assert "enable_device_token" not in relogin_params
@@ -470,7 +523,7 @@ def test_logout_clears_device_id_cache(monkeypatch):
         "data": {"sid": "SID_3", "synotoken": "T", "did": "DID_forget_me"},
     }
     logout_payload = {"success": True}
-    _patch_requests_get(monkeypatch, [login_payload, logout_payload])
+    _patch_requests_post(monkeypatch, [login_payload, logout_payload])
 
     auth = SynologyAuth("https://nas.example.test:5001")
     auth.login("alice", "pw", otp_code="333444")
