@@ -53,7 +53,7 @@ def test_scrub_secrets_keeps_the_diagnosis():
     assert "Max retries exceeded" in scrubbed
 
 
-def test_network_failure_does_not_leak_the_sid_into_the_result(monkeypatch):
+def test_network_failure_does_not_leak_the_sid_into_the_result():
     """The end-to-end path: a real call to a dead port, through the handler."""
     client = SynologyAPIClient("http://127.0.0.1:9", LIVE_SID, syno_token="TOK")
 
