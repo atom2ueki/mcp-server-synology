@@ -21,6 +21,11 @@ __pycache__/
 .git/
 .gitignore
 
+# Secrets - never into the build context. (env.example has no leading dot and
+# is not matched here; it is the checked-in template and carries no values.)
+.env
+.env.*
+
 # Documentation and assets
 README.md
 *.md
