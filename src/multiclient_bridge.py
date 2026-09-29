@@ -387,8 +387,18 @@ class MCPBridge:
                 logger.error(f"🤖 Xiaozhi connection error: {e}")
                 consecutive_failures += 1
             finally:
-                # Ensure websocket is properly closed
-                if websocket and not websocket.closed:
+                # Ensure websocket is properly closed.
+                #
+                # No `.closed` guard: that attribute belonged to the legacy
+                # WebSocketClientProtocol and is absent from the asyncio
+                # ClientConnection that `websockets.connect` returns from v14
+                # on (verified against 17.1, the floor this project pins).
+                # Reading it raised AttributeError from inside this `finally`,
+                # which propagated out of the reconnect loop and killed the
+                # Xiaozhi client for the rest of the process -- on the very
+                # first disconnect, the case the loop exists to survive.
+                # close() is idempotent, so just call it.
+                if websocket is not None:
                     try:
                         await websocket.close()
                     except Exception:
