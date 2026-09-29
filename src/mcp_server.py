@@ -27,6 +27,45 @@ from health import SynologyHealth
 from iscsi import SynologyISCSI
 from iscsi.synology_iscsi import _uuid_list
 
+# DSM's login codes, decoded. One table for both call sites (`_handle_login`
+# and `_login_nas`) so the two cannot drift apart, which they already had.
+_DSM_LOGIN_CODES = (
+    "400 bad account/password, 401 account disabled, "
+    "402 permission denied (the account may lack DSM application access), "
+    "403 2FA required, 404 2FA code failed"
+)
+
+
+def _login_failure_detail(result: object) -> str:
+    """Render a failed login, without echoing the request body back.
+
+    DSM answers a bad login with a bare number, so the caller needs it decoded.
+    Not every failure is numeric, though: `SynologyAuth` raises its own string
+    codes, and those carry a message written for the operator --
+    `unexpected_redirect` names the fix ("configure the final https:// URL
+    directly"). Dropping it leaves the caller holding a code that is not in
+    DSM's table and no explanation, and mislabels it a DSM code.
+    """
+    error = result.get("error") if isinstance(result, dict) else None
+    error = error if isinstance(error, dict) else {}
+    code = error.get("code", "unknown")
+    message = error.get("message")
+
+    # DSM's own codes arrive as JSON numbers; a numeric *string* is treated the
+    # same way so the table still applies.
+    if isinstance(code, int) or (isinstance(code, str) and code.isdigit()):
+        return f"DSM error code {code}. Common codes: {_DSM_LOGIN_CODES}."
+    if code == "unknown":
+        # What SynologyAuth returns once every API version has been tried
+        # without DSM naming a code -- a network or wrong-host problem far more
+        # often than a credential one, so say that rather than send the caller
+        # hunting through a code table that has no entry for it.
+        return (
+            "no DSM error code: every API version was tried and none replied. "
+            "Check the NAS is reachable at this URL and port, then the credentials."
+        )
+    return f"{code}: {message or 'no detail reported'}"
+
 
 class ToolFailureError(Exception):
     """A tool operation that failed or was refused, with its JSON payload.
@@ -420,12 +459,8 @@ class SynologyMCPServer:
         )
 
         if not result.get("success"):
-            code = result.get("error", {}).get("code", "?")
             raise Exception(
-                f"Login to NAS '{label}' failed (DSM error code {code}). "
-                "Common codes: 400 bad account/password, 401 account disabled, "
-                "402 permission denied (the account may lack DSM application "
-                "access), 403 2FA required, 404 2FA code failed."
+                f"Login to NAS '{label}' failed: {_login_failure_detail(result)}"
             )
 
         session_id = result["data"]["sid"]
@@ -885,17 +920,15 @@ class SynologyMCPServer:
                     )
             return [types.TextContent(type="text", text="\n".join(lines))]
         else:
-            # The failure body is a DSM error code and nothing else, so it is
-            # safe to pass through -- and it is the only way the caller can tell
-            # 400 (bad password) from 403 (2FA required) from 404 (bad OTP).
-            error = result.get("error", {})
-            code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
+            # Report the reason, not the request. The body carries a code the
+            # caller can act on -- and nothing else worth reading -- so it is
+            # passed through decoded rather than dumped. See
+            # _login_failure_detail for why a non-numeric code keeps its message.
             return [
                 types.TextContent(
                     type="text",
-                    text=f"Authentication failed for {base_url} (DSM error code {code}). "
-                    "Common codes: 400 bad account/password, 401 account disabled, "
-                    "402 permission denied, 403 2FA required, 404 2FA code failed.",
+                    text=f"Authentication failed for {base_url}: "
+                    f"{_login_failure_detail(result)}",
                 )
             ]
 
