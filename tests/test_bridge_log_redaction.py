@@ -82,3 +82,65 @@ async def test_handle_message_debug_log_is_redacted(caplog):
 
     assert caplog.text, "expected the DEBUG frame log to be emitted"
     assert "hunter2" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# _REDACTED_KEYS is an allowlist of exact names, so it silently rots: a tool
+# that declares a new credential field keeps logging it verbatim and nothing
+# fails. These tests read the real tool schemas, so adding such a field without
+# adding its name here is a test failure rather than a silent leak.
+# ---------------------------------------------------------------------------
+
+# Field names that carry a secret but are not themselves credentials.
+_NON_SECRET_NAMES = {
+    "password_never_expire",
+    "passwd_never_expire",
+    "cannot_chg_passwd",
+    "send_password",
+}
+
+
+def _tool_schemas():
+    from mcp_server import SynologyMCPServer
+
+    server = SynologyMCPServer()
+    return {name: tool for name, (tool, _handler) in server._tool_registry.items()}
+
+
+def _credential_argument_names():
+    """Every argument name across all tool schemas that looks like a secret."""
+    import re
+
+    found = set()
+    for schema in _tool_schemas().values():
+        input_schema = schema.input_schema or schema.inputSchema or {}
+        props = input_schema.get("properties", {})
+        for name in props:
+            if name in _NON_SECRET_NAMES:
+                continue
+            # password / passwd / *_password / *_passwd / *_token / *_secret /
+            # otp / sid -- i.e. the value is the secret, not a flag about one.
+            if re.search(r"(password|passwd|secret|token|credential|otp|_sid$|sid$)",
+                         name, re.IGNORECASE):
+                found.add(name)
+    return found
+
+
+def test_redacted_keys_cover_every_credential_field_in_the_tool_schemas():
+    """A credential argument must never be logged verbatim."""
+    from multiclient_bridge import _REDACTED_KEYS
+
+    missing = _credential_argument_names() - set(_REDACTED_KEYS)
+
+    assert not missing, (
+        f"tool arguments {sorted(missing)} carry secrets but are not in "
+        "_REDACTED_KEYS, so DEBUG logs would write them in the clear"
+    )
+
+
+@pytest.mark.parametrize("field", ["chap_password", "new_password"])
+def test_iscsi_and_user_credentials_are_masked(field):
+    """The two that were missed: iSCSI CHAP and set-user's new password."""
+    from multiclient_bridge import _redact
+
+    assert _redact({field: "SECRET"})[field] == "***"
