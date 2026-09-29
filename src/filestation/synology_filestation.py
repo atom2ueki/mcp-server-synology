@@ -1161,7 +1161,7 @@ class SynologyFileStation:
             operation = "Move" if remove_source else "Copy"
             raise Exception(f"{operation} operation timed out after {max_wait_time} seconds")
 
-        except Exception as e:
+        except Exception:
             # Try to stop the task if it's still running
             try:
                 self._make_request("SYNO.FileStation.CopyMove", "3", "stop", taskid=task_id)

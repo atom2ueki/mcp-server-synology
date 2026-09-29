@@ -24,8 +24,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from mcp_server import SynologyMCPServer  # noqa: E402
 from filestation.synology_filestation import SynologyFileStation  # noqa: E402
+from mcp_server import SynologyMCPServer  # noqa: E402
 
 
 def _ok_login(sid="sid-aaa"):

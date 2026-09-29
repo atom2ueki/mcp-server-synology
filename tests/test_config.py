@@ -517,10 +517,14 @@ class TestWindowsAclFallback:
             def __init__(self, aces):
                 self._aces = list(aces or [])
 
-            def GetAceCount(self):
+            # PascalCase is required, not a style slip: _check_windows_file_
+            # permissions calls dacl.GetAceCount() and dacl.GetAce(i), which are
+            # pywin32's own PyACL method names. Renaming these to satisfy N802
+            # would stop the stand-in standing in.
+            def GetAceCount(self):  # noqa: N802
                 return len(self._aces)
 
-            def GetAce(self, i):
+            def GetAce(self, i):  # noqa: N802
                 return self._aces[i]
 
         fake_win32security = types.ModuleType("win32security")
