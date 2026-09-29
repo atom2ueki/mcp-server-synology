@@ -843,18 +843,59 @@ class SynologyMCPServer:
             for inst_dict in self._service_instance_dicts():
                 inst_dict.pop(base_url, None)
 
+            # Report the outcome, NOT the credentials. `result` carries `sid`,
+            # `synotoken` and (on a 2FA bootstrap) the long-lived `did` device
+            # token; echoing it wrote all three into the MCP client's
+            # conversation transcript, where they persist far longer than the
+            # session does and travel wherever that transcript goes. The SID is
+            # truncated the same way _handle_logout already truncates it --
+            # enough to correlate with the server log, useless as a credential.
+            #
+            lines = [
+                f"Successfully authenticated with {base_url}",
+                f"Session {session_id[:10]}... established",
+            ]
+
+            # The trusted-device token is the ONE secret this tool still
+            # prints, and only in the single case that cannot work without it:
+            # the 2FA bootstrap, where the caller supplied an `otp_code` and
+            # has no `device_id` yet. This tool's own description promises the
+            # token back for exactly that call, and a legacy .env setup has no
+            # other way to obtain it -- settings.json users get it persisted
+            # for them by _login_nas.
+            #
+            # It is NOT printed on an ordinary login. DSM 7 returns the token
+            # on every login, including for accounts with 2FA switched off
+            # (verified on DSM 7.3.2-86009 Update 4), so printing it whenever DSM
+            # sends one would drop a long-lived credential into the transcript
+            # on every call -- reinstating most of the leak this is fixing.
+            #
+            # DSM names the field differently per API version, verified on
+            # DSM 7.3.2-86009 Update 4 (SYNO.API.Auth maxVersion 7):
+            #     v7 -> "device_id";  v6, v3 -> "did"
+            # The bootstrap prefers v6, but falls through to v7 if v6 fails,
+            # so both names are read.
+            if otp_code and not device_id:
+                token = result["data"].get("device_id") or result["data"].get("did")
+                if token:
+                    lines.append(
+                        f"DSM issued a trusted-device token; store it as "
+                        f"\"device_id\" for this NAS in settings.json to skip "
+                        f"OTP next time: {token}"
+                    )
+            return [types.TextContent(type="text", text="\n".join(lines))]
+        else:
+            # The failure body is a DSM error code and nothing else, so it is
+            # safe to pass through -- and it is the only way the caller can tell
+            # 400 (bad password) from 403 (2FA required) from 404 (bad OTP).
+            error = result.get("error", {})
+            code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
             return [
                 types.TextContent(
                     type="text",
-                    text=f"Successfully authenticated with {base_url}\n"
-                    f"Session ID: {session_id}\n"
-                    f"Response: {json.dumps(result, indent=2)}",
-                )
-            ]
-        else:
-            return [
-                types.TextContent(
-                    type="text", text=f"Authentication failed: {json.dumps(result, indent=2)}"
+                    text=f"Authentication failed for {base_url} (DSM error code {code}). "
+                    "Common codes: 400 bad account/password, 401 account disabled, "
+                    "402 permission denied, 403 2FA required, 404 2FA code failed.",
                 )
             ]
 
