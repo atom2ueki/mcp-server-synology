@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # NAS outage would put a live session credential into the MCP client's
 # transcript. Scrub the secret values out of every exception string on the way
 # past, keeping the part that is diagnostic (host, port, reason).
+#
+# Public because `auth.synology_auth` builds the same URL-bearing messages from
+# its own try/except blocks and has to be scrubbed too -- login and logout are
+# the calls that carry the account password and a live SID in the first place.
 _SECRET_QUERY_RE = re.compile(
     r"((?:_sid|sid|session_id|otp_code|passwd|password|token|secret)s?"
     r"(?:=|%3D))([^&\s\"'&]+)",
@@ -25,8 +29,11 @@ _SECRET_QUERY_RE = re.compile(
 )
 
 
-def _scrub_secrets(text: str) -> str:
-    """Replace credential values in a URL-bearing exception string."""
+def scrub_secrets(text: object) -> str:
+    """Replace credential values in a URL-bearing exception or message string.
+
+    Takes `object`, not `str`, because every call site passes an exception.
+    """
     return _SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}***", str(text))
 
 
@@ -295,12 +302,12 @@ class SynologyAPIClient:
         except requests.RequestException as e:
             return {
                 "success": False,
-                "error": {"code": "network_error", "message": _scrub_secrets(e)},
+                "error": {"code": "network_error", "message": scrub_secrets(e)},
             }
         except Exception as e:
             return {
                 "success": False,
-                "error": {"code": "unknown_error", "message": _scrub_secrets(e)},
+                "error": {"code": "unknown_error", "message": scrub_secrets(e)},
             }
 
     def get(
@@ -418,17 +425,17 @@ class SynologyAPIClient:
         except requests.RequestException as exc:
             return {
                 "success": False,
-                "error": {"code": "network_error", "message": _scrub_secrets(exc)},
+                "error": {"code": "network_error", "message": scrub_secrets(exc)},
             }
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             return {
                 "success": False,
-                "error": {"code": "invalid_response", "message": _scrub_secrets(exc)},
+                "error": {"code": "invalid_response", "message": scrub_secrets(exc)},
             }
         except Exception as exc:
             return {
                 "success": False,
-                "error": {"code": "unknown_error", "message": _scrub_secrets(exc)},
+                "error": {"code": "unknown_error", "message": scrub_secrets(exc)},
             }
         finally:
             if response is not None:

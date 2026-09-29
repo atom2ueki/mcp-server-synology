@@ -6,6 +6,12 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 
+# Shared with utils.synology_api: strips credential values out of the
+# URL-bearing exception text that requests/urllib3 produce. Imported here
+# rather than duplicated because the login and logout calls are precisely the
+# ones that carry an account password and a live SID.
+from utils.synology_api import scrub_secrets
+
 logger = logging.getLogger(__name__)
 
 
@@ -378,15 +384,26 @@ class SynologyAuth:
                         break
 
             except requests.RequestException as e:
+                # Scrubbed: the requests/urllib3 message embeds the full request
+                # URL, and this one carries `_sid=<live session id>` in its query
+                # string. _handle_logout writes error.message -- and the whole
+                # error dict -- straight into a tool result, which is the MCP
+                # client's conversation transcript.
                 last_error = {
                     "success": False,
-                    "error": {"code": "network_error", "message": f"Network error: {str(e)}"},
+                    "error": {
+                        "code": "network_error",
+                        "message": f"Network error: {scrub_secrets(e)}",
+                    },
                 }
                 continue
             except Exception as e:
                 last_error = {
                     "success": False,
-                    "error": {"code": "unknown_error", "message": f"Unexpected error: {str(e)}"},
+                    "error": {
+                        "code": "unknown_error",
+                        "message": f"Unexpected error: {scrub_secrets(e)}",
+                    },
                 }
                 continue
 
