@@ -95,9 +95,15 @@ async def test_logout_clears_all_service_instance_caches():
 async def test_logout_accepts_a_trailing_slash_in_the_caller_url():
     """A caller-supplied trailing slash must still reach the stored session.
 
-    _get_base_url normalizes the argument; the session is keyed normalized.
-    Guards the mismatch that made this module fail: if either side stops
-    normalizing, logout silently evicts nothing and reports no active session.
+    Guards the LOOKUP side specifically: `_get_base_url` must keep rstripping
+    the caller's argument, or it looks up a key the session was never stored
+    under and logout silently evicts nothing. Verified by removing that rstrip
+    -- this test fails and no other does.
+
+    The storage side is not covered here: the fixture seeds
+    `server.sessions[BASE_URL]` directly rather than going through
+    `_login_nas`/`_handle_login`, so a regression in their normalization would
+    leave this test green. Closing that needs a test that logs in first.
     """
     server = _server_with_active_session({"success": True})
 

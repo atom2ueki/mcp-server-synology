@@ -7,6 +7,7 @@ secret.
 
 import json
 import logging
+import re
 
 import pytest
 
@@ -107,10 +108,16 @@ def _tool_schemas():
     return {name: tool for name, (tool, _handler) in server._tool_registry.items()}
 
 
+# Name shapes whose VALUE is a credential. Kept as a module constant so the
+# coverage test and the test that pins the pattern cannot disagree.
+_CREDENTIAL_NAME_PATTERN = (
+    r"(password|passwd|secret|token|credential|otp|passphrase"
+    r"|api_key|private_key|recovery_code|(^|_)pin$|(^|_)(sid|did|device_id)$)"
+)
+
+
 def _credential_argument_names():
     """Every argument name across all tool schemas that looks like a secret."""
-    import re
-
     found = set()
     for schema in _tool_schemas().values():
         input_schema = schema.input_schema or schema.inputSchema or {}
@@ -118,12 +125,29 @@ def _credential_argument_names():
         for name in props:
             if name in _NON_SECRET_NAMES:
                 continue
-            # password / passwd / *_password / *_passwd / *_token / *_secret /
-            # otp / sid -- i.e. the value is the secret, not a flag about one.
-            if re.search(r"(password|passwd|secret|token|credential|otp|_sid$|sid$)",
-                         name, re.IGNORECASE):
+            # The value is the secret, not a flag about one. Covers the names in
+            # use today (password, passwd, chap_password, otp_code, device_id)
+            # plus the shapes a new credential field would plausibly take --
+            # `device_id` in particular is a live field today and would not have
+            # been caught by a narrower pattern, so the net is cast by meaning
+            # (a secret, a key, a token, an ID issued by DSM) rather than by the
+            # handful of names that happen to exist right now.
+            if re.search(_CREDENTIAL_NAME_PATTERN, name, re.IGNORECASE):
                 found.add(name)
     return found
+
+
+def test_the_guard_pattern_catches_plausible_future_credential_names():
+    """The coverage test is only as wide as its pattern -- pin the pattern.
+
+    A narrow pattern is worse than no test: the comment above _REDACTED_KEYS
+    promises that 'the next credential field fails the suite', and that promise
+    is only true for names this regex understands.
+    """
+    for name in ("device_id", "did", "sid", "api_key", "recovery_code",
+                 "passphrase", "private_key", "user_pin", "totp_secret",
+                 "password", "chap_password", "otp_code"):
+        assert re.search(_CREDENTIAL_NAME_PATTERN, name, re.IGNORECASE), name
 
 
 def test_redacted_keys_cover_every_credential_field_in_the_tool_schemas():

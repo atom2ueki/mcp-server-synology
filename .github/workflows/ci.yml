@@ -7,6 +7,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Matches label-sync.yml and pypi-publish.yml. Without it there is no way to
+  # re-run CI on demand -- after a flake, a runner outage, or a base-image
+  # change -- short of pushing an empty commit.
+  workflow_dispatch:
 
 # This workflow only reads the repo. Without an explicit block the jobs inherit
 # the repository default, which on older repos is write-all.
@@ -26,7 +30,9 @@ jobs:
     # work; anything past 5 minutes means something is wrong, not slow.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      # v7, matching label-sync.yml. pypi-publish.yml still pins v4; leaving the
+      # repo split across two majors invites diverging deprecation behaviour.
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -53,7 +59,7 @@ jobs:
         # The floor from requires-python, through the newest classifier.
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}

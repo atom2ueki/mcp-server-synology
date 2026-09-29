@@ -42,8 +42,14 @@ logger = logging.getLogger(__name__)
 # field the tools actually declare -- a name that is missing is a value written
 # to disk in the clear. Verified against the tool schemas in mcp_server.py:
 # `chap_password` (synology_target_create, an iSCSI CHAP secret) was absent and
-# was logged verbatim. tests/test_bridge_log_redaction.py re-checks this list
-# against the live schemas, so the next credential field fails the suite.
+# was logged verbatim.
+#
+# tests/test_bridge_log_redaction.py re-checks this list against the live
+# schemas, so a new credential field fails the suite rather than logging
+# silently -- but only for names its pattern recognises as credential-shaped.
+# That pattern covers the fields in use today plus the obvious shapes a new one
+# would take; a credential field named something it does not anticipate still
+# needs this set updated by hand.
 _REDACTED_KEYS = frozenset(
     {
         "_sid",
@@ -411,8 +417,11 @@ class MCPBridge:
                 # 17.0.1).
                 # Reading it raised AttributeError from inside this `finally`,
                 # which propagated out of the reconnect loop and killed the
-                # Xiaozhi client for the rest of the process -- on the very
-                # first disconnect, the case the loop exists to survive.
+                # Xiaozhi client for the rest of the process. That needed an
+                # established connection: `websocket` is reset to None each
+                # iteration, so a refused connect() short-circuited the old
+                # guard and backed off normally. It still hit the case the loop
+                # exists to survive -- a session that drops.
                 # close() is idempotent, so just call it.
                 if websocket is not None:
                     try:
