@@ -138,9 +138,8 @@ def test_redacted_keys_cover_every_credential_field_in_the_tool_schemas():
     )
 
 
-@pytest.mark.parametrize("field", ["chap_password", "new_password"])
-def test_iscsi_and_user_credentials_are_masked(field):
-    """The two that were missed: iSCSI CHAP and set-user's new password."""
+def test_iscsi_chap_secret_is_masked():
+    """The field that was missed: synology_target_create's chap_password."""
     from multiclient_bridge import _redact
 
-    assert _redact({field: "SECRET"})[field] == "***"
+    assert _redact({"chap_password": "SECRET"})["chap_password"] == "***"

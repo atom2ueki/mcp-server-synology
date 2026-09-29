@@ -299,9 +299,9 @@ class SynologyAPIClient:
             }
         except Exception as e:
             return {
-            "success": False,
-            "error": {"code": "unknown_error", "message": _scrub_secrets(e)},
-        }
+                "success": False,
+                "error": {"code": "unknown_error", "message": _scrub_secrets(e)},
+            }
 
     def get(
         self,
@@ -427,9 +427,9 @@ class SynologyAPIClient:
             }
         except Exception as exc:
             return {
-            "success": False,
-            "error": {"code": "unknown_error", "message": _scrub_secrets(exc)},
-        }
+                "success": False,
+                "error": {"code": "unknown_error", "message": _scrub_secrets(exc)},
+            }
         finally:
             if response is not None:
                 response.close()

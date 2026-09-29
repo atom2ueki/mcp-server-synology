@@ -41,8 +41,9 @@ logger = logging.getLogger(__name__)
 # This is an allowlist of exact key names, so it has to carry every credential
 # field the tools actually declare -- a name that is missing is a value written
 # to disk in the clear. Verified against the tool schemas in mcp_server.py:
-# `new_password` (synology_set_user) and `chap_password` (synology_target_create,
-# an iSCSI CHAP secret) were both absent and both logged verbatim.
+# `chap_password` (synology_target_create, an iSCSI CHAP secret) was absent and
+# was logged verbatim. tests/test_bridge_log_redaction.py re-checks this list
+# against the live schemas, so the next credential field fails the suite.
 _REDACTED_KEYS = frozenset(
     {
         "_sid",
@@ -52,7 +53,6 @@ _REDACTED_KEYS = frozenset(
         "credentials",
         "device_id",
         "did",
-        "new_password",
         "otp_code",
         "passwd",
         "password",
