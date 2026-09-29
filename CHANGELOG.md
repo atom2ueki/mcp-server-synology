@@ -10,13 +10,15 @@ container image, or a URL. Two of them change observable behaviour, so read **Ch
 upgrading.
 
 ### Security
-- **DSM credentials no longer travel in the query string.** `SynologyAuth.login()` and `.logout()`
-  called `auth.cgi` with `requests.get(..., params=payload)`, which puts `passwd`, `otp_code` and
+- **The account password no longer travels in the `auth.cgi` query string.**
+  `SynologyAuth.login()` and `.logout()` called that endpoint with
+  `requests.get(..., params=payload)`, which puts `passwd`, `otp_code` and
   `_sid` in the URL — and DSM's own nginx access log, plus every proxy in between, writes the full
   request line. They now POST the same parameters as a form body, which is what the DSM web UI
   sends. Both calls also gained the `timeout=15` every other request in the codebase already had:
   a NAS that accepted the connection and then stalled hung the startup auto-login loop, and hung
   `relogin()` while it held `_relogin_lock`, wedging session recovery for every caller behind it.
+  (Session IDs on the service API calls are a separate matter — see below.)
 - **Redirects are refused on those same calls (CWE-200).** `requests` follows redirects by default
   and replays method and body verbatim on a 307/308, so moving to POST would have handed the
   password, OTP and device token to whatever `Location` named — and `verify_ssl` defaults to
@@ -44,13 +46,16 @@ upgrading.
   `SYNOLOGY_PASSWORD` put in `.env`, that password was copied into an image layer — readable with
   `docker history`, and not removed by deleting the file in a later layer. It is now supplied at
   run time instead, and `.dockerignore` excludes it so a future `COPY . .` cannot reintroduce it.
-- **Session IDs are scrubbed from error messages.** Every DSM call carries `_sid=<live session id>`
-  in its query string, and `requests`/`urllib3` embed the full request URL in the exception text
-  they raise (`Max retries exceeded with url: …&_sid=…`). The error handlers stringified that into
-  `error.message`, which the tool handlers `json.dumps` straight into a result — so an unreachable
-  NAS, the most ordinary failure there is, wrote a live session credential into the transcript.
-  Both the API client and `auth.synology_auth` (which builds its own messages) now scrub credential
-  values on the way past, keeping the host, port and cause that make the error worth reading.
+- **Session IDs are scrubbed from error messages.** Most DSM calls — everything routed through the
+  shared API client on its GET path, plus the Download Station and File Station GETs — pass
+  `_sid=<live session id>` as a query parameter, and `requests`/`urllib3` embed the full request URL
+  in the exception text they raise (`Max retries exceeded with url: …&_sid=…`). The error handlers
+  stringified that into `error.message`, which the tool handlers `json.dumps` straight into a
+  result — so an unreachable NAS, the most ordinary failure there is, wrote a live session
+  credential into the transcript. (The `auth.cgi` calls no longer carry `_sid` in the URL at all:
+  the entry above moved them to a form body.) Both the API client and `auth.synology_auth`, which
+  builds its own messages, now scrub credential values on the way past, keeping the host, port and
+  cause that make the error worth reading.
 - **The iSCSI CHAP secret is no longer logged.** `chap_password` was absent from the redaction key
   list, so `synology_target_create` wrote an iSCSI CHAP secret to `./logs` in the clear at DEBUG.
 
