@@ -392,7 +392,8 @@ class MCPBridge:
                 # No `.closed` guard: that attribute belonged to the legacy
                 # WebSocketClientProtocol and is absent from the asyncio
                 # ClientConnection that `websockets.connect` returns from v14
-                # on (verified against 17.1, the floor this project pins).
+                # on (verified against 17.1; the floor this project pins is
+                # 17.0.1).
                 # Reading it raised AttributeError from inside this `finally`,
                 # which propagated out of the reconnect loop and killed the
                 # Xiaozhi client for the rest of the process -- on the very
