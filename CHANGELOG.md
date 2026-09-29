@@ -4,10 +4,80 @@
 
 ## [1.8.0] - 2026-09-29
 
-A credential-handling release. Every entry under **Security** below is a path by which a live
-secret could reach somewhere it outlives the session — a conversation transcript, a log file, a
-container image, or a URL. Two of them change observable behaviour, so read **Changed** before
-upgrading.
+### Added
+- **CI on every pull request and push to `main`** — `ruff check src/ tests/` on a pinned ruff, and
+  `pytest` across Python 3.11, 3.12 and 3.13 with `fail-fast: false`. Until this existed the only
+  workflows were a PyPI publish that fires on a release tag and a label sync, so the first time
+  anything was checked was when a release was built: twelve ruff findings and four failing tests had
+  accumulated on `main`. Live-NAS tests are excluded twice over — no credentials reach the runner,
+  so the `env_check` fixture skips them, and a `-m "not real_nas and not destructive"` filter holds
+  even if secrets are wired in later. Both jobs carry `timeout-minutes`, and the workflow supports
+  `workflow_dispatch`. (#122, #124)
+- **`synology_login` surfaces DSM's trusted-device token under both field names.** DSM names it
+  `device_id` at `SYNO.API.Auth` v7 and `did` at v6 and v3; the bootstrap prefers v6 but falls
+  through to v7, so both are read. Worth flagging separately: `login_with_session`, `_login_nas`
+  and `config.save_device_id` still read only `did`, so on a v7-served login the token is neither
+  cached nor persisted. That looks like the root cause of the v6-preference workaround, and is not
+  addressed here. (#117)
+- `tests/test_bridge_log_redaction.py` re-checks the redaction key list against the live tool
+  schemas, so a new credential field fails the suite rather than logging silently — for names the
+  guard's pattern recognises as credential-shaped; one it does not anticipate still needs the set
+  updated by hand, as the comment now says. (#118, #124)
+
+### Fixed
+- **The first disconnect permanently killed the Xiaozhi client.** The reconnect loop's cleanup read
+  `websocket.closed`, an attribute of the legacy `WebSocketClientProtocol` that the asyncio
+  `ClientConnection` returned by `websockets.connect` has not had since v14 — and this project
+  pins `websockets>=17.0.1`. Because the read sat in a `finally`, the `AttributeError` propagated
+  out of the `while` loop and out of `_xiaozhi_client` entirely, so the backoff below it was
+  unreachable once a connection had been established. `close()` is idempotent, so the guard bought
+  nothing and is gone. (#119)
+- **A disabled DSM account was indistinguishable from a version mismatch.** `login_with_session`
+  returns the DSM error body for codes that describe *this account* rather than the API version —
+  but 401 was missing from that list, so a disabled account was retried across all four API
+  versions, putting the password on the wire four times, and then reported as `unknown`. It now
+  short-circuits like the others. (#123)
+- **Actionable login failures were being discarded.** The failure branch replaced the response dump
+  with a code plus DSM's table, on the stated basis that the body is "a DSM error code and nothing
+  else". That stopped being true: `SynologyAuth` raises its own string codes, and
+  `unexpected_redirect` carries the fix — the URL to configure instead. Such messages are now
+  passed through, and the table is no longer shown for codes that are not in it. (#117, #124)
+- **`unknown` no longer sends the operator the wrong way.** It is what `SynologyAuth` returns once
+  every API version has been tried without yielding a code it recognises, which covers both "nothing
+  answered" and "DSM answered with a code outside the set". The message now names both rather than
+  asserting silence, which pointed a NAS that had answered every request at a network fault.
+  (#124)
+- **Four eviction tests failed on `main`.** The fixture seeded a session key with a trailing slash
+  that no code path can produce — `_login_nas`, `_handle_login` and `_resync_session_after_relogin`
+  all store normalized keys, and `_get_base_url` normalizes the lookup. The tests were asserting
+  against a server state that does not exist; the behaviour they describe works. The trailing slash
+  is now exercised where it can legitimately appear, as caller input. (#120)
+- **The twelve outstanding ruff findings are cleared**, with per-line waivers and the reason at each
+  site where the rule is genuinely wrong for the code. (#121)
+
+### Changed
+- **A deployment that relied on being redirected to reach DSM now fails, by design.** If you use
+  the "automatically redirect HTTP to HTTPS" DSM option, or a reverse proxy in front of it, point
+  the configured URL at the final `https://` endpoint instead. Following the redirect would replay
+  the request body — password, OTP, device token, or SID — to whatever host it named. The failure
+  message names the cause and the fix. `auth.cgi` answers 200 on both `:5000` and `:5001` and issues
+  no redirect on DSM 7.3.2-86009 Update 4, so the default setup is unaffected. (#123)
+- **`ToolFailure` is renamed `ToolFailureError`** (ruff `N818`). It is internal and not re-exported,
+  but `mcp_server` is a top-level module of the published distribution, so an importer using the old
+  name needs to update. Nothing in the repository referenced it outside its own tests. (#121)
+- **`docker-compose.yml` reads `.env` at run time.** `env_file` is `required: false`, so a
+  `settings.json`-only setup — which never creates a `.env` — still starts; a bare `env_file` entry
+  aborts compose when the file is absent. The entries are injected as container environment
+  variables; the file itself is not mounted and is not visible inside the container. (#116, #124)
+- **Login failure output is reworded** to name the reason rather than dump the response body. The
+  two duplicated "Common codes" strings, which had already drifted apart, are now one constant.
+  (#117, #124)
+- **The bridge only redacts frames when DEBUG is enabled.** The redaction was the argument to a
+  `logger.debug()` call, which Python evaluates whether or not the record is emitted, so every
+  bridged frame paid a full recursive copy and re-serialisation at the default level — 3.74 ms on a
+  356 KB frame, against 0.68 ms now. (#118, #124)
+- **Dependabot action bumps:** `actions/checkout` 4 → 7, `actions/setup-python` 5 → 7,
+  `actions/upload-artifact` 4 → 7, `actions/download-artifact` 4 → 8.
 
 ### Security
 - **The account password no longer travels in the `auth.cgi` query string.**
@@ -58,77 +128,7 @@ upgrading.
   cause that make the error worth reading.
 - **The iSCSI CHAP secret is no longer logged.** `chap_password` was absent from the redaction key
   list, so `synology_target_create` wrote an iSCSI CHAP secret to `./logs` in the clear at DEBUG.
-
-### Fixed
-- **The first disconnect permanently killed the Xiaozhi client.** The reconnect loop's cleanup read
-  `websocket.closed`, an attribute of the legacy `WebSocketClientProtocol` that the asyncio
-  `ClientConnection` returned by `websockets.connect` has not had since v14 — and this project
-  pins `websockets>=17.0.1`. Because the read sat in a `finally`, the `AttributeError` propagated
-  out of the `while` loop and out of `_xiaozhi_client` entirely, so the backoff below it was
-  unreachable once a connection had been established. `close()` is idempotent, so the guard bought
-  nothing and is gone.
-- **A disabled DSM account was indistinguishable from a version mismatch.** `login_with_session`
-  returns the DSM error body for codes that describe *this account* rather than the API version —
-  but 401 was missing from that list, so a disabled account was retried across all four API
-  versions, putting the password on the wire four times, and then reported as `unknown`. It now
-  short-circuits like the others.
-- **Actionable login failures were being discarded.** The failure branch replaced the response dump
-  with a code plus DSM's table, on the stated basis that the body is "a DSM error code and nothing
-  else". That stopped being true: `SynologyAuth` raises its own string codes, and
-  `unexpected_redirect` carries the fix — the URL to configure instead. Such messages are now
-  passed through, and the table is no longer shown for codes that are not in it.
-- **`unknown` no longer sends the operator the wrong way.** It is what `SynologyAuth` returns once
-  every API version has been tried without yielding a code it recognises, which covers both "nothing
-  answered" and "DSM answered with a code outside the set". The message now names both rather than
-  asserting silence, which pointed a NAS that had answered every request at a network fault.
-- **Four eviction tests failed on `main`.** The fixture seeded a session key with a trailing slash
-  that no code path can produce — `_login_nas`, `_handle_login` and `_resync_session_after_relogin`
-  all store normalized keys, and `_get_base_url` normalizes the lookup. The tests were asserting
-  against a server state that does not exist; the behaviour they describe works. The trailing slash
-  is now exercised where it can legitimately appear, as caller input.
-
-### Changed
-- **A deployment that relied on being redirected to reach DSM now fails, by design.** If you use
-  the "automatically redirect HTTP to HTTPS" DSM option, or a reverse proxy in front of it, point
-  the configured URL at the final `https://` endpoint instead. Following the redirect would replay
-  the request body — password, OTP, device token, or SID — to whatever host it named. The failure
-  message names the cause and the fix. `auth.cgi` answers 200 on both `:5000` and `:5001` and issues
-  no redirect on DSM 7.3.2-86009 Update 4, so the default setup is unaffected.
-- **`ToolFailure` is renamed `ToolFailureError`** (ruff `N818`). It is internal and not re-exported,
-  but `mcp_server` is a top-level module of the published distribution, so an importer using the old
-  name needs to update. Nothing in the repository referenced it outside its own tests.
-- **`docker-compose.yml` reads `.env` at run time.** `env_file` is `required: false`, so a
-  `settings.json`-only setup — which never creates a `.env` — still starts; a bare `env_file` entry
-  aborts compose when the file is absent. The entries are injected as container environment
-  variables; the file itself is not mounted and is not visible inside the container.
-- **Login failure output is reworded** to name the reason rather than dump the response body. The
-  two duplicated "Common codes" strings, which had already drifted apart, are now one constant.
-- **The bridge only redacts frames when DEBUG is enabled.** The redaction was the argument to a
-  `logger.debug()` call, which Python evaluates whether or not the record is emitted, so every
-  bridged frame paid a full recursive copy and re-serialisation at the default level — 3.74 ms on a
-  356 KB frame, against 0.68 ms now.
-- **Dependabot action bumps:** `actions/checkout` 4 → 7, `actions/setup-python` 5 → 7,
-  `actions/upload-artifact` 4 → 7, `actions/download-artifact` 4 → 8.
-
-### Added
-- **CI on every pull request and push to `main`** — `ruff check src/ tests/` on a pinned ruff, and
-  `pytest` across Python 3.11, 3.12 and 3.13 with `fail-fast: false`. Until this existed the only
-  workflows were a PyPI publish that fires on a release tag and a label sync, so the first time
-  anything was checked was when a release was built: twelve ruff findings and four failing tests had
-  accumulated on `main`. Live-NAS tests are excluded twice over — no credentials reach the runner,
-  so the `env_check` fixture skips them, and a `-m "not real_nas and not destructive"` filter holds
-  even if secrets are wired in later. Both jobs carry `timeout-minutes`, and the workflow supports
-  `workflow_dispatch`.
-- **`synology_login` surfaces DSM's trusted-device token under both field names.** DSM names it
-  `device_id` at `SYNO.API.Auth` v7 and `did` at v6 and v3; the bootstrap prefers v6 but falls
-  through to v7, so both are read. Worth flagging separately: `login_with_session`, `_login_nas`
-  and `config.save_device_id` still read only `did`, so on a v7-served login the token is neither
-  cached nor persisted. That looks like the root cause of the v6-preference workaround, and is not
-  addressed here.
-- `tests/test_bridge_log_redaction.py` re-checks the redaction key list against the live tool
-  schemas, so a new credential field fails the suite rather than logging silently — for names the
-  guard's pattern recognises as credential-shaped; one it does not anticipate still needs the set
-  updated by hand, as the comment now says.
+  (#118, #124)
 
 ## [1.7.1] - 2026-09-22
 
