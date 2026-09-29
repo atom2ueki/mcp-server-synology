@@ -178,3 +178,89 @@ def test_failed_login_reports_the_code_without_the_request_body():
 
     assert "403" in text
     assert "hunter2" not in text
+
+
+# ---------------------------------------------------------------------------
+# The failure renderer must decode DSM's number AND keep any message that is
+# written for the operator. A string code is one this codebase raised itself.
+# ---------------------------------------------------------------------------
+
+
+def test_redirect_refusal_message_reaches_the_caller():
+    """`unexpected_redirect` carries the fix; dropping it wastes the diagnosis.
+
+    SynologyAuth raises this one locally when auth.cgi answers 3xx, and its
+    message tells the operator to point at the final https:// URL. Rendering it
+    as a bare "DSM error code unexpected_redirect" both hides that and
+    mislabels a local code as a DSM one.
+    """
+    from mcp_server import _login_failure_detail
+
+    detail = _login_failure_detail(
+        {
+            "success": False,
+            "error": {
+                "code": "unexpected_redirect",
+                "message": "returned HTTP 302 (a redirect), which was refused. "
+                "Configure the final https:// URL directly.",
+            },
+        }
+    )
+
+    assert "Configure the final https:// URL directly." in detail
+    assert "DSM error code" not in detail
+
+
+def test_exhausted_login_explains_itself_instead_of_saying_unknown():
+    """`unknown` is what every version failing collapses to -- say why.
+
+    A code table with no `unknown` entry sends the caller the wrong way. The
+    wording must not assert that nothing answered, though: DSM replying with a
+    code outside the short-circuit set reaches the same `unknown`, so claiming
+    silence would point a 500-responding NAS at a network fault.
+    """
+    from mcp_server import _login_failure_detail
+
+    detail = _login_failure_detail(
+        {"success": False, "error": {"code": "unknown", "message": "Authentication failed"}}
+    )
+
+    assert "reachable" in detail
+    assert "outside the table" in detail
+    assert "none replied" not in detail
+
+
+def test_unrecognised_dsm_code_is_not_reported_as_silence():
+    """A DSM code outside the short-circuit set also collapses to `unknown`.
+
+    Verified against the real login path: a DSM 500 on every API version leaves
+    SynologyAuth returning `unknown` after four attempts, so the operator sees
+    this message rather than the 500. It must not claim nothing answered.
+    """
+    from mcp_server import _login_failure_detail
+
+    detail = _login_failure_detail(
+        {"success": False, "error": {"code": "unknown", "message": "Authentication failed"}}
+    )
+
+    assert "nothing answered" in detail, "the silent case should still be named"
+    assert "DSM replied with a code outside" in detail, "the replying case too"
+
+
+def test_numeric_dsm_code_still_gets_the_table():
+    """The decoding table is the useful part for a bare DSM number."""
+    from mcp_server import _login_failure_detail
+
+    for code in (400, "400", 403, 404):
+        detail = _login_failure_detail({"success": False, "error": {"code": code}})
+        assert "Common codes:" in detail
+        assert "403 2FA required" in detail
+
+
+def test_malformed_failure_body_does_not_raise():
+    """Whatever DSM (or a proxy) returns, rendering it must not blow up."""
+    from mcp_server import _login_failure_detail
+
+    for payload in ({"success": False}, {"success": False, "error": None},
+                    {"success": False, "error": "boom"}, "not-a-dict", None):
+        assert isinstance(_login_failure_detail(payload), str)

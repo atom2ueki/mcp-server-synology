@@ -7,6 +7,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Matches label-sync.yml and pypi-publish.yml. Without it there is no way to
+  # re-run CI on demand -- after a flake, a runner outage, or a base-image
+  # change -- short of pushing an empty commit.
+  workflow_dispatch:
 
 # This workflow only reads the repo. Without an explicit block the jobs inherit
 # the repository default, which on older repos is write-all.
@@ -22,8 +26,20 @@ jobs:
   lint:
     name: ruff
     runs-on: ubuntu-latest
+    # Without this a hung job sits until the 6-hour default. Lint is seconds of
+    # work; anything past 5 minutes means something is wrong, not slow.
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      # v7, matching label-sync.yml. pypi-publish.yml still pins v4; leaving the
+      # repo split across two majors invites diverging deprecation behaviour.
+      #
+      # persist-credentials: false because checkout leaves a Git auth token
+      # behind by default and this job never pushes -- it only runs ruff. The
+      # job below is the one that matters: it installs and executes code from
+      # the PR, and has no use for a credential.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -37,6 +53,11 @@ jobs:
   test:
     name: pytest (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # The full suite runs in well under a minute once dependencies are installed;
+    # this is almost entirely `pip install` time. 15 minutes leaves generous
+    # headroom on a cold cache and still stops a hang long before the 6-hour
+    # default. A test that hangs is a real bug -- find it, don't wait on it.
+    timeout-minutes: 15
     strategy:
       # Report every version's result; one old-version failure should not hide
       # the others.
@@ -45,7 +66,10 @@ jobs:
         # The floor from requires-python, through the newest classifier.
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      # See the lint job: nothing here pushes, so nothing here needs a token.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}

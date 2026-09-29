@@ -18,7 +18,19 @@ RUN pip install --no-cache-dir .
 
 # Copy entry point
 COPY main.py .
-COPY .env* ./
+
+# NOTE: .env is deliberately NOT copied. It is the file the README tells you to
+# put SYNOLOGY_PASSWORD in, and baking it into a layer hands that password to
+# anyone who can pull the image -- `docker history` is enough, and deleting the
+# file in a later layer does not remove it.
+#
+# Configuration is supplied at RUN time instead, by one of:
+#   - docker-compose.yml: `env_file: .env` (optional), or its `environment:`
+#   - docker-compose.http.yml: `environment:`, with credentials listed there
+#   - a plain `docker run -e SYNOLOGY_PASSWORD=...`
+#   - the read-only ~/.config/synology-mcp mount, holding settings.json
+# .dockerignore also excludes .env, so an accidental `COPY . .` cannot
+# reintroduce it.
 
 # Create logs directory
 RUN mkdir -p logs

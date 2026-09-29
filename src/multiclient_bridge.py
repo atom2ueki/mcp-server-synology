@@ -37,10 +37,24 @@ logger = logging.getLogger(__name__)
 # or ds_create_task carries a live password in exactly these fields. LOG_LEVEL
 # is a documented setting and ./logs is a mounted volume, so at DEBUG those
 # passwords outlived the call in a file the user never thinks of as secret.
+#
+# This is an allowlist of exact key names, so it has to carry every credential
+# field the tools actually declare -- a name that is missing is a value written
+# to disk in the clear. Verified against the tool schemas in mcp_server.py:
+# `chap_password` (synology_target_create, an iSCSI CHAP secret) was absent and
+# was logged verbatim.
+#
+# tests/test_bridge_log_redaction.py re-checks this list against the live
+# schemas, so a new credential field fails the suite rather than logging
+# silently -- but only for names its pattern recognises as credential-shaped.
+# That pattern covers the fields in use today plus the obvious shapes a new one
+# would take; a credential field named something it does not anticipate still
+# needs this set updated by hand.
 _REDACTED_KEYS = frozenset(
     {
         "_sid",
         "authorization",
+        "chap_password",
         "credential",
         "credentials",
         "device_id",
@@ -215,7 +229,13 @@ class MCPBridge:
             emoji_out = "🤖" if "XIAOZHI" in client_type else "📤"
 
             logger.info(f"{emoji_in} {client_type}: {method}")
-            logger.debug(f"📋 {client_type} full message: {json.dumps(_redact(data))}")
+            # Guarded, not unconditional: the redact+dumps below is pure cost when
+            # DEBUG is off, and it is not trivial. Measured on a 356 KB frame
+            # (a 3000-entry File Station listing), ~4.2 ms per frame of
+            # json.loads-adjacent work that the logger would then discard. This
+            # is a bridged hot path, so pay it only when someone is reading.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"📋 {client_type} full message: {json.dumps(_redact(data))}")
 
             # Process request
             response_data = await self._process_mcp_request(data)
@@ -227,9 +247,10 @@ class MCPBridge:
 
             response = json.dumps(response_data)
             logger.info(f"{emoji_out} {client_type}: response sent")
-            logger.debug(
-                f"📋 {client_type} full response: {json.dumps(_redact(response_data))}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"📋 {client_type} full response: {json.dumps(_redact(response_data))}"
+                )
             return response
 
         except json.JSONDecodeError:
@@ -392,11 +413,15 @@ class MCPBridge:
                 # No `.closed` guard: that attribute belonged to the legacy
                 # WebSocketClientProtocol and is absent from the asyncio
                 # ClientConnection that `websockets.connect` returns from v14
-                # on (verified against 17.1, the floor this project pins).
+                # on (verified against 17.1; the floor this project pins is
+                # 17.0.1).
                 # Reading it raised AttributeError from inside this `finally`,
                 # which propagated out of the reconnect loop and killed the
-                # Xiaozhi client for the rest of the process -- on the very
-                # first disconnect, the case the loop exists to survive.
+                # Xiaozhi client for the rest of the process. That needed an
+                # established connection: `websocket` is reset to None each
+                # iteration, so a refused connect() short-circuited the old
+                # guard and backed off normally. It still hit the case the loop
+                # exists to survive -- a session that drops.
                 # close() is idempotent, so just call it.
                 if websocket is not None:
                     try:
