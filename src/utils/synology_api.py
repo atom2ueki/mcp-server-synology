@@ -10,6 +10,26 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+# Every DSM call carries `_sid=<live session id>` as a query parameter, so any
+# exception raised out of requests embeds the full request URL in its message
+# -- urllib3 builds "Max retries exceeded with url: /webapi/entry.cgi?...&_sid=..."
+# and requests raises ConnectionError carrying that text. Handlers then
+# json.dumps() the message straight into a tool result, which is how a routine
+# NAS outage would put a live session credential into the MCP client's
+# transcript. Scrub the secret values out of every exception string on the way
+# past, keeping the part that is diagnostic (host, port, reason).
+_SECRET_QUERY_RE = re.compile(
+    r"((?:_sid|sid|session_id|otp_code|passwd|password|token|secret)s?"
+    r"(?:=|%3D))([^&\s\"'&]+)",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Replace credential values in a URL-bearing exception string."""
+    return _SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}***", str(text))
+
+
 # DSM's published common error codes (SYNO.API "Common Error Codes" table in the
 # Login Web API Guide). Surfacing the number alone is unactionable: a caller
 # cannot tell 105 (no permission) from 106 (session timeout) from 119 (dead
@@ -273,9 +293,15 @@ class SynologyAPIClient:
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
-            return {"success": False, "error": {"code": "network_error", "message": str(e)}}
+            return {
+                "success": False,
+                "error": {"code": "network_error", "message": _scrub_secrets(e)},
+            }
         except Exception as e:
-            return {"success": False, "error": {"code": "unknown_error", "message": str(e)}}
+            return {
+            "success": False,
+            "error": {"code": "unknown_error", "message": _scrub_secrets(e)},
+        }
 
     def get(
         self,
@@ -390,11 +416,20 @@ class SynologyAPIClient:
                 }
             return {"success": True, "data": {"exit_code": exit_code}}
         except requests.RequestException as exc:
-            return {"success": False, "error": {"code": "network_error", "message": str(exc)}}
+            return {
+                "success": False,
+                "error": {"code": "network_error", "message": _scrub_secrets(exc)},
+            }
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            return {"success": False, "error": {"code": "invalid_response", "message": str(exc)}}
+            return {
+                "success": False,
+                "error": {"code": "invalid_response", "message": _scrub_secrets(exc)},
+            }
         except Exception as exc:
-            return {"success": False, "error": {"code": "unknown_error", "message": str(exc)}}
+            return {
+            "success": False,
+            "error": {"code": "unknown_error", "message": _scrub_secrets(exc)},
+        }
         finally:
             if response is not None:
                 response.close()
