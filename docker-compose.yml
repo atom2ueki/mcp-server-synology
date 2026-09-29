@@ -6,6 +6,15 @@ services:
     container_name: synology-mcp-server
     command: ["python", "main.py"]
     network_mode: host  # Allow access to local network (192.168.x.x)
+    # Read .env at RUNTIME, never at build time. The image deliberately does not
+    # contain it (see the Dockerfile), so without this the README's
+    # `cp env.example .env` flow would start a container with no credentials.
+    # `required: false` keeps a settings.json-only user -- the recommended
+    # setup, who never creates a .env -- working; compose aborts on a listed but
+    # missing env file otherwise.
+    env_file:
+      - path: .env
+        required: false
     environment:
       - XDG_CONFIG_HOME=/home/mcpuser/.config
     volumes:

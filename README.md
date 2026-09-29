@@ -81,6 +81,10 @@ XIAOZHI_TOKEN=your_xiaozhi_token_here
 XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/
 ```
 
+`.env` is read at **run time**, never baked into the image — `docker-compose.yml`
+mounts it via `env_file`. It is optional: if you configure NASes with
+`settings.json` instead (recommended), you can skip this file entirely.
+
 ### 3️⃣ Run with Docker
 
 **One simple command supports both modes:**
