@@ -4,7 +4,23 @@ from unittest.mock import MagicMock
 
 import pytest
 
-BASE_URL = "http://nas.example.com:5000/"
+# The canonical shape, and the ONLY one self.sessions ever holds: every path
+# that stores a session key normalizes it first -- _login_nas and _handle_login
+# both rstrip("/"), and _resync_session_after_relogin is handed
+# SynologyAuth.base_url, which __init__ has already rstripped.
+#
+# This constant used to carry a trailing slash. _handle_logout resolves its
+# argument through _get_base_url, which rstrips it, so the lookup went to
+# "...:5000" while the fixture had seeded "...:5000/" -- the handler reported
+# "no active session", evicted nothing, and every assertion below failed. The
+# tests were describing a state the server cannot produce.
+BASE_URL = "http://nas.example.com:5000"
+
+# What a caller may actually type. _get_base_url normalizes it back to
+# BASE_URL, and logout still has to find and evict the session -- so the
+# trailing slash is now exercised as INPUT, which is the only place it can
+# legitimately appear.
+BASE_URL_TRAILING_SLASH = BASE_URL + "/"
 
 # Every per-domain instance cache the server keeps keyed by base_url.
 #
@@ -71,6 +87,21 @@ async def test_logout_clears_all_service_instance_caches():
     server = _server_with_active_session({"success": True})
 
     await server._handle_logout({"base_url": BASE_URL})
+
+    _assert_fully_evicted(server)
+
+
+@pytest.mark.asyncio
+async def test_logout_accepts_a_trailing_slash_in_the_caller_url():
+    """A caller-supplied trailing slash must still reach the stored session.
+
+    _get_base_url normalizes the argument; the session is keyed normalized.
+    Guards the mismatch that made this module fail: if either side stops
+    normalizing, logout silently evicts nothing and reports no active session.
+    """
+    server = _server_with_active_session({"success": True})
+
+    await server._handle_logout({"base_url": BASE_URL_TRAILING_SLASH})
 
     _assert_fully_evicted(server)
 
