@@ -607,3 +607,26 @@ def test_get_session_info_includes_device_id():
     auth.current_device_id = "DID_visible"
     info = auth.get_session_info()
     assert info["device_id"] == "DID_visible"
+
+
+def test_disabled_account_reports_401_without_retrying_every_version(monkeypatch):
+    """A DSM 401 is an answer about the account, not about the API version.
+
+    It was retried across all four versions -- putting the password on the
+    wire four times for nothing -- and then discarded in favour of code
+    "unknown", so the one code that identifies a disabled account never
+    reached the caller.
+    """
+    from auth.synology_auth import SynologyAuth
+
+    # Every version answers 401; the guard must stop after the first.
+    disabled = {"success": False, "error": {"code": 401, "errors": {}}}
+    calls = _patch_requests_post(monkeypatch, [dict(disabled) for _ in range(4)])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == 401
+    # One attempt, not one per API version.
+    assert len(calls) == 1

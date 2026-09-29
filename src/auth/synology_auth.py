@@ -227,8 +227,15 @@ class SynologyAuth:
                     return result
                 else:
                     error_code = result.get("error", {}).get("code", "unknown")
-                    # Don't try other versions for auth errors
-                    if error_code in [400, 402, 403, 404]:
+                    # Don't try other versions for auth errors. These are all
+                    # answers about THIS account, not about the API version, so
+                    # retrying them just sends the password again to no purpose
+                    # and then discards the code that explains the failure.
+                    # 401 (account disabled) belongs here: it was previously
+                    # retried across all four versions and then reported as
+                    # "unknown", leaving a disabled account indistinguishable
+                    # from a version mismatch.
+                    if error_code in [400, 401, 402, 403, 404]:
                         return result
             except Exception:
                 continue
