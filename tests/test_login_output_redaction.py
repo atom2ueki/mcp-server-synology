@@ -214,8 +214,10 @@ def test_redirect_refusal_message_reaches_the_caller():
 def test_exhausted_login_explains_itself_instead_of_saying_unknown():
     """`unknown` is what every version failing collapses to -- say why.
 
-    It is a network or wrong-host symptom far more often than a credential one,
-    and a code table with no `unknown` entry sends the caller the wrong way.
+    A code table with no `unknown` entry sends the caller the wrong way. The
+    wording must not assert that nothing answered, though: DSM replying with a
+    code outside the short-circuit set reaches the same `unknown`, so claiming
+    silence would point a 500-responding NAS at a network fault.
     """
     from mcp_server import _login_failure_detail
 
@@ -223,8 +225,26 @@ def test_exhausted_login_explains_itself_instead_of_saying_unknown():
         {"success": False, "error": {"code": "unknown", "message": "Authentication failed"}}
     )
 
-    assert "none replied" in detail
     assert "reachable" in detail
+    assert "outside the table" in detail
+    assert "none replied" not in detail
+
+
+def test_unrecognised_dsm_code_is_not_reported_as_silence():
+    """A DSM code outside the short-circuit set also collapses to `unknown`.
+
+    Verified against the real login path: a DSM 500 on every API version leaves
+    SynologyAuth returning `unknown` after four attempts, so the operator sees
+    this message rather than the 500. It must not claim nothing answered.
+    """
+    from mcp_server import _login_failure_detail
+
+    detail = _login_failure_detail(
+        {"success": False, "error": {"code": "unknown", "message": "Authentication failed"}}
+    )
+
+    assert "nothing answered" in detail, "the silent case should still be named"
+    assert "DSM replied with a code outside" in detail, "the replying case too"
 
 
 def test_numeric_dsm_code_still_gets_the_table():

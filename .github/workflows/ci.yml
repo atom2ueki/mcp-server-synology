@@ -32,7 +32,14 @@ jobs:
     steps:
       # v7, matching label-sync.yml. pypi-publish.yml still pins v4; leaving the
       # repo split across two majors invites diverging deprecation behaviour.
+      #
+      # persist-credentials: false because checkout leaves a Git auth token
+      # behind by default and this job never pushes -- it only runs ruff. The
+      # job below is the one that matters: it installs and executes code from
+      # the PR, and has no use for a credential.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -59,7 +66,10 @@ jobs:
         # The floor from requires-python, through the newest classifier.
         python-version: ["3.11", "3.12", "3.13"]
     steps:
+      # See the lint job: nothing here pushes, so nothing here needs a token.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}

@@ -57,12 +57,18 @@ def _login_failure_detail(result: object) -> str:
         return f"DSM error code {code}. Common codes: {_DSM_LOGIN_CODES}."
     if code == "unknown":
         # What SynologyAuth returns once every API version has been tried
-        # without DSM naming a code -- a network or wrong-host problem far more
-        # often than a credential one, so say that rather than send the caller
-        # hunting through a code table that has no entry for it.
+        # without yielding a code it recognises. Two different situations reach
+        # here and they are not distinguishable from this dict: nothing answered
+        # at all (unreachable, wrong port, TLS refused), or DSM answered with a
+        # code outside the set SynologyAuth short-circuits on -- which it then
+        # discards. So describe the absence of a recognised result rather than
+        # asserting silence, which would send an operator with a 500-response
+        # NAS hunting for a network fault that is not there.
         return (
-            "no DSM error code: every API version was tried and none replied. "
-            "Check the NAS is reachable at this URL and port, then the credentials."
+            "no recognised DSM error code. Every API version was tried without "
+            "one; either nothing answered (check the NAS is reachable at this "
+            "URL and port) or DSM replied with a code outside the table below, "
+            "in which case its own log has the request."
         )
     return f"{code}: {message or 'no detail reported'}"
 
