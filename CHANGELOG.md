@@ -2,6 +2,134 @@
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-29
+
+A credential-handling release. Every entry under **Security** below is a path by which a live
+secret could reach somewhere it outlives the session — a conversation transcript, a log file, a
+container image, or a URL. Two of them change observable behaviour, so read **Changed** before
+upgrading.
+
+### Security
+- **The account password no longer travels in the `auth.cgi` query string.**
+  `SynologyAuth.login()` and `.logout()` called that endpoint with
+  `requests.get(..., params=payload)`, which puts `passwd`, `otp_code` and
+  `_sid` in the URL — and DSM's own nginx access log, plus every proxy in between, writes the full
+  request line. They now POST the same parameters as a form body, which is what the DSM web UI
+  sends. Both calls also gained the `timeout=15` every other request in the codebase already had:
+  a NAS that accepted the connection and then stalled hung the startup auto-login loop, and hung
+  `relogin()` while it held `_relogin_lock`, wedging session recovery for every caller behind it.
+  (Session IDs on the service API calls are a separate matter — see below.)
+- **Redirects are refused on those same calls (CWE-200).** `requests` follows redirects by default
+  and replays method and body verbatim on a 307/308, so moving to POST would have handed the
+  password, OTP and device token to whatever `Location` named — and `verify_ssl` defaults to
+  `False`, which puts forging one within reach of anyone on the link. `raise_for_status()` does not
+  help (it raises for 4xx/5xx and lets 3xx through), so the check is explicit and a 3xx is treated
+  as a failure rather than a retry — retrying would only put three more copies of the password on
+  the wire. See **Changed** for the deployment consequence.
+- **`synology_login` no longer echoes session credentials into the tool result.** The handler
+  returned `Session ID: {sid}` followed by the raw DSM response, which carries `synotoken` and the
+  long-lived trusted-device token. A tool result is written into the MCP client's conversation
+  transcript, which outlives the session by a long way and travels wherever that transcript goes.
+  The SID is now truncated the way `synology_logout` already truncated it, and the response is not
+  echoed. Verified on DSM 7.3.2-86009 Update 4 that an ordinary login — 2FA switched off — still
+  returns an 86-character device token, so this was not a 2FA-only exposure. The token is still
+  printed for the one call that cannot work without it, the first-time 2FA bootstrap, which the
+  tool's own description promises; it is not printed on any other login.
+- **The DEBUG frame log is redacted.** At `LOG_LEVEL=DEBUG` the bridge logged raw JSON-RPC frames,
+  so a `tools/call` for `synology_login`, `synology_create_user`, `ds_create_task` or
+  `synology_target_create` wrote a live password to `./logs` — a mounted volume, reached through a
+  documented setting. Credential-bearing keys are now masked rather than dropped, so the log keeps
+  the shape that makes it worth having. The redaction is key-based and its own docstring says so:
+  a `tools/call` **result** is a single free-text JSON string and is still logged verbatim.
+- **The container image no longer contains `.env`.** The Dockerfile ended with `COPY .env* ./`, and
+  `.dockerignore` did not exclude it, so on any machine where the README was followed and
+  `SYNOLOGY_PASSWORD` put in `.env`, that password was copied into an image layer — readable with
+  `docker history`, and not removed by deleting the file in a later layer. It is now supplied at
+  run time instead, and `.dockerignore` excludes it so a future `COPY . .` cannot reintroduce it.
+- **Session IDs are scrubbed from error messages.** Most DSM calls — everything routed through the
+  shared API client on its GET path, plus the Download Station and File Station GETs — pass
+  `_sid=<live session id>` as a query parameter, and `requests`/`urllib3` embed the full request URL
+  in the exception text they raise (`Max retries exceeded with url: …&_sid=…`). The error handlers
+  stringified that into `error.message`, which the tool handlers `json.dumps` straight into a
+  result — so an unreachable NAS, the most ordinary failure there is, wrote a live session
+  credential into the transcript. (The `auth.cgi` calls no longer carry `_sid` in the URL at all:
+  the entry above moved them to a form body.) Both the API client and `auth.synology_auth`, which
+  builds its own messages, now scrub credential values on the way past, keeping the host, port and
+  cause that make the error worth reading.
+- **The iSCSI CHAP secret is no longer logged.** `chap_password` was absent from the redaction key
+  list, so `synology_target_create` wrote an iSCSI CHAP secret to `./logs` in the clear at DEBUG.
+
+### Fixed
+- **The first disconnect permanently killed the Xiaozhi client.** The reconnect loop's cleanup read
+  `websocket.closed`, an attribute of the legacy `WebSocketClientProtocol` that the asyncio
+  `ClientConnection` returned by `websockets.connect` has not had since v14 — and this project
+  pins `websockets>=17.0.1`. Because the read sat in a `finally`, the `AttributeError` propagated
+  out of the `while` loop and out of `_xiaozhi_client` entirely, so the backoff below it was
+  unreachable once a connection had been established. `close()` is idempotent, so the guard bought
+  nothing and is gone.
+- **A disabled DSM account was indistinguishable from a version mismatch.** `login_with_session`
+  returns the DSM error body for codes that describe *this account* rather than the API version —
+  but 401 was missing from that list, so a disabled account was retried across all four API
+  versions, putting the password on the wire four times, and then reported as `unknown`. It now
+  short-circuits like the others.
+- **Actionable login failures were being discarded.** The failure branch replaced the response dump
+  with a code plus DSM's table, on the stated basis that the body is "a DSM error code and nothing
+  else". That stopped being true: `SynologyAuth` raises its own string codes, and
+  `unexpected_redirect` carries the fix — the URL to configure instead. Such messages are now
+  passed through, and the table is no longer shown for codes that are not in it.
+- **`unknown` no longer sends the operator the wrong way.** It is what `SynologyAuth` returns once
+  every API version has been tried without yielding a code it recognises, which covers both "nothing
+  answered" and "DSM answered with a code outside the set". The message now names both rather than
+  asserting silence, which pointed a NAS that had answered every request at a network fault.
+- **Four eviction tests failed on `main`.** The fixture seeded a session key with a trailing slash
+  that no code path can produce — `_login_nas`, `_handle_login` and `_resync_session_after_relogin`
+  all store normalized keys, and `_get_base_url` normalizes the lookup. The tests were asserting
+  against a server state that does not exist; the behaviour they describe works. The trailing slash
+  is now exercised where it can legitimately appear, as caller input.
+
+### Changed
+- **A deployment that relied on being redirected to reach DSM now fails, by design.** If you use
+  the "automatically redirect HTTP to HTTPS" DSM option, or a reverse proxy in front of it, point
+  the configured URL at the final `https://` endpoint instead. Following the redirect would replay
+  the request body — password, OTP, device token, or SID — to whatever host it named. The failure
+  message names the cause and the fix. `auth.cgi` answers 200 on both `:5000` and `:5001` and issues
+  no redirect on DSM 7.3.2-86009 Update 4, so the default setup is unaffected.
+- **`ToolFailure` is renamed `ToolFailureError`** (ruff `N818`). It is internal and not re-exported,
+  but `mcp_server` is a top-level module of the published distribution, so an importer using the old
+  name needs to update. Nothing in the repository referenced it outside its own tests.
+- **`docker-compose.yml` reads `.env` at run time.** `env_file` is `required: false`, so a
+  `settings.json`-only setup — which never creates a `.env` — still starts; a bare `env_file` entry
+  aborts compose when the file is absent. The entries are injected as container environment
+  variables; the file itself is not mounted and is not visible inside the container.
+- **Login failure output is reworded** to name the reason rather than dump the response body. The
+  two duplicated "Common codes" strings, which had already drifted apart, are now one constant.
+- **The bridge only redacts frames when DEBUG is enabled.** The redaction was the argument to a
+  `logger.debug()` call, which Python evaluates whether or not the record is emitted, so every
+  bridged frame paid a full recursive copy and re-serialisation at the default level — 3.74 ms on a
+  356 KB frame, against 0.68 ms now.
+- **Dependabot action bumps:** `actions/checkout` 4 → 7, `actions/setup-python` 5 → 7,
+  `actions/upload-artifact` 4 → 7, `actions/download-artifact` 4 → 8.
+
+### Added
+- **CI on every pull request and push to `main`** — `ruff check src/ tests/` on a pinned ruff, and
+  `pytest` across Python 3.11, 3.12 and 3.13 with `fail-fast: false`. Until this existed the only
+  workflows were a PyPI publish that fires on a release tag and a label sync, so the first time
+  anything was checked was when a release was built: twelve ruff findings and four failing tests had
+  accumulated on `main`. Live-NAS tests are excluded twice over — no credentials reach the runner,
+  so the `env_check` fixture skips them, and a `-m "not real_nas and not destructive"` filter holds
+  even if secrets are wired in later. Both jobs carry `timeout-minutes`, and the workflow supports
+  `workflow_dispatch`.
+- **`synology_login` surfaces DSM's trusted-device token under both field names.** DSM names it
+  `device_id` at `SYNO.API.Auth` v7 and `did` at v6 and v3; the bootstrap prefers v6 but falls
+  through to v7, so both are read. Worth flagging separately: `login_with_session`, `_login_nas`
+  and `config.save_device_id` still read only `did`, so on a v7-served login the token is neither
+  cached nor persisted. That looks like the root cause of the v6-preference workaround, and is not
+  addressed here.
+- `tests/test_bridge_log_redaction.py` re-checks the redaction key list against the live tool
+  schemas, so a new credential field fails the suite rather than logging silently — for names the
+  guard's pattern recognises as credential-shaped; one it does not anticipate still needs the set
+  updated by hand, as the comment now says.
+
 ## [1.7.1] - 2026-09-22
 
 ### Fixed
