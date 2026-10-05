@@ -13,7 +13,8 @@
   refuses an unknown UUID instead of reporting success. Writes are serialised per NAS with a
   host-wide file lock and wait up to 120 s: each one makes DSM rewrite and reload nginx, which took
   35–50 s on a DS218+ (DSM 7.4.1-90080), and a timed-out write is reported as `outcome_unknown`
-  rather than retried, since DSM may still apply it.
+  rather than retried, since DSM may still apply it. A write DSM confirmed whose read-back then fails is
+  still reported as a success, flagged `readback_failed`, so it is not retried into a duplicate.
 
 ## [1.8.0] - 2026-09-29
 

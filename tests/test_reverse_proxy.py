@@ -517,3 +517,63 @@ def test_write_timeout_is_long_and_reported_as_outcome_unknown(tmp_path, monkeyp
     assert result["error"]["outcome_unknown"] is True
     assert "before retrying" in result["error"]["message"]
     post.assert_called_once()
+
+
+def _read_failure():
+    return _response({"success": False, "error": {"code": 119}})
+
+
+def test_lock_wait_outlasts_a_full_write():
+    from appportal.synology_reverse_proxy import WRITE_TIMEOUT_SECONDS
+
+    assert SynologyReverseProxy._lock_timeout_seconds > WRITE_TIMEOUT_SECONDS
+
+
+def test_create_reports_success_when_only_readback_fails(tmp_path, monkeypatch):
+    proxy = _proxy(tmp_path, monkeypatch)
+    with (
+        patch("utils.synology_api.requests.get", side_effect=[_listing(), _read_failure()]),
+        patch("utils.synology_api.requests.post", return_value=_response({"success": True})),
+    ):
+        result = proxy.create_entry(
+            description="Prometheus",
+            source_hostname="metrics.example.com",
+            destination_hostname="127.0.0.1",
+            destination_port=9090,
+        )
+
+    assert result["success"] is True
+    assert result["data"]["readback_failed"] is True
+    assert "synology_reverse_proxy_list" in result["data"]["message"]
+
+
+def test_update_reports_success_when_only_readback_fails(tmp_path, monkeypatch):
+    proxy = _proxy(tmp_path, monkeypatch)
+    with (
+        patch(
+            "utils.synology_api.requests.get",
+            side_effect=[_listing(_raw_entry()), _read_failure()],
+        ),
+        patch("utils.synology_api.requests.post", return_value=_response({"success": True})),
+    ):
+        result = proxy.update_entry(UUID, destination_port=8443)
+
+    assert result["success"] is True
+    assert result["data"]["readback_failed"] is True
+
+
+def test_update_refuses_description_used_by_another_entry(tmp_path, monkeypatch):
+    proxy = _proxy(tmp_path, monkeypatch)
+    other = _raw_entry(UUID="other", _key="other", description="Emby")
+    with (
+        patch("utils.synology_api.requests.get", return_value=_listing(_raw_entry(), other)),
+        patch("utils.synology_api.requests.post") as post,
+    ):
+        refused = proxy.update_entry(UUID, description="Emby")
+        same = proxy.update_entry(UUID, description="Nextcloud")
+
+    assert refused["success"] is False
+    assert "already described 'Emby'" in refused["error"]["message"]
+    # Keeping an entry's own description is not a clash.
+    assert same["success"] is True
+    assert post.call_count == 1

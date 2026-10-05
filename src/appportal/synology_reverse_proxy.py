@@ -113,6 +113,25 @@ def _write_outcome(result: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _applied_without_readback(method: str, read_failure: Dict[str, Any]) -> Dict[str, Any]:
+    """A write DSM confirmed, whose read-back then failed.
+
+    Reported as a success: the change is in place, and calling it a failure
+    would invite a retry -- for a create, straight into the duplicate check.
+    """
+    return {
+        "success": True,
+        "data": {
+            "readback_failed": True,
+            "message": (
+                f"DSM confirmed the {method}, but reading the entry back failed. "
+                "Call synology_reverse_proxy_list to see its current state."
+            ),
+            "readback_error": read_failure.get("error"),
+        },
+    }
+
+
 def _protocol_code(value: Any, field: str) -> int:
     if not isinstance(value, str) or value.strip().upper() not in _PROTOCOL_CODES:
         raise ValueError(f"{field} must be 'HTTP' or 'HTTPS', got {value!r}")
@@ -231,7 +250,9 @@ class SynologyReverseProxy:
     """Manage Login Portal reverse proxy entries on a Synology NAS."""
 
     _lock_directory = Path(tempfile.gettempdir()) / "synology-mcp-reverse-proxy-locks"
-    _lock_timeout_seconds = 30
+    # A held lock covers a list, one write (up to WRITE_TIMEOUT_SECONDS) and
+    # another list, so a second writer must be willing to wait at least that.
+    _lock_timeout_seconds = WRITE_TIMEOUT_SECONDS + 60
 
     def __init__(
         self,
@@ -440,7 +461,10 @@ class SynologyReverseProxy:
             )
             if not created.get("success"):
                 return created
-            return self.get_entry(description)
+            readback = self.get_entry(description)
+            if not readback.get("success"):
+                return _applied_without_readback("create", readback)
+            return readback
 
         return self._locked("create", action)
 
@@ -468,11 +492,14 @@ class SynologyReverseProxy:
             return _invalid("update", "Nothing to change; name at least one field")
 
         def action():
-            found = self._find_raw(uuid)
-            if not found.get("success"):
-                found["error"]["method"] = "update"
-                return found
-            entry = json.loads(json.dumps(found["entry"]))  # deep copy
+            listing = self._raw_entries()
+            if not listing.get("success"):
+                return listing
+            entries = listing["data"]["entries"]
+            stored = next((e for e in entries if e.get("UUID") == uuid), None)
+            if stored is None:
+                return _not_found("update", uuid)
+            entry = json.loads(json.dumps(stored))  # deep copy
             frontend = entry.setdefault("frontend", {})
             backend = entry.setdefault("backend", {})
             https = frontend.setdefault("https", {})
@@ -480,7 +507,16 @@ class SynologyReverseProxy:
                 if "description" in changes:
                     if not isinstance(changes["description"], str) or not changes["description"].strip():
                         raise ValueError("description must be a non-empty string")
-                    entry["description"] = changes["description"].strip()
+                    description = changes["description"].strip()
+                    if any(
+                        e.get("description") == description and e.get("UUID") != uuid
+                        for e in entries
+                    ):
+                        raise ValueError(
+                            f"Another entry is already described {description!r}; "
+                            "descriptions must be unique"
+                        )
+                    entry["description"] = description
                 if "source_protocol" in changes:
                     frontend["protocol"] = _protocol_code(changes["source_protocol"], "source_protocol")
                 if "source_hostname" in changes:
@@ -527,7 +563,7 @@ class SynologyReverseProxy:
                 return updated
             found = self._find_raw(uuid)
             if not found.get("success"):
-                return found
+                return _applied_without_readback("update", found)
             return {"success": True, "data": normalize_entry(found["entry"])}
 
         return self._locked("update", action)

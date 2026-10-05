@@ -34,5 +34,6 @@ All accept `nas_name` / `base_url`.
 
 - **Writes are slow.** DSM rewrites and reloads nginx on every create, update and delete. On a small NAS that takes 30–60 s and briefly affects every proxied site. Batch the user's changes into as few writes as possible.
 - **A timeout is not a failure.** An error with `outcome_unknown: true` means DSM may have applied the change. List before retrying, or a retried create can leave two entries.
+- **`readback_failed: true` is a success.** DSM confirmed the write; only reading the entry back failed. Do not retry — list to see the entry.
 - **Duplicate descriptions are refused** before anything is sent. If DSM itself reports code 4154, an entry for that source already exists — list and update it instead.
 - **DSM certificates are separate.** A new HTTPS host name needs a matching certificate in Control Panel → Security → Certificate; this tool does not assign one.
