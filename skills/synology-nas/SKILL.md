@@ -50,6 +50,7 @@ When the user asks about… → read…
 | containers, Docker, compose projects, images, registries, networks, logs, resource usage | Container Manager | [references/containers.md](references/containers.md) |
 | NFS, share permissions, "let host X mount", create share | shares & NFS | [references/shares-nfs.md](references/shares-nfs.md) |
 | users, groups, permissions, "add user", "remove from group" | user management | [references/users.md](references/users.md) |
+| reverse proxy, Login Portal, "publish app.example.com", subdomain, HSTS, WebSocket, access control profile | reverse proxy | [references/reverse-proxy.md](references/reverse-proxy.md) |
 
 Read the reference for a domain before doing non-trivial work in it. Each reference covers the tool list, the right call ordering, and known gotchas. Don't read every reference — only the ones you need.
 
@@ -67,6 +68,7 @@ When in doubt about a destructive action, list/inspect first:
 - Before `ds_delete_tasks`: `ds_list_tasks` to confirm the IDs.
 - Before `synology_container_delete`, `synology_container_project_delete`, `synology_container_image_delete`, or `synology_container_network_delete`: inspect/list the target first.
 - Before `synology_delete_user`: `synology_get_user` to confirm the account.
+- Before `synology_reverse_proxy_update` or `synology_reverse_proxy_delete`: `synology_reverse_proxy_get` to confirm the entry — it may be serving a live site.
 
 This is a real NAS with real data — there is no "undo" for these tools.
 

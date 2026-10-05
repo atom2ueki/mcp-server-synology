@@ -567,6 +567,15 @@ misspelled `type` would silently take the default.
 - **`synology_nfs_list_shares`** - List all shared folders with their NFS permissions
 - **`synology_nfs_set_permission`** - Set NFS client access permissions on a shared folder
 
+### 🔀 Login Portal Reverse Proxy
+- **`synology_reverse_proxy_list`** - List reverse proxy entries (Control Panel → Login Portal → Advanced → Reverse Proxy) with source, destination, HSTS, WebSocket, custom headers and access control profile
+- **`synology_reverse_proxy_get`** - Get one entry by UUID or description
+- **`synology_access_control_profile_list`** - List the access control profiles an entry can reference
+- **`synology_reverse_proxy_create`** - Create an entry; refused if the description is already in use
+- **`synology_reverse_proxy_update`** - Change some fields of an entry, keeping the rest
+- **`synology_reverse_proxy_delete`** - **DESTRUCTIVE.** Delete an entry *(requires `confirm=true`)*
+- Every write makes DSM rebuild and reload its nginx configuration, which can take a minute on small NAS models. A write that times out is reported with `outcome_unknown: true` — list before retrying.
+
 ## 🧠 Claude Code / Claude.ai Skill
 
 For Claude Code, Claude Desktop, and claude.ai users, this repo ships an Anthropic Agent Skill that teaches Claude how to use the MCP tools effectively — picking the right tool, targeting the right NAS in multi-NAS setups, preferring aggregate health checks over fan-out calls, and using correct path conventions.
