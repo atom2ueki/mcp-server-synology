@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+- **Login Portal reverse proxy tools** — `synology_reverse_proxy_list`, `_get`, `_create`, `_update`
+  and `_delete`, plus `synology_access_control_profile_list`, wrapping
+  `SYNO.Core.AppPortal.ReverseProxy` and `SYNO.Core.AppPortal.AccessControl`. Entries are returned
+  with protocol names instead of DSM's integer codes and the WebSocket header pair as a flag;
+  DSM's internal `_key` is kept out of tool output but carried through updates, which layer the
+  given fields over the stored entry. Descriptions are kept unique because DSM's create returns no
+  UUID and the new entry is found again by its description. Delete requires `confirm=true` and
+  refuses an unknown UUID instead of reporting success. Writes are serialised per NAS with a
+  host-wide file lock and wait up to 120 s: each one makes DSM rewrite and reload nginx, which took
+  35–50 s on a DS218+ (DSM 7.4.1-90080), and a timed-out write is reported as `outcome_unknown`
+  rather than retried, since DSM may still apply it. A write DSM confirmed whose read-back then fails is
+  still reported as a success, flagged `readback_failed`, so it is not retried into a duplicate.
+
 ## [1.8.0] - 2026-09-29
 
 ### Added

@@ -18,6 +18,7 @@ from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
 from mcp.types import CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams
 
+from appportal import SynologyReverseProxy
 from auth import SynologyAuth
 from config import config
 from container import SynologyContainer
@@ -121,6 +122,7 @@ class SynologyMCPServer:
         self.container_instances: Dict[str, SynologyContainer] = {}
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.iscsi_instances: Dict[str, SynologyISCSI] = {}
+        self.reverse_proxy_instances: Dict[str, SynologyReverseProxy] = {}
         # One lock per NAS key, guarding the lazy login in _resolve_base_url.
         # Created lazily and only ever touched from the event-loop thread, so
         # the dict itself needs no locking.
@@ -382,6 +384,33 @@ class SynologyMCPServer:
         self._register_tool("synology_nfs_set_permission", "Set NFS client access permissions on a shared folder (IP/subnet, read/write, squash options)", TN_PR({"share_name": {"type": "string", "description": "Name of the shared folder (e.g. \'media\', \'backups\')"}, "client_ip": {"type": "string", "description": "Client IP or subnet (e.g. \'192.168.1.0/24\', \'10.0.0.5\')"}, "privilege": {"type": "string", "enum": ["readonly", "readwrite"], "description": "Access level (default: readwrite)"}, "squash": {"type": "string", "enum": ["root_squash", "no_root_squash", "all_squash"], "description": "Squash option for root user mapping (default: root_squash)"}, "security": {"type": "string", "enum": ["sys", "krb5", "krb5i", "krb5p"], "description": "Security mode (default: sys/AUTH_SYS)"}}, ["share_name", "client_ip"]), self._handle_nfs_set_permission)
         self._register_tool("synology_create_share", "Create a new shared folder on a Synology NAS volume", TN_PR({"share_name": {"type": "string", "description": "Name of the shared folder to create (e.g. \'rag-corpus\')"}, "vol_path": {"type": "string", "description": "Volume path where the share will be created (e.g. \'/volume1\', \'/volume2\')"}, "description": {"type": "string", "description": "Optional description for the shared folder"}, "enable_recycle_bin": {"type": "boolean", "description": "Enable recycle bin for deleted files (default: true)"}, "recycle_bin_admin_only": {"type": "boolean", "description": "Restrict recycle bin access to administrators only (default: true)"}}, ["share_name", "vol_path"]), self._handle_create_share)
 
+        # Login Portal reverse proxy
+        RP_FIELDS = {  # noqa: N806
+            "description": {"type": "string", "description": "Entry description shown in DSM. DSM has no name field, so this is the entry's human-readable handle and must be unique."},
+            "source_protocol": {"type": "string", "enum": ["HTTP", "HTTPS"], "description": "Protocol of the public listener (default: HTTPS)"},
+            "source_hostname": {"type": "string", "description": "Host name the listener answers to, e.g. 'app.example.com'. No scheme or path."},
+            "source_port": {"type": "integer", "description": "Port of the public listener (default: 443)"},
+            "destination_protocol": {"type": "string", "enum": ["HTTP", "HTTPS"], "description": "Protocol used to reach the destination (default: HTTP)"},
+            "destination_hostname": {"type": "string", "description": "Host name or IP requests are proxied to, e.g. 'localhost' or '192.168.1.10'. No scheme or path."},
+            "destination_port": {"type": "integer", "description": "Port requests are proxied to"},
+            "hsts": {"type": "boolean", "description": "Send Strict-Transport-Security. Requires an HTTPS source."},
+            "websocket": {"type": "boolean", "description": "Add DSM's WebSocket header pair (Upgrade/Connection)"},
+            "custom_headers": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "value": {"type": "string"}}, "required": ["name"]}, "description": "Extra request headers for the destination; values may use nginx variables such as $scheme. Use `websocket` for the Upgrade/Connection pair."},
+            "access_control_profile": {"type": "string", "description": "UUID of an access control profile from synology_access_control_profile_list. On update, an empty string removes the profile."},
+            "proxy_connect_timeout": {"type": "integer", "description": "Seconds to wait when connecting to the destination (default: 60)"},
+            "proxy_read_timeout": {"type": "integer", "description": "Seconds to wait for a response from the destination (default: 60)"},
+            "proxy_send_timeout": {"type": "integer", "description": "Seconds to wait while sending to the destination (default: 60)"},
+        }
+        self._register_tool("synology_reverse_proxy_list", "List Login Portal reverse proxy entries (Control Panel > Login Portal > Advanced > Reverse Proxy) with source, destination, HSTS, WebSocket, headers and access control profile", TN, partial(self._handle_reverse_proxy_call, method_name="list_entries"))
+        self._register_tool("synology_reverse_proxy_get", "Get one reverse proxy entry by UUID or by its description", TN_PR({"uuid_or_description": {"type": "string", "description": "Entry UUID or description from synology_reverse_proxy_list"}}, ["uuid_or_description"]), self._handle_reverse_proxy_get)
+        self._register_tool("synology_access_control_profile_list", "List Login Portal access control profiles that a reverse proxy entry can reference", TN, partial(self._handle_reverse_proxy_call, method_name="list_access_control_profiles"))
+        self._register_tool("synology_reverse_proxy_create", "Create a reverse proxy entry. Takes effect immediately. Refused if the description is already in use.", TN_PR(RP_FIELDS, ["description", "source_hostname", "destination_hostname", "destination_port"]), self._handle_reverse_proxy_create)
+        self._register_tool("synology_reverse_proxy_update", "Change fields of an existing reverse proxy entry; fields not given keep their value. Takes effect immediately, so a wrong destination makes the site unreachable.", TN_PR({"uuid": {"type": "string", "description": "Entry UUID from synology_reverse_proxy_list"}, **RP_FIELDS}, ["uuid"]), self._handle_reverse_proxy_update)
+        self._register_tool("synology_reverse_proxy_delete", "DESTRUCTIVE. Delete a reverse proxy entry; the site it served stops answering. Requires confirm=true.", TN_PR({
+            "uuid": {"type": "string", "description": "Entry UUID from synology_reverse_proxy_list"},
+            "confirm": {"type": "boolean", "description": "Must be true. Guards against taking a live site offline by accident."},
+        }, ["uuid", "confirm"]), self._handle_reverse_proxy_delete)
+
         # User Management
         self._register_tool("synology_list_users", "List all local users on the Synology NAS", TN, partial(self._handle_usermgr_call, method_name="list_users"))
         self._register_tool("synology_get_user", "Get detailed information about a specific user", TN_PR({"name": {"type": "string", "description": "Username to look up"}}, ["name"]), self._handle_usermgr_get_user)
@@ -593,6 +622,22 @@ class SynologyMCPServer:
 
         return self.nfs_instances[base_url]
 
+    def _get_reverse_proxy(self, base_url: str) -> SynologyReverseProxy:
+        """Get or create the Login Portal reverse proxy instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.reverse_proxy_instances:
+            session_id = self.sessions[base_url]
+            self.reverse_proxy_instances[base_url] = SynologyReverseProxy(
+                base_url,
+                session_id,
+                verify_ssl=config.verify_ssl_for(base_url),
+                syno_token=self.syno_tokens.get(base_url),
+            )
+
+        return self.reverse_proxy_instances[base_url]
+
     def _get_iscsi(self, base_url: str) -> SynologyISCSI:
         """Get or create SAN Manager (iSCSI) instance for a base URL."""
         if base_url not in self.sessions:
@@ -727,6 +772,7 @@ class SynologyMCPServer:
             self.container_instances,
             self.nfs_instances,
             self.iscsi_instances,
+            self.reverse_proxy_instances,
             self.usermgr_instances,
         )
 
@@ -1663,6 +1709,59 @@ class SynologyMCPServer:
             recycle_bin_admin_only=arguments.get("recycle_bin_admin_only", True),
         )
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    # ------------------------------------------------------------------
+    # Login Portal reverse proxy handlers
+    # ------------------------------------------------------------------
+
+    _REVERSE_PROXY_FIELDS = (
+        "description", "source_protocol", "source_hostname", "source_port",
+        "destination_protocol", "destination_hostname", "destination_port",
+        "hsts", "websocket", "custom_headers", "access_control_profile",
+        "proxy_connect_timeout", "proxy_read_timeout", "proxy_send_timeout",
+    )
+
+    async def _handle_reverse_proxy_call(
+        self, arguments: dict, method_name: str
+    ) -> list[types.TextContent]:
+        """Generic handler for no-argument reverse proxy reads."""
+        base_url = await self._resolve_base_url(arguments)
+        proxy = self._get_reverse_proxy(base_url)
+        return self._emit(await asyncio.to_thread(getattr(proxy, method_name)))
+
+    async def _handle_reverse_proxy_get(self, arguments: dict) -> list[types.TextContent]:
+        """Handle getting one reverse proxy entry."""
+        base_url = await self._resolve_base_url(arguments)
+        proxy = self._get_reverse_proxy(base_url)
+        return self._emit(
+            await asyncio.to_thread(proxy.get_entry, arguments["uuid_or_description"])
+        )
+
+    async def _handle_reverse_proxy_create(self, arguments: dict) -> list[types.TextContent]:
+        """Handle creating a reverse proxy entry."""
+        base_url = await self._resolve_base_url(arguments)
+        proxy = self._get_reverse_proxy(base_url)
+        fields = {k: arguments[k] for k in self._REVERSE_PROXY_FIELDS if k in arguments}
+        return self._emit(await asyncio.to_thread(proxy.create_entry, **fields))
+
+    async def _handle_reverse_proxy_update(self, arguments: dict) -> list[types.TextContent]:
+        """Handle changing fields of a reverse proxy entry."""
+        base_url = await self._resolve_base_url(arguments)
+        proxy = self._get_reverse_proxy(base_url)
+        fields = {k: arguments[k] for k in self._REVERSE_PROXY_FIELDS if k in arguments}
+        return self._emit(
+            await asyncio.to_thread(proxy.update_entry, arguments["uuid"], **fields)
+        )
+
+    async def _handle_reverse_proxy_delete(self, arguments: dict) -> list[types.TextContent]:
+        """Handle deleting a reverse proxy entry. Refuses without confirm=true."""
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed(
+                f"Deleting reverse proxy entry {arguments.get('uuid')!r}"
+            )
+        base_url = await self._resolve_base_url(arguments)
+        proxy = self._get_reverse_proxy(base_url)
+        return self._emit(await asyncio.to_thread(proxy.delete_entry, arguments["uuid"]))
 
     # ------------------------------------------------------------------
     # Container Manager handlers
