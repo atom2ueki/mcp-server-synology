@@ -169,3 +169,17 @@ def fence(text: str) -> str:
         f"{text}\n"
         f'</untrusted-data id="{fence_id}">'
     )
+
+
+def fence_content(content: list) -> list:
+    """Fence every text item of a successful tool result.
+
+    Both the SDK path and the Xiaozhi bridge call this, so neither can return
+    NAS text unfenced.
+    """
+    return [
+        types.TextContent(type="text", text=fence(item.text))
+        if isinstance(item, types.TextContent)
+        else item
+        for item in content
+    ]

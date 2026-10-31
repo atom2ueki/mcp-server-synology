@@ -28,7 +28,10 @@
   from the NAS and is data, not instructions. File names, file contents, container logs and
   download names can be written by anyone with access to the NAS, so they are a prompt-injection
   path into an agent holding admin rights. The id is random per call, so text containing a closing
-  tag cannot end the fence early. Error results are not wrapped.
+  tag cannot end the fence early. Error results are not wrapped. The Xiaozhi bridge, which answers
+  `tools/call` itself, applies the same fence, and its `tools/list` and `tools/call` responses now
+  use the MCP wire names (`inputSchema`, `readOnlyHint`) instead of Python field names
+  (`input_schema`, `read_only_hint`).
 
 ## [1.8.0] - 2026-09-29
 
