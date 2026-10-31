@@ -16,6 +16,20 @@
   rather than retried, since DSM may still apply it. A write DSM confirmed whose read-back then fails is
   still reported as a success, flagged `readback_failed`, so it is not retried into a duplicate.
 
+- **MCP safety annotations on every tool.** Each tool now carries `ToolAnnotations`: 52 are
+  read-only, 18 additive (create, start, pause, grant; `destructiveHint: false`), and 30
+  destructive (delete, overwrite, rename, stop, replace config, remove access). Clients use these
+  hints to decide what to auto-approve and what to confirm; without them MCP treats every tool as
+  destructive, so a client could not tell `list_directory` from `delete`. The classification lives
+  in `src/tool_safety.py`, and registering a tool that is not in it raises, so a new tool cannot
+  ship unclassified.
+- **Tool output is fenced as untrusted data.** Every successful result is wrapped in an
+  `<untrusted-data id="...">` block with a one-line preamble telling the model the content came
+  from the NAS and is data, not instructions. File names, file contents, container logs and
+  download names can be written by anyone with access to the NAS, so they are a prompt-injection
+  path into an agent holding admin rights. The id is random per call, so text containing a closing
+  tag cannot end the fence early. Error results are not wrapped.
+
 ## [1.8.0] - 2026-09-29
 
 ### Added

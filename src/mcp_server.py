@@ -88,6 +88,7 @@ class ToolFailureError(Exception):
         super().__init__(payload.get("error", {}).get("message", "tool failed"))
         self.payload = payload
 from nfs import SynologyNFS
+from tool_safety import annotations_for, fence
 from usermanagement import SynologyUserManager
 
 # Suppress InsecureRequestWarning when verify_ssl is disabled (internal NAS devices).
@@ -154,7 +155,16 @@ class SynologyMCPServer:
         ) -> CallToolResult:
             try:
                 content = await self._dispatch_tool(params.name, params.arguments or {})
-                return CallToolResult(content=content)
+                # Results carry NAS-sourced text (file names, file contents,
+                # logs, download names), so fence it as data for the model.
+                return CallToolResult(
+                    content=[
+                        types.TextContent(type="text", text=fence(item.text))
+                        if isinstance(item, types.TextContent)
+                        else item
+                        for item in content
+                    ]
+                )
             except ToolFailureError as failure:
                 # A refused or failed operation, carrying its structured payload.
                 # Returning it as ordinary content would leave the protocol's
@@ -194,6 +204,7 @@ class SynologyMCPServer:
             name=name,
             description=description,
             inputSchema=input_schema,
+            annotations=annotations_for(name),
         )
         self._tool_registry[name] = (tool, handler)
 
