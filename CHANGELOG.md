@@ -16,6 +16,16 @@
   rather than retried, since DSM may still apply it. A write DSM confirmed whose read-back then fails is
   still reported as a success, flagged `readback_failed`, so it is not retried into a duplicate.
 
+### Fixed
+- **A DSM failure now sets `isError` for health, NFS, Container Manager and user-management
+  tools.** DSM reports most failures as HTTP 200 with `success: false`, and these handlers returned
+  that body as ordinary content, so a refused `synology_delete_user` or a failed
+  `synology_set_user_permissions` reached the client flagged as a success. They now go through
+  `_emit`, as the iSCSI and reverse-proxy handlers already did; the JSON body is unchanged.
+- `synology_container_image_pull`, `synology_container_registry_download` and
+  `synology_container_registry_tags` declare `repository` as required. The handlers already read it
+  unconditionally, so a call without it failed with a bare `KeyError: 'repository'`.
+
 ## [1.8.0] - 2026-09-29
 
 ### Added

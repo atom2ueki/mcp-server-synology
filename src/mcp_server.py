@@ -367,11 +367,11 @@ class SynologyMCPServer:
         self._register_tool("synology_container_image_delete", "Delete a Docker image", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="image_delete"))
         self._register_tool("synology_container_image_prune_preview", "Preview unused Docker images without deleting anything", CI, partial(self._handle_container_call, method_name="image_prune_preview"))
         self._register_tool("synology_container_image_prune", "Remove Docker images unused by any container; preserves containers, networks, and build cache", CI, partial(self._handle_container_call, method_name="image_prune"))
-        self._register_tool("synology_container_image_pull", "Pull a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}}, partial(self._handle_container_call, method_name="image_pull"))
+        self._register_tool("synology_container_image_pull", "Pull a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="image_pull"))
         self._register_tool("synology_container_registry_list", "List configured Docker registries", CI, partial(self._handle_container_call, method_name="registry_list"))
         self._register_tool("synology_container_registry_search", "Search for images in a Docker registry", CI | {"properties": {**CI["properties"], "query": {"type": "string", "description": "Search query for image name"}, "offset": {"type": "integer", "description": "Pagination offset (default: 0)"}, "limit": {"type": "integer", "description": "Max results to return (default: 50)"}}, "required": ["query"]}, partial(self._handle_container_call, method_name="registry_search"))
-        self._register_tool("synology_container_registry_tags", "List tags for a repository in a Docker registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}}, partial(self._handle_container_call, method_name="registry_tags"))
-        self._register_tool("synology_container_registry_download", "Download a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}}, partial(self._handle_container_call, method_name="registry_download"))
+        self._register_tool("synology_container_registry_tags", "List tags for a repository in a Docker registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="registry_tags"))
+        self._register_tool("synology_container_registry_download", "Download a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="registry_download"))
         self._register_tool("synology_container_network_list", "List Docker networks", CI, partial(self._handle_container_call, method_name="network_list"))
         self._register_tool("synology_container_network_get", "Get details of a Docker network", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Network name"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="network_get"))
         self._register_tool("synology_container_network_create", "Create a Docker network", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Network name"}, "driver": {"type": "string", "description": "Network driver (default: bridge)"}, "subnet": {"type": "string", "description": "Subnet CIDR (optional)"}, "gateway": {"type": "string", "description": "Gateway IP (optional)"}, "ip_range": {"type": "string", "description": "IP range (optional)"}, "enable_ipv6": {"type": "boolean", "description": "Enable IPv6 (default: false)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="network_create"))
@@ -1390,7 +1390,7 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         health = self._get_health(base_url)
         result = getattr(health, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_disk_smart(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting SMART info for a specific disk."""
@@ -1398,7 +1398,7 @@ class SynologyMCPServer:
         disk_id = arguments["disk_id"]
         health = self._get_health(base_url)
         result = health.disk_smart_info(disk_id)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _resolve_base_url(self, arguments: dict) -> str:
         """Resolve the target NAS without ever logging in on the event loop.
@@ -1504,13 +1504,14 @@ class SynologyMCPServer:
         )
 
     @staticmethod
-    def _emit(result: dict) -> list[types.TextContent]:
+    def _emit(result) -> list[types.TextContent]:
         """Render a tool result, raising when the operation did not succeed.
 
         The structured body is kept either way; raising is only how the MCP
-        layer is told to set isError.
+        layer is told to set isError. Results that are not dicts (a bare list)
+        carry no success flag and are rendered as-is.
         """
-        if result.get("success") is False:
+        if isinstance(result, dict) and result.get("success") is False:
             raise ToolFailureError(result)
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -1661,7 +1662,7 @@ class SynologyMCPServer:
         limit = arguments.get("limit", 50)
         health = self._get_health(base_url)
         result = health.system_log(offset=offset, limit=limit)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     # ------------------------------------------------------------------
     # NFS management handlers
@@ -1672,7 +1673,7 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         nfs = self._get_nfs(base_url)
         result = getattr(nfs, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_nfs_enable(self, arguments: dict) -> list[types.TextContent]:
         """Handle enabling/disabling NFS service."""
@@ -1681,7 +1682,7 @@ class SynologyMCPServer:
         nfs_v4 = arguments.get("nfs_v4", False)
         nfs = self._get_nfs(base_url)
         result = nfs.nfs_enable(enable=enable, nfs_v4=nfs_v4)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_nfs_set_permission(self, arguments: dict) -> list[types.TextContent]:
         """Handle setting NFS permissions on a share."""
@@ -1695,7 +1696,7 @@ class SynologyMCPServer:
             squash=arguments.get("squash", "root_squash"),
             security=arguments.get("security", "sys"),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_create_share(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new shared folder."""
@@ -1708,7 +1709,7 @@ class SynologyMCPServer:
             enable_recycle_bin=arguments.get("enable_recycle_bin", True),
             recycle_bin_admin_only=arguments.get("recycle_bin_admin_only", True),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     # ------------------------------------------------------------------
     # Login Portal reverse proxy handlers
@@ -1907,7 +1908,7 @@ class SynologyMCPServer:
         else:
             raise ValueError(f"Unknown container method: {method_name}")
 
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     # ------------------------------------------------------------------
     # User management handlers
@@ -1920,13 +1921,13 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = getattr(usermgr, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_get_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.get_user(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_create_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -1939,7 +1940,7 @@ class SynologyMCPServer:
             cannot_chg_passwd=arguments.get("cannot_chg_passwd", False),
             passwd_never_expire=arguments.get("passwd_never_expire", True),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_set_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -1952,19 +1953,19 @@ class SynologyMCPServer:
             email=arguments.get("email"),
             expired=arguments.get("expired"),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_delete_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.delete_user(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_list_group_members(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.list_group_members(arguments["group"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_add_to_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -1974,7 +1975,7 @@ class SynologyMCPServer:
         result = await asyncio.to_thread(
             usermgr.add_user_to_group, arguments["username"], arguments["groups"]
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_remove_from_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -1982,19 +1983,19 @@ class SynologyMCPServer:
         result = await asyncio.to_thread(
             usermgr.remove_user_from_group, arguments["username"], arguments["groups"]
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_get_permissions(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.get_user_permissions(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _handle_usermgr_set_permissions(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.set_user_permissions(arguments["name"], arguments["permissions"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit(result)
 
     async def _run_stdio(self):
         """Serve the MCP protocol over stdio until the client disconnects."""
