@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import os
+import posixpath
 import tempfile
 import time
 import unicodedata
@@ -765,11 +766,22 @@ class SynologyFileStation:
         Returns:
             Dict with operation result
         """
-        formatted_path = self._format_path(path)
+        # Collapse "//", "." and ".." first, so the guards below and the request
+        # sent to DSM agree on what is being deleted.
+        formatted_path = posixpath.normpath("/" + self._format_path(path).lstrip("/"))
 
         # Validate path
         if not formatted_path or formatted_path == "/":
             raise Exception("Invalid path - cannot delete root")
+
+        # File Station paths are share-relative, so a one-segment path is a whole
+        # shared folder, and directories are deleted recursively.
+        if formatted_path.count("/") == 1:
+            raise Exception(
+                f"Refusing to delete share root {formatted_path}: that would remove the "
+                "whole shared folder. Delete items inside it instead, or remove the "
+                "share in DSM."
+            )
 
         # Safety check for critical paths
         critical_paths = ["/volume1", "/homes", "/var", "/etc", "/usr", "/bin", "/sbin"]

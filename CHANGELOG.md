@@ -16,6 +16,14 @@
   rather than retried, since DSM may still apply it. A write DSM confirmed whose read-back then fails is
   still reported as a success, flagged `readback_failed`, so it is not retried into a duplicate.
 
+### Fixed
+- **`delete` refuses a share root.** File Station paths are share-relative and directories are
+  deleted recursively, but the guard listed filesystem paths (`/volume1`, `/etc`, ...) that never
+  appear in a File Station path, so `delete("/photos")` would remove the whole shared folder. A
+  one-segment path is now refused before any request is made. The path is normalized first, so
+  `//photos`, `/./photos` and `/photos/2024/..` are caught too, and DSM receives the same
+  normalized path the guard checked.
+
 ## [1.8.0] - 2026-09-29
 
 ### Added
