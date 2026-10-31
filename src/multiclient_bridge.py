@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 import websockets
 
 from config import config
+from tool_safety import fence_content
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -92,6 +93,15 @@ def _redact(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact(item) for item in value]
     return value
+
+
+def _wire(model) -> dict:
+    """Serialize an MCP model the way it goes over the wire.
+
+    Plain model_dump() emits Python field names (input_schema, read_only_hint)
+    and explicit nulls; MCP clients expect inputSchema and readOnlyHint.
+    """
+    return model.model_dump(by_alias=True, exclude_none=True, mode="json")
 
 
 class MCPBridge:
@@ -166,7 +176,7 @@ class MCPBridge:
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {"tools": [tool.model_dump() for tool in tools_list]},
+                    "result": {"tools": [_wire(tool) for tool in tools_list]},
                 }
 
             elif method == "tools/call":
@@ -196,7 +206,7 @@ class MCPBridge:
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {"content": [content.model_dump() for content in result]},
+                    "result": {"content": [_wire(item) for item in fence_content(result)]},
                 }
 
             elif method == "ping":
