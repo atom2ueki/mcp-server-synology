@@ -430,18 +430,22 @@ class TestPasswordEnv:
 
         reload_config()
 
+        # Patched before config is imported: importing it builds a module-level
+        # SynologyConfig, and either load_dotenv(".env") call would set NAS_PW
+        # from a working-directory .env that defines it.
         with clear_env():
-            with patch("config.SETTINGS_FILE", secrets_file):
-                from config import SynologyConfig
+            with patch("dotenv.load_dotenv"):
+                with patch("config.SETTINGS_FILE", secrets_file):
+                    from config import SynologyConfig
 
-                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
-                    cfg = SynologyConfig()
+                    with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                        cfg = SynologyConfig()
 
-                assert "nas" not in cfg.nas_configs
-                assert any(
-                    "Missing 'password'" in rec.message and "'NAS_PW'" in rec.message
-                    for rec in caplog.records
-                )
+                    assert "nas" not in cfg.nas_configs
+                    assert any(
+                        "Missing 'password'" in rec.message and "'NAS_PW'" in rec.message
+                        for rec in caplog.records
+                    )
 
     def test_empty_variable_skipped(self, tmp_path, caplog):
         """Test that an entry whose variable is set but empty is skipped."""
