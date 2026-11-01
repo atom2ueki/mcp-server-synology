@@ -392,6 +392,154 @@ class TestSynologyConfig:
                 assert any("Missing 'host' (or 'url')" in rec.message for rec in caplog.records)
 
 
+class TestPasswordEnv:
+    """Test reading a NAS password from the environment variable `password_env` names."""
+
+    @staticmethod
+    def _write_settings(tmp_path, entry):
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps({"synology": {"nas": entry}}))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
+        return secrets_file
+
+    def test_password_read_from_named_variable(self, tmp_path):
+        """Test that the password comes from the variable `password_env` names."""
+        secrets_file = self._write_settings(
+            tmp_path,
+            {"url": "https://nas.example.com", "username": "a", "password_env": "NAS_PW"},
+        )
+
+        reload_config()
+
+        with clear_env(NAS_PW="s3cret"):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+
+                assert cfg.nas_configs["nas"]["password"] == "s3cret"
+
+    def test_unset_variable_skipped(self, tmp_path, caplog):
+        """Test that an entry whose variable is unset is skipped, naming the variable."""
+        import logging
+
+        secrets_file = self._write_settings(
+            tmp_path,
+            {"url": "https://nas.example.com", "username": "a", "password_env": "NAS_PW"},
+        )
+
+        reload_config()
+
+        with clear_env():
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert "nas" not in cfg.nas_configs
+                assert any(
+                    "Missing 'password'" in rec.message and "'NAS_PW'" in rec.message
+                    for rec in caplog.records
+                )
+
+    def test_empty_variable_skipped(self, tmp_path, caplog):
+        """Test that an entry whose variable is set but empty is skipped."""
+        import logging
+
+        secrets_file = self._write_settings(
+            tmp_path,
+            {"url": "https://nas.example.com", "username": "a", "password_env": "NAS_PW"},
+        )
+
+        reload_config()
+
+        with clear_env(NAS_PW=""):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert "nas" not in cfg.nas_configs
+                assert any("'NAS_PW'" in rec.message for rec in caplog.records)
+
+    def test_password_and_password_env_together_skipped(self, tmp_path, caplog):
+        """Test that setting both keys skips the entry rather than picking one."""
+        import logging
+
+        secrets_file = self._write_settings(
+            tmp_path,
+            {
+                "url": "https://nas.example.com",
+                "username": "a",
+                "password": "on-disk",
+                "password_env": "NAS_PW",
+            },
+        )
+
+        reload_config()
+
+        with clear_env(NAS_PW="s3cret"):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert "nas" not in cfg.nas_configs
+                assert any(
+                    "both 'password' and 'password_env'" in rec.message
+                    for rec in caplog.records
+                )
+
+    def test_non_string_password_env_skipped(self, tmp_path, caplog):
+        """Test that a non-string `password_env` skips the entry."""
+        import logging
+
+        secrets_file = self._write_settings(
+            tmp_path,
+            {"url": "https://nas.example.com", "username": "a", "password_env": 123},
+        )
+
+        reload_config()
+
+        with clear_env():
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert "nas" not in cfg.nas_configs
+                assert any("Invalid 'password_env'" in rec.message for rec in caplog.records)
+
+    def test_save_device_id_keeps_password_out_of_file(self, tmp_path):
+        """Test that persisting a device token never writes the password to disk."""
+        secrets_file = self._write_settings(
+            tmp_path,
+            {"url": "https://nas.example.com", "username": "a", "password_env": "NAS_PW"},
+        )
+
+        reload_config()
+
+        with clear_env(NAS_PW="s3cret"):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+
+                assert cfg.save_device_id("nas", "device-token") is True
+                assert cfg.nas_configs["nas"]["device_id"] == "device-token"
+
+                written = secrets_file.read_text()
+                entry = json.loads(written)["synology"]["nas"]
+                assert entry["password_env"] == "NAS_PW"
+                assert entry["device_id"] == "device-token"
+                assert "password" not in entry
+                assert "s3cret" not in written
+
+
 class TestFilePermissions:
     """Test file permission checking."""
 

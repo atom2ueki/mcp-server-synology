@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **`password_env` per-NAS setting** names an environment variable to read the NAS password from
+  when `settings.json` is loaded, so a launcher can pass it in from a secret manager and the file
+  never stores it. Previously a `settings.json` entry needed a plaintext `password`, and the legacy
+  `SYNOLOGY_PASSWORD` variable only applied when no NAS was defined, which also meant no persisted
+  `device_id`. An entry that sets both `password` and `password_env`, or whose variable is unset or
+  empty, is skipped with a warning. (#137)
 - **Login Portal reverse proxy tools** — `synology_reverse_proxy_list`, `_get`, `_create`, `_update`
   and `_delete`, plus `synology_access_control_profile_list`, wrapping
   `SYNO.Core.AppPortal.ReverseProxy` and `SYNO.Core.AppPortal.AccessControl`. Entries are returned
