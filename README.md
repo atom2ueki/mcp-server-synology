@@ -679,12 +679,15 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 | `port` | No | API port (default: 5000 for HTTP, 5001 for HTTPS) |
 | `url` | Yes* | Full base URL (e.g., `https://nas.example.com`); wins over `host`/`port` — use for a NAS behind a reverse proxy |
 | `username` | Yes | NAS username |
-| `password` | Yes | NAS password |
+| `password` | Yes** | NAS password |
+| `password_env` | Yes** | Name of an environment variable holding the NAS password, read when settings.json is loaded, so the password is never stored in the file |
 | `otp_code` | No | One-shot 6-digit 2FA code (first login only, then remove) |
 | `device_id` | No | Long-lived trusted-device token from DSM (`did`); skip OTP on all future logins |
 | `note` | No | Optional description for your reference |
 
 *Either `host` or `url` is required per NAS entry.
+
+**Set exactly one of `password` or `password_env`. An entry with both, or whose variable is unset or empty, is skipped with a warning. Use `password_env` when a launcher fetches the password from a secret manager at start (for example `"password_env": "NAS1_PASSWORD"`).
 
 **Notes:**
 - The server will use port 5001 (HTTPS) if port is 5001, otherwise defaults to HTTP (5000)

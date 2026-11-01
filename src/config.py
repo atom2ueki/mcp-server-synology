@@ -447,6 +447,32 @@ class SynologyConfig:
                     username = nas_info.get("username", "")
                     password = nas_info.get("password", "")
 
+                    # `password_env` names an environment variable holding the
+                    # password, so a launcher can pass it in from a secret
+                    # manager and settings.json never stores it.
+                    password_env = nas_info.get("password_env")
+                    if password_env is not None:
+                        if not isinstance(password_env, str):
+                            logger.warning(
+                                f"Invalid 'password_env' for NAS '{nas_name}' - expected "
+                                f"string, got {type(password_env)}"
+                            )
+                            continue
+                        if password:
+                            logger.warning(
+                                f"NAS '{nas_name}' sets both 'password' and 'password_env' "
+                                f"in {SETTINGS_FILE}; set only one"
+                            )
+                            continue
+                        password = os.environ.get(password_env, "")
+                        if not password:
+                            logger.warning(
+                                f"Missing 'password' for NAS '{nas_name}': environment "
+                                f"variable '{password_env}' named by 'password_env' is "
+                                "unset or empty"
+                            )
+                            continue
+
                     # Optional 2FA/OTP support (DSM Login Web API Guide):
                     #   - `otp_code`: one-shot code from authenticator. Needed
                     #     only on the FIRST login after enabling 2FA on the
