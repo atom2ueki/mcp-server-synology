@@ -631,6 +631,25 @@ def test_security_write_without_an_answer_reports_an_unknown_outcome(key, write)
     assert result["before"] is not None
 
 
+def test_security_write_with_an_http_error_reports_an_unknown_outcome():
+    real = Stateful.__call__
+
+    def server_error(self, url, params=None, data=None, **kwargs):
+        sent = params if params is not None else data
+        if (sent["api"], sent["method"]) == ("SYNO.Core.Web.DSM", "set"):
+            response = _response({})
+            response.raise_for_status.side_effect = requests.exceptions.HTTPError("502 Bad Gateway")
+            return response
+        return real(self, url, params=params, data=data, **kwargs)
+
+    fake, g, p = stateful()
+    with g, p, patch.object(Stateful, "__call__", server_error):
+        result = SynologySecurity(BASE, "sid").set_https_redirect(True)
+    assert result["success"] is False
+    assert result["outcome"] == "unknown"
+    assert "HTTP error" in result["note"]
+
+
 @pytest.mark.parametrize("key,write", WRITES, ids=[f"{a}/{m}" for (a, m), _ in WRITES])
 def test_security_write_refused_by_dsm_is_not_called_unknown(key, write):
     fake, g, p = stateful(allow=["10.0.0.1"])

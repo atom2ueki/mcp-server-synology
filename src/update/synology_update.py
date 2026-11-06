@@ -81,19 +81,20 @@ def _failed(step: str, result: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": False, "step": step, "error": result.get("error")}
 
 
-# The codes SynologyAPIClient gives a request whose answer never arrived
-# (network_error: a timeout or a dropped connection) or could not be read
-# (unknown_error). For a write, DSM may still have applied it.
+# The codes SynologyAPIClient gives a request that got no DSM result:
+# network_error (a timeout, a dropped connection, or an HTTP 4xx/5xx) and
+# unknown_error (a reply that could not be read). For a write, neither says
+# whether DSM applied it.
 _UNANSWERED = frozenset({"network_error", "unknown_error"})
 
 
 def _write_failed(step: str, result: Dict[str, Any], reread: str) -> Dict[str, Any]:
-    """A failed write, marked outcome "unknown" when DSM never answered it."""
+    """A failed write, marked outcome "unknown" when DSM returned no result for it."""
     out = _failed(step, result)
     error = result.get("error")
     if isinstance(error, dict) and error.get("code") in _UNANSWERED:
         out["outcome"] = "unknown"
-        out["note"] = f"DSM did not answer this write, so it may have been applied. {reread}"
+        out["note"] = f"DSM returned no result for this write (no reply, an HTTP error or an unreadable reply), so it may have been applied. {reread}"
     return out
 
 
