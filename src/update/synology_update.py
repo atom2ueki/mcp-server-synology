@@ -81,6 +81,22 @@ def _failed(step: str, result: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": False, "step": step, "error": result.get("error")}
 
 
+# The codes SynologyAPIClient gives a request whose answer never arrived
+# (network_error: a timeout or a dropped connection) or could not be read
+# (unknown_error). For a write, DSM may still have applied it.
+_UNANSWERED = frozenset({"network_error", "unknown_error"})
+
+
+def _write_failed(step: str, result: Dict[str, Any], reread: str) -> Dict[str, Any]:
+    """A failed write, marked outcome "unknown" when DSM never answered it."""
+    out = _failed(step, result)
+    error = result.get("error")
+    if isinstance(error, dict) and error.get("code") in _UNANSWERED:
+        out["outcome"] = "unknown"
+        out["note"] = f"DSM did not answer this write, so it may have been applied. {reread}"
+    return out
+
+
 class SynologyUpdate:
     """DSM update and package update status, and DSM update download/install."""
 
@@ -267,7 +283,11 @@ class SynologyUpdate:
             timeout=UPDATE_WRITE_TIMEOUT,
         )
         if not started.get("success"):
-            return _failed("SYNO.Core.Upgrade.Server.Download/start", started)
+            return _write_failed(
+                "SYNO.Core.Upgrade.Server.Download/start",
+                started,
+                "Check synology_update_status before retrying.",
+            )
         progress = self._call(
             "SYNO.Core.Upgrade.Server.Download",
             "progress",
@@ -405,7 +425,15 @@ class SynologyUpdate:
             timeout=UPDATE_WRITE_TIMEOUT,
         )
         if not started.get("success"):
-            return {**_failed("SYNO.Core.Upgrade/start", started), "precheck": pre}
+            return {
+                **_write_failed(
+                    "SYNO.Core.Upgrade/start",
+                    started,
+                    "The install may have started and the NAS may reboot; do not retry "
+                    "until synology_update_status answers and shows it did not.",
+                ),
+                "precheck": pre,
+            }
         return {
             "success": True,
             "started": True,

@@ -43,6 +43,22 @@ def _failed(step: str, result: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": False, "step": step, "error": result.get("error")}
 
 
+# The codes SynologyAPIClient gives a request whose answer never arrived
+# (network_error: a timeout or a dropped connection) or could not be read
+# (unknown_error). For a write, DSM may still have applied it.
+_UNANSWERED = frozenset({"network_error", "unknown_error"})
+
+
+def _write_failed(step: str, result: Dict[str, Any], reread: str) -> Dict[str, Any]:
+    """A failed write, marked outcome "unknown" when DSM never answered it."""
+    out = _failed(step, result)
+    error = result.get("error")
+    if isinstance(error, dict) and error.get("code") in _UNANSWERED:
+        out["outcome"] = "unknown"
+        out["note"] = f"DSM did not answer this write, so it may have been applied. {reread}"
+    return out
+
+
 def _refused(code: str, message: str) -> Dict[str, Any]:
     return {"success": False, "error": {"code": code, "message": message}}
 
@@ -279,7 +295,7 @@ class SynologySecurity:
         }
         written = self._post("SYNO.Core.Terminal", "set", 3, params)
         if not written.get("success"):
-            return {**_failed("SYNO.Core.Terminal/set", written), "before": self._shape_terminal(current)}
+            return {**_write_failed("SYNO.Core.Terminal/set", written, "Re-read it with synology_security_posture before retrying."), "before": self._shape_terminal(current)}
         after = self._terminal()
         if not after.get("success"):
             return {**_failed("SYNO.Core.Terminal/get (read-back)", after), "before": self._shape_terminal(current)}
@@ -331,7 +347,7 @@ class SynologySecurity:
                 }
         written = self._post("SYNO.Core.Security.AutoBlock", "set", 1, params)
         if not written.get("success"):
-            return {**_failed("SYNO.Core.Security.AutoBlock/set", written), "before": self._shape_auto_block(current)}
+            return {**_write_failed("SYNO.Core.Security.AutoBlock/set", written, "Re-read it with synology_security_posture before retrying."), "before": self._shape_auto_block(current)}
         after = self._auto_block()
         if not after.get("success"):
             return {**_failed("SYNO.Core.Security.AutoBlock/get (read-back)", after), "before": self._shape_auto_block(current)}
@@ -354,7 +370,7 @@ class SynologySecurity:
         written = self._post("SYNO.Core.Security.AutoBlock.Rules", method, 1, params)
         before_entries = _data(before).get("entries")
         if not written.get("success"):
-            return {**_failed(f"SYNO.Core.Security.AutoBlock.Rules/{method}", written), "before": before_entries}
+            return {**_write_failed(f"SYNO.Core.Security.AutoBlock.Rules/{method}", written, "Re-read it with synology_security_posture before retrying."), "before": before_entries}
         after = self._allow_list()
         if not after.get("success"):
             return {**_failed("SYNO.Core.Security.AutoBlock.Rules/list (read-back)", after), "before": before_entries}
@@ -390,7 +406,7 @@ class SynologySecurity:
                 params[name] = int(params[name])
         written = self._post("SYNO.Core.Web.DSM", "set", 2, params)
         if not written.get("success"):
-            return {**_failed("SYNO.Core.Web.DSM/set", written), "before": self._shape_web_dsm(current)}
+            return {**_write_failed("SYNO.Core.Web.DSM/set", written, "Re-read it with synology_security_posture before retrying."), "before": self._shape_web_dsm(current)}
         after = self._web_dsm()
         if not after.get("success"):
             # The Login Portal waits for DSM's web server to restart after

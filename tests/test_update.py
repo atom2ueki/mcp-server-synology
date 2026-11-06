@@ -5,6 +5,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from mcp_server import SynologyMCPServer, ToolFailureError
 from update.synology_security import SynologySecurity
@@ -315,6 +316,34 @@ def test_precheck_cannot_continue_blocks():
     assert not fake.called("SYNO.Core.Upgrade", "start")
 
 
+@pytest.mark.parametrize(
+    "routes,key,call",
+    [
+        (lambda: {**base_routes()}, ("SYNO.Core.Upgrade.Server.Download", "start"),
+         lambda u: u.dsm_update_download()),
+        (lambda: install_routes(), ("SYNO.Core.Upgrade", "start"),
+         lambda u: u.dsm_update_install(accept_warnings=True, accept_eula=True)),
+    ],
+    ids=["download/start", "install/start"],
+)
+def test_update_start_without_an_answer_reports_an_unknown_outcome(routes, key, call):
+    fake = FakeDSM(routes())
+
+    def lost(url, params=None, data=None, **kwargs):
+        sent = params if params is not None else data
+        if (sent["api"], sent["method"]) == key:
+            raise requests.exceptions.ReadTimeout("read timed out")
+        return fake(url, params=params, data=data, **kwargs)
+
+    with patch("utils.synology_api.requests.get", side_effect=lost), patch(
+        "utils.synology_api.requests.post", side_effect=lost
+    ):
+        result = call(upd())
+    assert result["success"] is False
+    assert result["outcome"] == "unknown"
+    assert "synology_update_status" in result["note"]
+
+
 def test_failed_precheck_call_blocks():
     fake, g, p = dsm(install_routes(precheck={"success": False, "error": {"code": 105}}))
     with g, p:
@@ -565,6 +594,51 @@ def test_https_redirect_unreadable_after_restart_is_reported_unverified():
     with g, p, patch.object(Stateful, "__call__", flaky):
         result = SynologySecurity(BASE, "sid").set_https_redirect(True)
     assert result["success"] is True and result["verified"] is False
+
+
+WRITES = [
+    (("SYNO.Core.Terminal", "set"), lambda sec: sec.set_terminal(enable_telnet=False)),
+    (("SYNO.Core.Security.AutoBlock", "set"), lambda sec: sec.set_auto_block(attempts=5)),
+    (("SYNO.Core.Security.AutoBlock.Rules", "create"), lambda sec: sec.add_allow_list(["10.0.0.1"])),
+    (("SYNO.Core.Security.AutoBlock.Rules", "delete"), lambda sec: sec.remove_allow_list(["10.0.0.1"])),
+    (("SYNO.Core.Web.DSM", "set"), lambda sec: sec.set_https_redirect(True)),
+]
+
+
+def _write_without_answer(key):
+    """DSM applies the write, then the answer is lost (a read timeout)."""
+    real = Stateful.__call__
+
+    def lost(self, url, params=None, data=None, **kwargs):
+        sent = params if params is not None else data
+        reply = real(self, url, params=params, data=data, **kwargs)
+        if (sent["api"], sent["method"]) == key:
+            raise requests.exceptions.ReadTimeout("read timed out")
+        return reply
+
+    return patch.object(Stateful, "__call__", lost)
+
+
+@pytest.mark.parametrize("key,write", WRITES, ids=[f"{a}/{m}" for (a, m), _ in WRITES])
+def test_security_write_without_an_answer_reports_an_unknown_outcome(key, write):
+    fake, g, p = stateful(allow=["10.0.0.1"])
+    with g, p, _write_without_answer(key):
+        result = write(SynologySecurity(BASE, "sid"))
+    assert result["success"] is False
+    assert result["outcome"] == "unknown"
+    assert result["error"]["code"] == "network_error"
+    assert "synology_security_posture" in result["note"]
+    assert result["before"] is not None
+
+
+@pytest.mark.parametrize("key,write", WRITES, ids=[f"{a}/{m}" for (a, m), _ in WRITES])
+def test_security_write_refused_by_dsm_is_not_called_unknown(key, write):
+    fake, g, p = stateful(allow=["10.0.0.1"])
+    fake.routes[key] = {"success": False, "error": {"code": 105}}
+    with g, p:
+        result = write(SynologySecurity(BASE, "sid"))
+    assert result["success"] is False
+    assert "outcome" not in result
 
 
 def test_posture_reports_a_failed_section_instead_of_hiding_it():
