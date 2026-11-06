@@ -340,9 +340,11 @@ def test_copy_tool_schema_and_count():
     tools = {tool.name: tool for tool in server._get_tool_definitions()}
 
     # With no test credentials, login/logout are conditionally exposed too.
-    # 84 before the iSCSI provisioning tools (#103); +8 = 92; +6 reverse proxy = 98.
+    # 84 before the iSCSI provisioning tools (#103); +8 = 92; +6 reverse proxy = 98;
+    # +4 update status / security posture / DSM update download+install = 102;
+    # +5 telnet/SSH, auto-block, allow list add/remove, HTTPS redirect = 107.
     unconditional = set(tools) - {"synology_login", "synology_logout"}
-    assert len(unconditional) == 98
+    assert len(unconditional) == 107
     assert tools["copy_file"].input_schema["required"] == [
         "source_path",
         "destination_folder",

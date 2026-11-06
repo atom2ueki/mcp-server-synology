@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 import websockets
 
 from config import config
+from mcp_server import ToolFailureError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -183,6 +184,20 @@ class MCPBridge:
                     }
                 try:
                     result = await self.mcp_server._dispatch_tool(tool_name, arguments)
+                except ToolFailureError as failure:
+                    # Keep the structured payload (a refusal, or a partial
+                    # result with per-section errors), as the stdio/HTTP
+                    # handler in mcp_server does, instead of only its message.
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "isError": True,
+                            "content": [
+                                {"type": "text", "text": json.dumps(failure.payload, indent=2)}
+                            ],
+                        },
+                    }
                 except Exception as e:
                     return {
                         "jsonrpc": "2.0",
