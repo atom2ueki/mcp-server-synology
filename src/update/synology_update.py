@@ -274,6 +274,14 @@ class SynologyUpdate:
             2,
             {"need_download_target": True},
         )
+        if not progress.get("success"):
+            # The download is already running; say so, and that its progress
+            # could not be read, rather than report success with no progress.
+            return {
+                **_failed("SYNO.Core.Upgrade.Server.Download/progress", progress),
+                "started": True,
+                "version": status["update"]["version"],
+            }
         return {
             "success": True,
             "started": True,

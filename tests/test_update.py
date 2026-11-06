@@ -196,6 +196,29 @@ def test_download_starts_with_admin_centers_target():
     assert sent["need_auto_smallupdate"] == "true"
 
 
+def test_download_reports_a_failed_progress_read_after_starting():
+    routes = base_routes()
+    routes[("SYNO.Core.Upgrade.Server.Download", "start")] = ok({})
+    fake, g, p = dsm(routes)
+    answer = fake.__call__
+
+    def progress_fails_once_started(url, params=None, data=None, **kwargs):
+        sent = params if params is not None else data
+        if sent["method"] == "progress" and fake.called("SYNO.Core.Upgrade.Server.Download", "start"):
+            fake.calls.append(((sent["api"], sent["method"]), sent, "get"))
+            return _response({"success": False, "error": {"code": 400}})
+        return answer(url, params=params, data=data, **kwargs)
+
+    g = patch("utils.synology_api.requests.get", side_effect=progress_fails_once_started)
+    p = patch("utils.synology_api.requests.post", side_effect=progress_fails_once_started)
+    with g, p:
+        result = upd().dsm_update_download()
+    assert result["success"] is False
+    assert result["started"] is True
+    assert result["step"] == "SYNO.Core.Upgrade.Server.Download/progress"
+    assert result["error"]["code"] == 400
+
+
 def test_download_refuses_when_no_update():
     fake, g, p = dsm(base_routes(check=CHECK_NONE))
     with g, p:
