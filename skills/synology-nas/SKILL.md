@@ -5,7 +5,7 @@ description: Use this skill for ANY task on a Synology NAS via the mcp-server-sy
 
 # Synology NAS
 
-This skill teaches you how to use the `mcp-server-synology` MCP effectively. The MCP exposes ~80 tools across seven domains; the trick is picking the right tool, targeting the right NAS, and not exploding a single user request into a dozen redundant calls.
+This skill teaches you how to use the `mcp-server-synology` MCP effectively. The MCP exposes ~109 tools across eight domains; the trick is picking the right tool, targeting the right NAS, and not exploding a single user request into a dozen redundant calls.
 
 ## Mental model
 
@@ -51,6 +51,7 @@ When the user asks about… → read…
 | NFS, share permissions, "let host X mount", create share | shares & NFS | [references/shares-nfs.md](references/shares-nfs.md) |
 | users, groups, permissions, "add user", "remove from group" | user management | [references/users.md](references/users.md) |
 | reverse proxy, Login Portal, "publish app.example.com", subdomain, HSTS, WebSocket, access control profile | reverse proxy | [references/reverse-proxy.md](references/reverse-proxy.md) |
+| DSM update, "is there an update", security posture, auto-block, Telnet/SSH, HTTPS redirect, Security Advisor, hardening | updates & security | [references/updates-security.md](references/updates-security.md) |
 
 Read the reference for a domain before doing non-trivial work in it. Each reference covers the tool list, the right call ordering, and known gotchas. Don't read every reference — only the ones you need.
 

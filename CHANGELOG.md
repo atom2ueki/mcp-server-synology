@@ -21,14 +21,31 @@
   35–50 s on a DS218+ (DSM 7.4.1-90080), and a timed-out write is reported as `outcome_unknown`
   rather than retried, since DSM may still apply it. A write DSM confirmed whose read-back then fails is
   still reported as a success, flagged `readback_failed`, so it is not retried into a duplicate.
+- **DSM/package update status, DSM update download and install, and security posture tools** —
+  read-only `synology_update_status` (installed DSM version, available update and its download
+  state, packages with pending updates, auto-update policy) and `synology_security_posture`
+  (QuickConnect, auto-block and its allow list, Telnet/SSH, HTTPS redirect, firewall, 2FA
+  enforcement, account state, administrators (every shape the API has used across DSM versions,
+  with an unrecognized one reported as an error rather than an empty list), Security Advisor
+  findings), plus confirm-gated
+  `synology_dsm_update_download`, `synology_dsm_update_install` (dry-runs DSM's own pre-install
+  checks without `confirm=true`, installs only past its blockers, warnings and EULA when they are
+  each explicitly accepted, refuses a major-version upgrade), `synology_terminal_set`,
+  `synology_autoblock_set`, `synology_autoblock_allow_add`/`_remove` and
+  `synology_https_redirect_set`. Every setting write changes only the fields asked for, sends back
+  what DSM's own UI sends, reads the setting back, and reports `outcome: unknown` when DSM gives no
+  answer so a possibly-applied write is never blindly retried; a write DSM confirmed whose
+  read-back then fails is reported as a success flagged `verified: false` with the read-back
+  error, never as a plain failure. Enabling auto-block is refused
+  while the allow list is empty. The tools are classified in `src/tool_safety.py`. (#130)
 
-- **MCP safety annotations on every tool.** Each tool now carries `ToolAnnotations`: 52 are
-  read-only, 18 additive (create, start, pause, grant; `destructiveHint: false`), and 30
-  destructive (delete, overwrite, rename, stop, replace config, remove access). Clients use these
-  hints to decide what to auto-approve and what to confirm; without them MCP treats every tool as
-  destructive, so a client could not tell `list_directory` from `delete`. The classification lives
-  in `src/tool_safety.py`, and registering a tool that is not in it raises, so a new tool cannot
-  ship unclassified.
+- **MCP safety annotations on every tool.** Each tool now carries `ToolAnnotations`: 54 are
+  read-only, 20 additive (create, start, pause, grant, download; `destructiveHint: false`), and 35
+  destructive (delete, overwrite, rename, stop, replace config, remove access, change security
+  settings). Clients use these hints to decide what to auto-approve and what to confirm; without
+  them MCP treats every tool as destructive, so a client could not tell `list_directory` from
+  `delete`. The classification lives in `src/tool_safety.py`, and registering a tool that is not
+  in it raises, so a new tool cannot ship unclassified.
 - **Tool output is fenced as untrusted data.** Every successful result is wrapped in an
   `<untrusted-data id="...">` block with a one-line preamble telling the model the content came
   from the NAS and is data, not instructions. File names, file contents, container logs and
@@ -38,6 +55,7 @@
   `tools/call` itself, applies the same fence, and its `tools/list` and `tools/call` responses now
   use the MCP wire names (`inputSchema`, `readOnlyHint`) instead of Python field names
   (`input_schema`, `read_only_hint`).
+
 ### Fixed
 - **`delete` refuses a share root.** File Station paths are share-relative and directories are
   deleted recursively, but the guard listed filesystem paths (`/volume1`, `/etc`, ...) that, apart

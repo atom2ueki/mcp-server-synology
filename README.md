@@ -425,6 +425,16 @@ for databases that may be changing during the copy.
   - `name` (required): LUN name or UUID from `synology_lun_list` output
 - **`synology_network`** - Get network interface status and transfer rates
 
+### 🔄 DSM Updates & Security Posture
+- **`synology_update_status`** - Read-only: installed DSM version, available update (version, security release, whether it reboots), download/install state, packages with pending updates, auto-update policy
+- **`synology_security_posture`** - Read-only: QuickConnect, auto-block and its allow list, Telnet/SSH, HTTPS redirect, firewall, 2FA enforcement, admin/guest account state, administrators, Security Advisor findings
+- **`synology_terminal_set`** - Turn Telnet/SSH on or off *(confirm=true)*
+- **`synology_autoblock_set`** - Configure auto-block; enabling with an empty allow list is refused *(confirm=true)*
+- **`synology_autoblock_allow_add` / `_remove`** - Manage the never-block allow list *(confirm=true)*
+- **`synology_https_redirect_set`** - Toggle DSM's HTTP→HTTPS redirect; restarts the web server *(confirm=true)*
+- **`synology_dsm_update_download`** - Download the available DSM update; installs nothing *(confirm=true)*
+- **`synology_dsm_update_install`** - Dry-run DSM's pre-install checks, or install with blockers/warnings/EULA each explicitly accepted; the NAS may reboot *(confirm=true to install)*
+
 ### SAN Manager (iSCSI provisioning)
 
 Wraps `SYNO.Core.ISCSI.LUN` and `SYNO.Core.ISCSI.Target`. Verified against DSM
@@ -580,7 +590,7 @@ misspelled `type` would silently take the default.
 
 For Claude Code, Claude Desktop, and claude.ai users, this repo ships an Anthropic Agent Skill that teaches Claude how to use the MCP tools effectively — picking the right tool, targeting the right NAS in multi-NAS setups, preferring aggregate health checks over fan-out calls, and using correct path conventions.
 
-The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across seven domains (auth, files, downloads, health, containers, shares/NFS, user management).
+The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across eight domains (auth, files, downloads, health, containers, shares/NFS, user management, updates & security) plus a reverse-proxy reference.
 
 **Install:**
 
