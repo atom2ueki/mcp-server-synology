@@ -447,6 +447,10 @@ class SynologyConfig:
                     username = nas_info.get("username", "")
                     password = nas_info.get("password", "")
 
+                    # `password_env` names an environment variable holding the
+                    # password, so a launcher can pass it in from a secret
+                    # manager and settings.json never stores it.
+                    password_env = nas_info.get("password_env")
                     # Optional 2FA/OTP support (DSM Login Web API Guide):
                     #   - `otp_code`: one-shot code from authenticator. Needed
                     #     only on the FIRST login after enabling 2FA on the
@@ -469,6 +473,34 @@ class SynologyConfig:
                             f"Missing 'username' for NAS '{nas_name}' in {SETTINGS_FILE}"
                         )
                         continue
+                    if password_env is not None:
+                        if not isinstance(password_env, str) or not password_env:
+                            # An empty string is not a variable name; say so
+                            # rather than warning about the variable ''.
+                            logger.warning(
+                                f"Invalid 'password_env' for NAS '{nas_name}' - expected "
+                                f"a non-empty string naming an environment variable, "
+                                f"got {password_env!r}"
+                            )
+                            continue
+                        # Key presence decides, not truthiness: the README says
+                        # an entry setting both is skipped, and an empty
+                        # plaintext password is still "both set".
+                        if "password" in nas_info:
+                            logger.warning(
+                                f"NAS '{nas_name}' sets both 'password' and 'password_env' "
+                                f"in {SETTINGS_FILE}; set only one"
+                            )
+                            continue
+                        password = os.environ.get(password_env, "")
+                        if not password:
+                            logger.warning(
+                                f"Missing 'password' for NAS '{nas_name}' in {SETTINGS_FILE}: "
+                                f"environment variable '{password_env}' named by "
+                                f"'password_env' is unset or empty"
+                            )
+                            continue
+
                     if not password:
                         logger.warning(
                             f"Missing 'password' for NAS '{nas_name}' in {SETTINGS_FILE}"
