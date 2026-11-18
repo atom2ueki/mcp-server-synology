@@ -774,15 +774,6 @@ class SynologyFileStation:
         if not formatted_path or formatted_path == "/":
             raise Exception("Invalid path - cannot delete root")
 
-        # File Station paths are share-relative, so a one-segment path is a whole
-        # shared folder, and directories are deleted recursively.
-        if formatted_path.count("/") == 1:
-            raise Exception(
-                f"Refusing to delete share root {formatted_path}: that would remove the "
-                "whole shared folder. Delete items inside it instead, or remove the "
-                "share in DSM."
-            )
-
         # Safety check for critical paths
         critical_paths = ["/volume1", "/homes", "/var", "/etc", "/usr", "/bin", "/sbin"]
         # Check if path IS or STARTS WITH any critical path (with / to prevent /volume11 bypass)
@@ -791,12 +782,35 @@ class SynologyFileStation:
         ):
             raise Exception(f"Cannot delete critical system path: {formatted_path}")
 
-        # Auto-detect if this is a file or directory
+        # Auto-detect if this is a file or directory. `file_info` stays None
+        # when the read fails, so the share-root guard below can tell "known
+        # file" from "could not tell".
+        file_info = None
         try:
             file_info = self.get_file_info(formatted_path)
             recursive = file_info.get("type") == "directory"
         except Exception:
             recursive = False  # Default to file behavior if can't determine
+
+        # File Station paths are share-relative, so a one-segment path names
+        # either a whole shared folder or a single file directly inside one.
+        # The folder deletes recursively and takes the share's contents with
+        # it, so refuse it -- and refuse an unidentified one-segment path too,
+        # since the file fallback above cannot tell an empty share root from
+        # a file. A path positively read as a file is an ordinary delete.
+        if formatted_path.count("/") == 1:
+            if recursive:
+                raise Exception(
+                    f"Refusing to delete share root {formatted_path}: that would remove the "
+                    "whole shared folder. Delete items inside it instead, or remove the "
+                    "share in DSM."
+                )
+            if file_info is None:
+                raise Exception(
+                    f"Refusing to delete {formatted_path}: it sits directly in a share root "
+                    "and its type could not be read, so it cannot be told apart from the "
+                    "shared folder itself."
+                )
 
         item_name = os.path.basename(formatted_path)
         item_type = "directory" if recursive else "file"

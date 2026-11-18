@@ -19,9 +19,11 @@
 ### Fixed
 - **`delete` refuses a share root.** File Station paths are share-relative and directories are
   deleted recursively, but the guard listed filesystem paths (`/volume1`, `/etc`, ...) that never
-  appear in a File Station path, so `delete("/photos")` would remove the whole shared folder. A
-  one-segment path is now refused before any request is made. The path is normalized first, so
-  `//photos`, `/./photos` and `/photos/2024/..` are caught too, and DSM receives the same
+  appear in a File Station path, so `delete("/photos")` would remove the whole shared folder. The
+  item's type is now read first and a one-segment directory is refused before any delete task is
+  started; a one-segment path whose type cannot be read is refused too. A file directly inside a
+  share root (`delete("/readme.txt")`) is still an ordinary delete. The path is normalized first,
+  so `//photos`, `/./photos` and `/photos/2024/..` are caught too, and DSM receives the same
   normalized path the guard checked.
 
 ## [1.8.0] - 2026-09-29
