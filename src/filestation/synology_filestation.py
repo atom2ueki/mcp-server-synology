@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import os
+import posixpath
 import tempfile
 import time
 import unicodedata
@@ -765,7 +766,9 @@ class SynologyFileStation:
         Returns:
             Dict with operation result
         """
-        formatted_path = self._format_path(path)
+        # Collapse "//", "." and ".." first, so the guards below and the request
+        # sent to DSM agree on what is being deleted.
+        formatted_path = posixpath.normpath("/" + self._format_path(path).lstrip("/"))
 
         # Validate path
         if not formatted_path or formatted_path == "/":
@@ -779,12 +782,40 @@ class SynologyFileStation:
         ):
             raise Exception(f"Cannot delete critical system path: {formatted_path}")
 
-        # Auto-detect if this is a file or directory
+        # Auto-detect if this is a file or directory. `file_info` stays None
+        # when the read fails, so the share-root guard below can tell "known
+        # file" from "could not tell".
+        file_info = None
         try:
             file_info = self.get_file_info(formatted_path)
             recursive = file_info.get("type") == "directory"
+        except FileNotFoundError:
+            # A missing path is not-found at any depth -- not an ambiguity to
+            # reason about, and not something to fall back to file behavior on.
+            raise
         except Exception:
-            recursive = False  # Default to file behavior if can't determine
+            recursive = False  # File behavior for a two-plus-segment path whose type is unknown; a one-segment unknown is refused below
+
+        # File Station paths are share-relative, so a one-segment path names
+        # either a whole shared folder or a single file directly inside one.
+        # The folder deletes recursively and takes the share's contents with
+        # it, so refuse it -- and refuse an unidentified one-segment path too,
+        # since the file fallback above cannot tell an empty share root from
+        # a file. A path positively read as a file is an ordinary delete.
+        if formatted_path.count("/") == 1:
+            if recursive:
+                raise Exception(
+                    f"Refusing to delete share root {formatted_path}: that would remove the "
+                    "whole shared folder. Delete items inside it instead, or remove the "
+                    "share in DSM."
+                )
+            if file_info is None:
+                raise Exception(
+                    f"Refusing to delete {formatted_path}: its type could not be read, so it "
+                    "cannot be told apart from the shared folder itself (a one-segment path is "
+                    "the whole share if it is a directory). If the path is right, retry once the "
+                    "read succeeds -- a transient DSM failure also lands here."
+                )
 
         item_name = os.path.basename(formatted_path)
         item_type = "directory" if recursive else "file"
