@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 # Force reimport of config module to avoid cached global instance
 def reload_config():
@@ -468,8 +470,12 @@ class TestPasswordEnv:
                 assert "nas" not in cfg.nas_configs
                 assert any("'NAS_PW'" in rec.message for rec in caplog.records)
 
-    def test_password_and_password_env_together_skipped(self, tmp_path, caplog):
-        """Test that setting both keys skips the entry rather than picking one."""
+    @pytest.mark.parametrize("plaintext", ["on-disk", ""])
+    def test_password_and_password_env_together_skipped(self, tmp_path, caplog, plaintext):
+        """Test that setting both keys skips the entry rather than picking one.
+
+        Key presence decides, not truthiness: an empty plaintext password is
+        still 'both set' -- the README's exactly-one-of rule."""
         import logging
 
         secrets_file = self._write_settings(
@@ -477,38 +483,7 @@ class TestPasswordEnv:
             {
                 "url": "https://nas.example.com",
                 "username": "a",
-                "password": "on-disk",
-                "password_env": "NAS_PW",
-            },
-        )
-
-        reload_config()
-
-        with clear_env(NAS_PW="s3cret"):
-            with patch("config.SETTINGS_FILE", secrets_file):
-                from config import SynologyConfig
-
-                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
-                    cfg = SynologyConfig()
-
-                assert "nas" not in cfg.nas_configs
-                assert any(
-                    "both 'password' and 'password_env'" in rec.message
-                    for rec in caplog.records
-                )
-
-
-    def test_empty_plaintext_password_with_password_env_is_both_set(self, tmp_path, caplog):
-        """An empty plaintext password still counts as 'both set' (key
-        presence, not truthiness) -- the README's exactly-one-of rule."""
-        import logging
-
-        secrets_file = self._write_settings(
-            tmp_path,
-            {
-                "url": "https://nas.example.com",
-                "username": "a",
-                "password": "",
+                "password": plaintext,
                 "password_env": "NAS_PW",
             },
         )
@@ -529,6 +504,7 @@ class TestPasswordEnv:
                 )
 
     def test_non_string_password_env_skipped(self, tmp_path, caplog):
+        """Test that a non-string `password_env` skips the entry."""
         import logging
 
         secrets_file = self._write_settings(

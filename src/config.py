@@ -451,6 +451,28 @@ class SynologyConfig:
                     # password, so a launcher can pass it in from a secret
                     # manager and settings.json never stores it.
                     password_env = nas_info.get("password_env")
+                    # Optional 2FA/OTP support (DSM Login Web API Guide):
+                    #   - `otp_code`: one-shot code from authenticator. Needed
+                    #     only on the FIRST login after enabling 2FA on the
+                    #     DSM account. After that first login, DSM issues a
+                    #     device token (`did`); paste it as `device_id` and
+                    #     remove `otp_code`.
+                    #   - `device_id`: long-lived trusted-device token. When
+                    #     present, DSM skips OTP for this login and for the
+                    #     silent re-auth path (DSM error 119 recovery).
+                    otp_code = nas_info.get("otp_code") or None
+                    device_id = nas_info.get("device_id") or None
+
+                    if not host and not explicit_url:
+                        logger.warning(
+                            f"Missing 'host' (or 'url') for NAS '{nas_name}' in {SETTINGS_FILE}"
+                        )
+                        continue
+                    if not username:
+                        logger.warning(
+                            f"Missing 'username' for NAS '{nas_name}' in {SETTINGS_FILE}"
+                        )
+                        continue
                     if password_env is not None:
                         if not isinstance(password_env, str) or not password_env:
                             # An empty string is not a variable name; say so
@@ -479,28 +501,6 @@ class SynologyConfig:
                             )
                             continue
 
-                    # Optional 2FA/OTP support (DSM Login Web API Guide):
-                    #   - `otp_code`: one-shot code from authenticator. Needed
-                    #     only on the FIRST login after enabling 2FA on the
-                    #     DSM account. After that first login, DSM issues a
-                    #     device token (`did`); paste it as `device_id` and
-                    #     remove `otp_code`.
-                    #   - `device_id`: long-lived trusted-device token. When
-                    #     present, DSM skips OTP for this login and for the
-                    #     silent re-auth path (DSM error 119 recovery).
-                    otp_code = nas_info.get("otp_code") or None
-                    device_id = nas_info.get("device_id") or None
-
-                    if not host and not explicit_url:
-                        logger.warning(
-                            f"Missing 'host' (or 'url') for NAS '{nas_name}' in {SETTINGS_FILE}"
-                        )
-                        continue
-                    if not username:
-                        logger.warning(
-                            f"Missing 'username' for NAS '{nas_name}' in {SETTINGS_FILE}"
-                        )
-                        continue
                     if not password:
                         logger.warning(
                             f"Missing 'password' for NAS '{nas_name}' in {SETTINGS_FILE}"
