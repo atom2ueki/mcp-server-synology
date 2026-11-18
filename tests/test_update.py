@@ -752,7 +752,7 @@ def test_posture_survives_an_unreadable_accounts_row():
     """A user row without a name is a section error, not a crash of the whole
     posture read."""
     routes = posture_routes()
-    routes[("SYNO.Core.User", "list")] = ok({"users": [{"expired": "normal"}]})
+    routes[("SYNO.Core.User", "list")] = ok({"users": [{"expired": "normal"}, {"name": "richard", "expired": "normal"}]})
     fake, g, p = dsm(routes)
     with g, p:
         result = SynologySecurity(BASE, "sid").posture()
