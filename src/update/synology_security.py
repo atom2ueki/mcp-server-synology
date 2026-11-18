@@ -199,12 +199,22 @@ class SynologySecurity:
 
         def accounts(d: Dict[str, Any]) -> Dict[str, Any]:
             # `expired` is "now" for a disabled account and "normal" for an
-            # enabled one; anything else is passed through as DSM gave it.
+            # enabled one. A missing `expired` (the additional read did not
+            # come back for that entry) is unknown, not enabled -- the same
+            # unknown-is-not-absent rule the administrators block below holds.
             by_name = {u.get("name"): u.get("expired") for u in d.get("users") or []}
+
+            def disabled(name: str) -> Optional[bool]:
+                if name not in by_name or by_name[name] is None:
+                    return None
+                return by_name[name] == "now"
+
             return {
-                "admin_disabled": by_name.get("admin") == "now" if "admin" in by_name else None,
-                "guest_disabled": by_name.get("guest") == "now" if "guest" in by_name else None,
-                "enabled_users": sorted(n for n, e in by_name.items() if e != "now"),
+                "admin_disabled": disabled("admin"),
+                "guest_disabled": disabled("guest"),
+                "enabled_users": sorted(
+                    n for n, e in by_name.items() if e is not None and e != "now"
+                ),
             }
 
         users = section(

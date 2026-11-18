@@ -590,7 +590,7 @@ misspelled `type` would silently take the default.
 
 For Claude Code, Claude Desktop, and claude.ai users, this repo ships an Anthropic Agent Skill that teaches Claude how to use the MCP tools effectively — picking the right tool, targeting the right NAS in multi-NAS setups, preferring aggregate health checks over fan-out calls, and using correct path conventions.
 
-The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across seven domains (auth, files, downloads, health, containers, shares/NFS, user management).
+The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across eight domains (auth, files, downloads, health, containers, shares/NFS, user management, updates & security) plus a reverse-proxy reference.
 
 **Install:**
 

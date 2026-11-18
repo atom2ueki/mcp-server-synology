@@ -1,8 +1,10 @@
 # DSM updates & security posture
 
 Read the NAS's update and security state, and change the handful of hardening
-settings DSM exposes. Every write requires `confirm=true`; the read-only pair
-does not.
+settings DSM exposes. Every write requires `confirm=true` — except
+`synology_dsm_update_install`, which without `confirm` is DSM's pre-install
+checks only (the required first step below); the read-only pair takes no
+confirm at all.
 
 ## Tools
 
