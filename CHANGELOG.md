@@ -22,8 +22,9 @@
   from `/homes`, cannot occur in a share-relative File Station path, so `delete("/photos")` would
   remove the whole shared folder. The item's type is now read first and a one-segment directory is
   refused before any delete task is started; a one-segment path whose type cannot be read is
-  refused too. A file directly inside a
-  share root (`delete("/readme.txt")`) is still an ordinary delete, and a path the NAS does not
+  refused too. A file inside a share (`delete("/photos/readme.txt")`) is still an ordinary delete,
+  as is a one-segment path positively read as a file (`delete("/readme.txt")` -- theoretical on
+  DSM, whose root holds only shares), and a path the NAS does not
   have is reported as not-found rather than as share-root ambiguity. The path is normalized first,
   so `//photos`, `/./photos` and `/photos/2024/..` are caught too, and DSM receives the same
   normalized path the guard checked.
