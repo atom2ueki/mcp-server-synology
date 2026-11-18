@@ -497,8 +497,38 @@ class TestPasswordEnv:
                     for rec in caplog.records
                 )
 
+
+    def test_empty_plaintext_password_with_password_env_is_both_set(self, tmp_path, caplog):
+        """An empty plaintext password still counts as 'both set' (key
+        presence, not truthiness) -- the README's exactly-one-of rule."""
+        import logging
+
+        secrets_file = self._write_settings(
+            tmp_path,
+            {
+                "url": "https://nas.example.com",
+                "username": "a",
+                "password": "",
+                "password_env": "NAS_PW",
+            },
+        )
+
+        reload_config()
+
+        with clear_env(NAS_PW="s3cret"):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert "nas" not in cfg.nas_configs
+                assert any(
+                    "both 'password' and 'password_env'" in rec.message
+                    for rec in caplog.records
+                )
+
     def test_non_string_password_env_skipped(self, tmp_path, caplog):
-        """Test that a non-string `password_env` skips the entry."""
         import logging
 
         secrets_file = self._write_settings(
