@@ -211,7 +211,7 @@ class SynologySecurity:
         # must not read as "no administrators" in a security audit -- the
         # section is only satisfied by a parse that produced a member list.
         administrators_raw = self._get(
-            "SYNO.Core.Group.Member", "list", 1, {"group": "administrators"}
+            "SYNO.Core.Group.Member", "list", 1, {"group": "administrators", "ingroup": "true"}
         )
         administrators = None
         if not administrators_raw.get("success"):
@@ -426,13 +426,20 @@ class SynologySecurity:
             }
         after_entries = _data(after).get("entries") or []
         # DSM may store an entry in its own notation (a /22 as a dotted mask),
-        # so membership is reported rather than asserted.
+        # so a CREATE whose request string is absent from the list is reported
+        # (not_listed_verbatim) rather than judged. A DELETE is the opposite:
+        # the entry is named exactly as the list showed it, so a verbatim
+        # survivor in the read-back proves the removal did not take -- the
+        # same read_back_mismatch the terminal and auto-block writes report.
+        not_listed_verbatim = [e for e in entries if (e in after_entries) != (method == "create")]
+        applied = method == "create" or not not_listed_verbatim
         return {
-            "success": True,
+            "success": applied,
             "before": before_entries,
             "after": after_entries,
             "requested": list(entries),
-            "not_listed_verbatim": [e for e in entries if (e in after_entries) != (method == "create")],
+            "not_listed_verbatim": not_listed_verbatim,
+            **({} if applied else {"error": _MISMATCH}),
         }
 
     def add_allow_list(self, entries: List[str]) -> Dict[str, Any]:

@@ -26,8 +26,8 @@
   checks without `confirm=true`, installs only past its blockers, warnings and EULA when they are
   each explicitly accepted, refuses a major-version upgrade), `synology_terminal_set`,
   `synology_autoblock_set`, `synology_autoblock_allow_add`/`_remove` and
-  `synology_https_redirect_set`. Every write changes only the fields asked for, sends back what
-  DSM's own UI sends, reads the setting back, and reports `outcome: unknown` when DSM gives no
+  `synology_https_redirect_set`. Every setting write changes only the fields asked for, sends back
+  what DSM's own UI sends, reads the setting back, and reports `outcome: unknown` when DSM gives no
   answer so a possibly-applied write is never blindly retried; a write DSM confirmed whose
   read-back then fails is reported as a success flagged `verified: false` with the read-back
   error, never as a plain failure. Enabling auto-block is refused

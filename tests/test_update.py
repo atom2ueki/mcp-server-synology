@@ -565,6 +565,27 @@ def test_allow_remove():
     assert result["not_listed_verbatim"] == []
 
 
+def test_allow_remove_that_survives_the_read_back_is_a_mismatch():
+    """A DSM delete that answers success without applying must not report
+    success: the entry is named exactly as listed, so a verbatim survivor in
+    the read-back proves the removal did not take."""
+    real = Stateful.__call__
+
+    def noop_delete(self, url, params=None, data=None, **kwargs):
+        sent = params if params is not None else data
+        if (sent["api"], sent["method"]) == ("SYNO.Core.Security.AutoBlock.Rules", "delete"):
+            return _response({"success": True, "data": {}})
+        return real(self, url, params=params, data=data, **kwargs)
+
+    fake, g, p = stateful(allow=["10.0.0.1", "192.168.0.5"])
+    with g, p, patch.object(Stateful, "__call__", noop_delete):
+        result = SynologySecurity(BASE, "sid").remove_allow_list(["10.0.0.1"])
+    assert result["success"] is False
+    assert result["error"]["code"] == "read_back_mismatch"
+    assert result["not_listed_verbatim"] == ["10.0.0.1"]
+    assert result["after"] == ["10.0.0.1", "192.168.0.5"]
+
+
 def test_https_redirect_sends_the_whole_setting_back_with_one_change():
     fake, g, p = stateful()
     with g, p:
