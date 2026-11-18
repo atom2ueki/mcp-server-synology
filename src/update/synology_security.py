@@ -168,7 +168,22 @@ class SynologySecurity:
             if not result.get("success"):
                 errors.append({"section": name, "error": result.get("error")})
                 return None
-            return shape(_data(result))
+            try:
+                return shape(_data(result))
+            except Exception as exc:
+                # A payload a shaper cannot read is a section error, not a
+                # crash of the whole posture read -- the same rule the
+                # administrators block below applies to unrecognized shapes.
+                errors.append(
+                    {
+                        "section": name,
+                        "error": {
+                            "code": "unrecognized_shape",
+                            "message": f"{name}: the reply could not be read ({exc})",
+                        },
+                    }
+                )
+                return None
 
         quickconnect = section(
             "quickconnect",
@@ -227,7 +242,7 @@ class SynologySecurity:
         # must not read as "no administrators" in a security audit -- the
         # section is only satisfied by a parse that produced a member list.
         administrators_raw = self._get(
-            "SYNO.Core.Group.Member", "list", 1, {"group": "administrators", "ingroup": "true"}
+            "SYNO.Core.Group.Member", "list", 1, {"group": "administrators", "ingroup": True}
         )
         administrators = None
         if not administrators_raw.get("success"):

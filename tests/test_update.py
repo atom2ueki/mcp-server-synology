@@ -742,6 +742,26 @@ def test_posture_administrators_tolerates_the_apis_shape_drift(payload, expected
     assert result["success"] is True
     assert result["administrators"] == expected
     assert result["errors"] == []
+    # ingroup is a declared boolean: it must travel as bare true, not a
+    # JSON string.
+    sent = fake.called("SYNO.Core.Group.Member", "list")[0][1]
+    assert sent["ingroup"] == "true"
+
+
+def test_posture_survives_an_unreadable_accounts_row():
+    """A user row without a name is a section error, not a crash of the whole
+    posture read."""
+    routes = posture_routes()
+    routes[("SYNO.Core.User", "list")] = ok({"users": [{"expired": "normal"}]})
+    fake, g, p = dsm(routes)
+    with g, p:
+        result = SynologySecurity(BASE, "sid").posture()
+    assert result["success"] is False
+    assert result["accounts"] is None
+    assert result["errors"][0]["section"] == "accounts"
+    assert result["errors"][0]["error"]["code"] == "unrecognized_shape"
+    # every other section still read
+    assert result["quickconnect"]["enabled"] is False
 
 
 def test_posture_administrators_unknown_shape_is_an_error_not_empty():
