@@ -79,6 +79,8 @@ READ_ONLY = {
     "synology_list_groups",
     "synology_list_group_members",
     "synology_get_user_permissions",
+    "synology_update_status",
+    "synology_security_posture",
 }
 
 # Creates something new or makes a reversible state change; removes or
@@ -102,6 +104,8 @@ ADDITIVE = {
     "synology_reverse_proxy_create",
     "synology_create_user",
     "synology_add_user_to_group",
+    "synology_dsm_update_download",
+    "synology_autoblock_allow_add",
 }
 
 # Deletes, overwrites, renames or replaces existing data or config, interrupts a
@@ -138,6 +142,11 @@ DESTRUCTIVE = {
     "synology_delete_user",
     "synology_remove_user_from_group",
     "synology_set_user_permissions",
+    "synology_terminal_set",
+    "synology_autoblock_set",
+    "synology_autoblock_allow_remove",
+    "synology_https_redirect_set",
+    "synology_dsm_update_install",
 }
 
 FENCE = re.compile(

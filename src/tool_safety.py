@@ -72,6 +72,8 @@ _READ_ONLY_TOOLS = (
     "synology_list_groups",
     "synology_list_group_members",
     "synology_get_user_permissions",
+    "synology_update_status",
+    "synology_security_posture",
 )
 
 _ADDITIVE_TOOLS = (
@@ -93,6 +95,11 @@ _ADDITIVE_TOOLS = (
     "synology_reverse_proxy_create",
     "synology_create_user",
     "synology_add_user_to_group",
+    "synology_dsm_update_download",
+    # A never-block entry weakens auto-block for the IPs it names, but adds
+    # and removes nothing -- the same line the table draws at
+    # synology_add_user_to_group, which grants group membership.
+    "synology_autoblock_allow_add",
 )
 
 _DESTRUCTIVE_TOOLS = (
@@ -127,6 +134,11 @@ _DESTRUCTIVE_TOOLS = (
     "synology_delete_user",
     "synology_remove_user_from_group",
     "synology_set_user_permissions",
+    "synology_terminal_set",  # can turn Telnet/SSH on, a security-weakening config change
+    "synology_autoblock_set",  # can disable auto-block outright
+    "synology_autoblock_allow_remove",  # can drop the MCP host's own never-block entry
+    "synology_https_redirect_set",  # replaces DSM web config and restarts its web server
+    "synology_dsm_update_install",  # replaces DSM; the NAS may reboot
 )
 
 TOOL_ANNOTATIONS: dict[str, types.ToolAnnotations] = {
