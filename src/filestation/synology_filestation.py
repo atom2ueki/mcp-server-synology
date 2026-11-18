@@ -811,9 +811,10 @@ class SynologyFileStation:
                 )
             if file_info is None:
                 raise Exception(
-                    f"Refusing to delete {formatted_path}: it sits directly in a share root "
-                    "and its type could not be read, so it cannot be told apart from the "
-                    "shared folder itself."
+                    f"Refusing to delete {formatted_path}: its type could not be read, so it "
+                    "cannot be told apart from the shared folder itself (a one-segment path is "
+                    "the whole share if it is a directory). If the path is right, retry once the "
+                    "read succeeds -- a transient DSM failure also lands here."
                 )
 
         item_name = os.path.basename(formatted_path)

@@ -803,7 +803,7 @@ filesystem paths like `/volume1/homes`.
 
 // Search for PDFs
 {
-  "path": "/documents", 
+  "path": "/documents",
   "pattern": ".pdf"
 }
 
