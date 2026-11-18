@@ -518,7 +518,6 @@ class TestPasswordEnv:
                 assert "nas" not in cfg.nas_configs
                 assert any("Invalid 'password_env'" in rec.message for rec in caplog.records)
 
-
     def test_empty_password_env_name_skipped(self, tmp_path, caplog):
         """Test that an empty-string `password_env` is invalid, not a variable named ''."""
         import logging

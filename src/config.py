@@ -461,7 +461,10 @@ class SynologyConfig:
                                 f"got {password_env!r}"
                             )
                             continue
-                        if password:
+                        # Key presence decides, not truthiness: the README says
+                        # an entry setting both is skipped, and an empty
+                        # plaintext password is still "both set".
+                        if "password" in nas_info:
                             logger.warning(
                                 f"NAS '{nas_name}' sets both 'password' and 'password_env' "
                                 f"in {SETTINGS_FILE}; set only one"
