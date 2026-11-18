@@ -433,6 +433,25 @@ def test_posture_summarises_every_section():
     assert result["security_advisor"]["schedule"]["enabled"] is True
 
 
+def test_posture_treats_a_missing_expired_as_unknown():
+    """A user entry whose expired field did not come back is unknown, not
+    enabled -- unknown is not absent, the same rule as administrators."""
+    routes = posture_routes()
+    routes[("SYNO.Core.User", "list")] = ok(
+        {
+            "users": [
+                {"name": "admin"},  # present, expired missing -> unknown
+                {"name": "richard", "expired": "normal"},
+            ]
+        }
+    )
+    fake, g, p = dsm(routes)
+    with g, p:
+        result = SynologySecurity(BASE, "sid").posture()
+    assert result["accounts"]["admin_disabled"] is None
+    assert result["accounts"]["enabled_users"] == ["richard"]
+
+
 def test_posture_reports_terminal_redirect_and_allow_list():
     routes = posture_routes()
     routes[("SYNO.Core.Security.AutoBlock.Rules", "list")] = ok({"ip_info": [{"ip": "192.168.0.5"}], "offset": 0, "total": 1})
