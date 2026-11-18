@@ -789,8 +789,9 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 
 ### 📁 File Operations
 
-File Station paths are share-relative — `/homes`, `/documents/notes.txt` — not
-filesystem paths like `/volume1/homes`.
+File Station paths are share-relative — `/photo`, `/documents/notes.txt` — not
+filesystem paths like `/volume1/photo`. (Note: `delete` additionally refuses
+paths under `/homes`, DSM's home-folder share.)
 
 #### ✅ Creating Files and Directories
 ![File Creation](assets/add.png)

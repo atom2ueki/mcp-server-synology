@@ -794,7 +794,7 @@ class SynologyFileStation:
             # reason about, and not something to fall back to file behavior on.
             raise
         except Exception:
-            recursive = False  # Default to file behavior if can't determine
+            recursive = False  # File behavior for a two-plus-segment path whose type is unknown; a one-segment unknown is refused below
 
         # File Station paths are share-relative, so a one-segment path names
         # either a whole shared folder or a single file directly inside one.
