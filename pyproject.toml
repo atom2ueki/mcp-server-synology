@@ -72,4 +72,4 @@ where = ["src"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["mcp_server", "config", "multiclient_bridge"]
+py-modules = ["mcp_server", "config", "multiclient_bridge", "tool_safety"]
