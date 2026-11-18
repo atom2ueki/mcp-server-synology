@@ -1509,9 +1509,9 @@ class SynologyMCPServer:
 
         The structured body is kept either way; raising is only how the MCP
         layer is told to set isError. Every module method returns a dict; a
-        non-dict here is a broken module contract, and indexing it raises
-        into the generic error path (isError) rather than rendering `null`
-        as a success.
+        non-dict here is a broken module contract, and calling `.get` on it
+        raises into the generic error path (isError) rather than rendering
+        `null` as a success.
         """
         if result.get("success") is False:
             raise ToolFailureError(result)

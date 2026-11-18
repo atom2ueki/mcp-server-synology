@@ -19,8 +19,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from mcp import Client
 
-from config import config
-
 FAILURE = {"success": False, "error": {"code": 105, "message": "permission denied"}}
 
 HEALTH_TOOLS = [
@@ -124,7 +122,6 @@ def _arguments(tool):
 
 
 def _server(monkeypatch):
-    monkeypatch.setattr(config, "auto_login", True)
     from mcp_server import SynologyMCPServer
 
     return SynologyMCPServer()
