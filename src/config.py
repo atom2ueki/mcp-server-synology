@@ -452,10 +452,13 @@ class SynologyConfig:
                     # manager and settings.json never stores it.
                     password_env = nas_info.get("password_env")
                     if password_env is not None:
-                        if not isinstance(password_env, str):
+                        if not isinstance(password_env, str) or not password_env:
+                            # An empty string is not a variable name; say so
+                            # rather than warning about the variable ''.
                             logger.warning(
                                 f"Invalid 'password_env' for NAS '{nas_name}' - expected "
-                                f"string, got {type(password_env)}"
+                                f"a non-empty string naming an environment variable, "
+                                f"got {password_env!r}"
                             )
                             continue
                         if password:
@@ -467,9 +470,9 @@ class SynologyConfig:
                         password = os.environ.get(password_env, "")
                         if not password:
                             logger.warning(
-                                f"Missing 'password' for NAS '{nas_name}': environment "
-                                f"variable '{password_env}' named by 'password_env' is "
-                                "unset or empty"
+                                f"Missing 'password' for NAS '{nas_name}' in {SETTINGS_FILE}: "
+                                f"environment variable '{password_env}' named by "
+                                f"'password_env' is unset or empty"
                             )
                             continue
 

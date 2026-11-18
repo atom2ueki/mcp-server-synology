@@ -518,6 +518,31 @@ class TestPasswordEnv:
                 assert "nas" not in cfg.nas_configs
                 assert any("Invalid 'password_env'" in rec.message for rec in caplog.records)
 
+
+    def test_empty_password_env_name_skipped(self, tmp_path, caplog):
+        """Test that an empty-string `password_env` is invalid, not a variable named ''."""
+        import logging
+
+        secrets_file = self._write_settings(
+            tmp_path,
+            {"url": "https://nas.example.com", "username": "a", "password_env": ""},
+        )
+
+        reload_config()
+
+        with clear_env():
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert "nas" not in cfg.nas_configs
+                assert any(
+                    "non-empty string naming an environment variable" in rec.message
+                    for rec in caplog.records
+                )
+
     def test_save_device_id_keeps_password_out_of_file(self, tmp_path):
         """Test that persisting a device token never writes the password to disk."""
         secrets_file = self._write_settings(
