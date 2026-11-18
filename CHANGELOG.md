@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **`password_env` per-NAS setting** names an environment variable to read the NAS password from
+  when `settings.json` is loaded, so a launcher can pass it in from a secret manager and the file
+  never stores it. Previously a `settings.json` entry needed a plaintext `password`, and the legacy
+  `SYNOLOGY_PASSWORD` variable only applied when no NAS was defined, which also meant no persisted
+  `device_id`. An entry that sets both `password` and `password_env`, or whose variable is unset or
+  empty, is skipped with a warning. (#137)
 - **Login Portal reverse proxy tools** — `synology_reverse_proxy_list`, `_get`, `_create`, `_update`
   and `_delete`, plus `synology_access_control_profile_list`, wrapping
   `SYNO.Core.AppPortal.ReverseProxy` and `SYNO.Core.AppPortal.AccessControl`. Entries are returned
@@ -49,6 +55,21 @@
   `tools/call` itself, applies the same fence, and its `tools/list` and `tools/call` responses now
   use the MCP wire names (`inputSchema`, `readOnlyHint`) instead of Python field names
   (`input_schema`, `read_only_hint`).
+
+### Fixed
+- **A DSM failure now sets `isError` for health, NFS, Container Manager and user-management
+  tools.** DSM reports most failures as HTTP 200 with `success: false`, and these handlers returned
+  that body as ordinary content, so a refused `synology_delete_user` or a failed
+  `synology_set_user_permissions` reached the client flagged as a success. They now go through
+  `_emit`, as the iSCSI and reverse-proxy handlers already did; the JSON body is preserved on the
+  stdio and HTTP transports. Two exceptions: `synology_health_summary` composes its own
+  `success: true` summary and omits failed sub-reads (pre-existing), and the Xiaozhi bridge now
+  replaces these four modules' failed-call bodies with its generic `Error executing ...` text —
+  the bridge's catch-all is pre-existing, but the loss of the JSON body on that transport is new
+  for these tools here (the bridge's `ToolFailureError` handling on #130's branch restores it).
+- `synology_container_image_pull`, `synology_container_registry_download` and
+  `synology_container_registry_tags` declare `repository` as required. The handlers already read it
+  unconditionally, so a call without it failed with a bare `KeyError: 'repository'`.
 
 ## [1.8.0] - 2026-09-29
 
