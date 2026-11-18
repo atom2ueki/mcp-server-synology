@@ -160,6 +160,7 @@ def test_package_status_flags_only_packages_with_an_operation():
             "packages": [
                 {"id": "SMBService", "name": "SMB Service", "version": "4.15.13-4251", "additional": {"available_operation": {}, "status": "running", "autoupdate": True}},
                 {"id": "WebStation", "name": "Web Station", "version": "4.3.1-0530", "additional": {"available_operation": {"upgrade": {"version": "4.3.2-0600"}}, "status": "running", "autoupdate": True}},
+                {"id": "Other", "name": "Other", "version": "1.0", "additional": {"available_operation": {"stop": {}}, "status": "running", "autoupdate": False}},
             ]
         }
     )
@@ -172,7 +173,10 @@ def test_package_status_flags_only_packages_with_an_operation():
         result = upd().package_update_status()
     assert result["pending_count"] == 1
     assert result["pending"][0]["id"] == "WebStation"
-    assert result["installed_count"] == 2
+    assert result["installed_count"] == 3
+    # The "stop" operation is not an upgrade/repair/forcereplaced, so Other is
+    # installed but not pending.
+    assert {p["id"] for p in result["pending"]} == {"WebStation"}
     assert result["auto_update"] == {"enabled": True, "all_packages": True, "important_only": False}
     (_, sent, _), = fake.called("SYNO.Core.Package", "list")
     assert json.loads(sent["additional"])[0] == "available_operation"
@@ -438,6 +442,7 @@ def test_posture_reports_terminal_redirect_and_allow_list():
     assert result["dsm_web"]["https_redirect"] is False
     assert result["dsm_web"]["https_port"] == 5001
     assert result["auto_block"]["allow_list"] == ["192.168.0.5"]
+    assert result["auto_block_allow_list"] == ["192.168.0.5"]
     sent = fake.called("SYNO.Core.Security.AutoBlock.Rules", "list")[0][1]
     assert sent["type"] == '"allow"'
 
@@ -589,6 +594,48 @@ def test_allow_remove():
         result = SynologySecurity(BASE, "sid").remove_allow_list(["10.0.0.1"])
     assert result["after"] == ["192.168.0.5"]
     assert result["presence_mismatched"] == []
+
+
+def test_allow_add_literal_ip_missing_from_the_read_back_is_a_mismatch():
+    """A create DSM accepted without applying must report the literal IP as
+    not added; the caller would otherwise believe the address is exempt from
+    auto-block when it is not."""
+    real = Stateful.__call__
+
+    def noop_create(self, url, params=None, data=None, **kwargs):
+        sent = params if params is not None else data
+        if (sent["api"], sent["method"]) == ("SYNO.Core.Security.AutoBlock.Rules", "create"):
+            return _response({"success": True, "data": {}})
+        return real(self, url, params=params, data=data, **kwargs)
+
+    fake, g, p = stateful()
+    with g, p, patch.object(Stateful, "__call__", noop_create):
+        result = SynologySecurity(BASE, "sid").add_allow_list(["10.0.0.9"])
+    assert result["success"] is False
+    assert result["error"]["code"] == "read_back_mismatch"
+    assert result["presence_mismatched"] == ["10.0.0.9"]
+    assert result["after"] == []
+
+
+def test_allow_add_subnet_stored_in_another_notation_still_succeeds():
+    """DSM may store a subnet as a dotted mask; a notation-prone entry absent
+    verbatim is reported (presence_mismatched) but not judged."""
+    real = Stateful.__call__
+
+    def renames_notation(self, url, params=None, data=None, **kwargs):
+        sent = params if params is not None else data
+        if (sent["api"], sent["method"]) == ("SYNO.Core.Security.AutoBlock.Rules", "create"):
+            decoded = json.loads(sent["ip"])
+            self.allow.extend("192.168.0.0/255.255.252.0" for _ in decoded)
+            return _response({"success": True, "data": {}})
+        return real(self, url, params=params, data=data, **kwargs)
+
+    fake, g, p = stateful()
+    with g, p, patch.object(Stateful, "__call__", renames_notation):
+        result = SynologySecurity(BASE, "sid").add_allow_list(["192.168.0.0/22"])
+    assert result["success"] is True
+    assert result["verified"] is True
+    assert result["presence_mismatched"] == ["192.168.0.0/22"]
 
 
 def test_allow_remove_that_survives_the_read_back_is_a_mismatch():

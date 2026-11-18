@@ -177,13 +177,13 @@ class SynologySecurity:
         )
         auto_block = section("auto_block", self._auto_block(), self._shape_auto_block)
         allow_list = section("auto_block_allow_list", self._allow_list(), lambda d: d.get("entries"))
-        auto_block_allow_list = None
+        # The allow list is reported at the top level as well: the nested
+        # attach below is skipped when the auto_block read failed, and a
+        # successful read must not be dropped with it -- or mean different
+        # things under one key depending on how a sibling read fared.
+        auto_block_allow_list = allow_list
         if isinstance(auto_block, dict):
             auto_block["allow_list"] = allow_list
-        elif allow_list is not None:
-            # The auto-block read failed but the allow list did not; report it
-            # under its own key rather than drop a successful read.
-            auto_block_allow_list = allow_list
         terminal = section("terminal", self._terminal(), self._shape_terminal)
         web = section("dsm_web", self._web_dsm(), self._shape_web_dsm)
         firewall = section(
@@ -451,7 +451,16 @@ class SynologySecurity:
         # The field names entries whose presence in the read-back contradicts
         # the request, in either direction.
         presence_mismatched = [e for e in entries if (e in after_entries) != (method == "create")]
-        applied = method == "create" or not presence_mismatched
+        if method == "create":
+            # A subnet or range may be stored in DSM's own notation (a /22 as
+            # a dotted mask), so those are reported rather than judged. A
+            # literal IP is stored verbatim: absent from the read-back, the
+            # add did not take -- the same read_back_mismatch the delete
+            # direction reports for the identical contradiction.
+            hard = [e for e in presence_mismatched if "/" not in e and "~" not in e]
+            applied = not hard
+        else:
+            applied = not presence_mismatched
         return {
             "success": applied,
             "verified": True,

@@ -196,9 +196,10 @@ class SynologyUpdate:
     def package_update_status(self) -> Dict[str, Any]:
         """Installed packages, which have an update pending, and the auto-update policy.
 
-        A package has an update pending when DSM reports a non-empty
-        `available_operation` for it -- the test Package Center's own
-        `_isUpgradable` applies (`upgrade`, `repair` or `forcereplaced`).
+        A package has an update pending when DSM's `available_operation` for it
+        carries one of the operations Package Center's own `_isUpgradable`
+        accepts (`upgrade`, `repair` or `forcereplaced`); other operations in
+        the same field do not count.
         """
         listing = self._call(
             "SYNO.Core.Package",
@@ -217,6 +218,10 @@ class SynologyUpdate:
         for pkg in _data(listing).get("packages") or []:
             extra = pkg.get("additional") or {}
             operations = extra.get("available_operation") or {}
+            # Package Center's own _isUpgradable: an update is pending only
+            # for the upgrade/repair/forcereplaced operations, not for any
+            # non-empty available_operation.
+            upgradable = any(op in operations for op in ("upgrade", "repair", "forcereplaced"))
             row = {
                 "id": pkg.get("id"),
                 "name": pkg.get("name"),
@@ -225,7 +230,7 @@ class SynologyUpdate:
                 "autoupdate": extra.get("autoupdate"),
             }
             installed.append(row)
-            if operations:
+            if upgradable:
                 pending.append({**row, "available_operation": operations})
         policy = _data(setting)
         return {
