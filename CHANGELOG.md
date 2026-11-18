@@ -21,7 +21,11 @@
   tools.** DSM reports most failures as HTTP 200 with `success: false`, and these handlers returned
   that body as ordinary content, so a refused `synology_delete_user` or a failed
   `synology_set_user_permissions` reached the client flagged as a success. They now go through
-  `_emit`, as the iSCSI and reverse-proxy handlers already did; the JSON body is unchanged.
+  `_emit`, as the iSCSI and reverse-proxy handlers already did; the JSON body is preserved on the
+  stdio and HTTP transports. Two exceptions keep their shape: `synology_health_summary` composes
+  its own `success: true` summary and omits failed sub-reads (pre-existing), and the Xiaozhi
+  bridge replaces a failed call's body with its generic `Error executing ...` text (pre-existing;
+  fixed separately by the bridge's `ToolFailureError` handling).
 - `synology_container_image_pull`, `synology_container_registry_download` and
   `synology_container_registry_tags` declare `repository` as required. The handlers already read it
   unconditionally, so a call without it failed with a bare `KeyError: 'repository'`.

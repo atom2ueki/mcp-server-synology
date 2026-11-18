@@ -45,7 +45,7 @@ NFS_TOOLS = [
 ]
 
 CONTAINER_TOOLS = [
-    "synology_container_list",
+    "synology_container_health_summary",
     "synology_container_disk_usage",
     "synology_container_get",
     "synology_container_start",
@@ -68,6 +68,8 @@ CONTAINER_TOOLS = [
     "synology_container_image_get",
     "synology_container_image_delete",
     "synology_container_image_pull",
+    "synology_container_image_prune_preview",
+    "synology_container_image_prune",
     "synology_container_registry_list",
     "synology_container_registry_search",
     "synology_container_registry_tags",
@@ -133,7 +135,6 @@ def _call(server, getter, name):
     with (
         patch.object(server, getter, return_value=module),
         patch.object(server, "_get_base_url", return_value="https://nas:5001"),
-        patch.object(server, "_resolve_base_url", return_value="https://nas:5001"),
     ):
 
         async def run():

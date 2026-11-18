@@ -1504,14 +1504,16 @@ class SynologyMCPServer:
         )
 
     @staticmethod
-    def _emit(result) -> list[types.TextContent]:
+    def _emit(result: dict) -> list[types.TextContent]:
         """Render a tool result, raising when the operation did not succeed.
 
         The structured body is kept either way; raising is only how the MCP
-        layer is told to set isError. Results that are not dicts (a bare list)
-        carry no success flag and are rendered as-is.
+        layer is told to set isError. Every module method returns a dict; a
+        non-dict here is a broken module contract, and indexing it raises
+        into the generic error path (isError) rather than rendering `null`
+        as a success.
         """
-        if isinstance(result, dict) and result.get("success") is False:
+        if result.get("success") is False:
             raise ToolFailureError(result)
         return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
