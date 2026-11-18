@@ -789,6 +789,10 @@ class SynologyFileStation:
         try:
             file_info = self.get_file_info(formatted_path)
             recursive = file_info.get("type") == "directory"
+        except FileNotFoundError:
+            # A missing path is not-found at any depth -- not an ambiguity to
+            # reason about, and not something to fall back to file behavior on.
+            raise
         except Exception:
             recursive = False  # Default to file behavior if can't determine
 

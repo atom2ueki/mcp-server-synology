@@ -58,15 +58,29 @@ def test_critical_path_is_refused(path):
             fs.delete(path)
     request.assert_not_called()
 
+
 @pytest.mark.parametrize("path", ["/photos", "/photo.txt", "photos", "//photos"])
 def test_unreadable_share_root_path_is_refused(path):
     """A one-segment path whose type cannot be read could be the share itself."""
     fs = _fs()
     with (
         patch.object(fs, "_make_request") as request,
-        patch.object(fs, "get_file_info", side_effect=FileNotFoundError("gone")),
+        patch.object(fs, "get_file_info", side_effect=RuntimeError("unreadable")),
     ):
         with pytest.raises(Exception, match="cannot be told apart"):
+            fs.delete(path)
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["/photo.txt", "/photos/gone.jpg"])
+def test_missing_path_raises_not_found(path):
+    """A path the NAS does not have is not-found, at any depth."""
+    fs = _fs()
+    with (
+        patch.object(fs, "_make_request") as request,
+        patch.object(fs, "get_file_info", side_effect=FileNotFoundError("File not found: gone")),
+    ):
+        with pytest.raises(FileNotFoundError, match="not found"):
             fs.delete(path)
     request.assert_not_called()
 

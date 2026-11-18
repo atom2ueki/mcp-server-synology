@@ -790,23 +790,25 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 ### 📁 File Operations
 
 #### ✅ Creating Files and Directories
-![File Creation](assets/add.png)
+
+File Station paths are share-relative — `/homes`, `/documents/notes.txt` — not
+filesystem paths like `/volume1/homes`.
 
 ```json
 // List directory
 {
-  "path": "/volume1/homes"
+  "path": "/homes"
 }
 
 // Search for PDFs
 {
-  "path": "/volume1/documents", 
+  "path": "/documents", 
   "pattern": ".pdf"
 }
 
 // Create new file
 {
-  "path": "/volume1/documents/notes.txt",
+  "path": "/documents/notes.txt",
   "content": "My important notes\nLine 2 of notes",
   "overwrite": false
 }
@@ -818,13 +820,13 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 ```json
 // Delete file or directory (auto-detects type)
 {
-  "path": "/volume1/temp/old-file.txt"
+  "path": "/temp/old-file.txt"
 }
 
 // Move file
 {
-  "source_path": "/volume1/temp/file.txt",
-  "destination_path": "/volume1/archive/file.txt"
+  "source_path": "/temp/file.txt",
+  "destination_path": "/archive/file.txt",
 }
 ```
 
@@ -837,7 +839,7 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 // Create download task
 {
   "uri": "https://example.com/file.zip",
-  "destination": "/volume1/downloads"
+  "destination": "/downloads"
 }
 
 // Pause tasks
