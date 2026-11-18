@@ -56,6 +56,8 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard). The file require
 }
 ```
 
+Instead of `password`, a NAS entry may set `password_env` to the NAME of an environment variable holding the password (read at load time; set exactly one of the two).
+
 `otp_code` and `device_id` are both optional. `device_id` wins over `otp_code`. Workflow: set `otp_code` once → start the server → copy the returned `did` into `device_id` → delete `otp_code`. From then on, OTP is no longer needed.
 
 Port 5001 enables HTTPS; anything else uses HTTP. The `note` is for the user's reference — surface it when listing NAS units to a user, since human-readable notes ("primary", "backup") are easier to reason about than `nas1`/`nas2`.
