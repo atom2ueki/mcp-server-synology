@@ -2,8 +2,9 @@
 
 File Station paths are share-relative (`/photos/2024/a.jpg`), and `delete` is
 recursive for directories. The old guard listed `/volume1`, `/etc` and other
-filesystem paths, which never appear in a File Station path, so it did not
-stop `delete("/photos")` from removing a whole share. These tests check that
+filesystem paths that, apart from `/homes`, cannot occur in a share-relative
+File Station path, so it did not stop `delete("/photos")` from removing a
+whole share. These tests check that
 no Delete task is ever started on a share root -- including spellings that
 normalize to one, and a path whose type cannot be read -- while a file
 directly inside a share root and ordinary paths deeper in a share still go
