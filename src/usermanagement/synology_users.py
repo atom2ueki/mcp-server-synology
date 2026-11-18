@@ -189,40 +189,17 @@ class SynologyUserManager:
         )
 
     def _group_member_names(self, group: str) -> Optional[Set[str]]:
-        """Return the set of user names currently in a group, or None if unreadable.
-
-        SYNO.Core.Group.Member's response shape has drifted across DSM
-        versions (data.users vs data.members vs a bare list), so every known
-        shape is tolerated here.
-        """
-        result = self._api_call(
-            "SYNO.Core.Group.Member",
-            "list",
-            extra_params={
-                "group": group,
-                "ingroup": "true",
-            },
+        """Return the set of user names currently in a group, or None if unreadable."""
+        return group_member_names_from(
+            self._api_call(
+                "SYNO.Core.Group.Member",
+                "list",
+                extra_params={
+                    "group": group,
+                    "ingroup": "true",
+                },
+            )
         )
-        if not result.get("success"):
-            return None
-        data = result.get("data")
-        entries: Any = None
-        if isinstance(data, dict):
-            entries = data.get("users", data.get("members"))
-        elif isinstance(data, list):
-            entries = data
-        # An unrecognized payload is unreadable, not an empty group: returning
-        # an empty set here would let a removal "verify" absence the response
-        # never actually showed.
-        if not isinstance(entries, list):
-            return None
-        names: Set[str] = set()
-        for entry in entries or []:
-            if isinstance(entry, dict) and entry.get("name"):
-                names.add(entry["name"])
-            elif isinstance(entry, str):
-                names.add(entry)
-        return names
 
     def _verify_membership_change(
         self, username: str, groups: List[str], expect_member: bool
@@ -351,3 +328,32 @@ class SynologyUserManager:
             },
             use_post=True,
         )
+
+
+def group_member_names_from(result: Dict[str, Any]) -> Optional[Set[str]]:
+    """Parse a SYNO.Core.Group.Member/list reply into member names, or None if unreadable.
+
+    The response shape has drifted across DSM versions (data.users vs
+    data.members vs a bare list), so every known shape is tolerated here.
+    An unrecognized payload is unreadable, not an empty group: returning an
+    empty set would let a removal "verify" absence the response never
+    actually showed.
+    """
+    if not result.get("success"):
+        return None
+    data = result.get("data")
+    entries: Any = None
+    if isinstance(data, dict):
+        entries = data.get("users", data.get("members"))
+    elif isinstance(data, list):
+        entries = data
+    if not isinstance(entries, list):
+        return None
+    names: Set[str] = set()
+    for entry in entries or []:
+        if isinstance(entry, dict) and entry.get("name"):
+            names.add(entry["name"])
+        elif isinstance(entry, str):
+            names.add(entry)
+    return names
+

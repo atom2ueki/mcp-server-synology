@@ -19,14 +19,18 @@
   read-only `synology_update_status` (installed DSM version, available update and its download
   state, packages with pending updates, auto-update policy) and `synology_security_posture`
   (QuickConnect, auto-block and its allow list, Telnet/SSH, HTTPS redirect, firewall, 2FA
-  enforcement, account state, Security Advisor findings), plus confirm-gated
+  enforcement, account state, administrators (every shape the API has used across DSM versions,
+  with an unrecognized one reported as an error rather than an empty list), Security Advisor
+  findings), plus confirm-gated
   `synology_dsm_update_download`, `synology_dsm_update_install` (dry-runs DSM's own pre-install
   checks without `confirm=true`, installs only past its blockers, warnings and EULA when they are
   each explicitly accepted, refuses a major-version upgrade), `synology_terminal_set`,
   `synology_autoblock_set`, `synology_autoblock_allow_add`/`_remove` and
   `synology_https_redirect_set`. Every write changes only the fields asked for, sends back what
   DSM's own UI sends, reads the setting back, and reports `outcome: unknown` when DSM gives no
-  answer so a possibly-applied write is never blindly retried. Enabling auto-block is refused
+  answer so a possibly-applied write is never blindly retried; a write DSM confirmed whose
+  read-back then fails is reported as a success flagged `verified: false` with the read-back
+  error, never as a plain failure. Enabling auto-block is refused
   while the allow list is empty. The tools are classified in `src/tool_safety.py`. (#130)
 
 - **MCP safety annotations on every tool.** Each tool now carries `ToolAnnotations`: 54 are

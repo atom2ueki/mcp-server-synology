@@ -596,6 +596,81 @@ def test_https_redirect_unreadable_after_restart_is_reported_unverified():
     assert result["success"] is True and result["verified"] is False
 
 
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"users": [{"name": "richard"}]}, ["richard"]),
+        ({"members": [{"name": "ops_admin"}]}, ["ops_admin"]),
+        (["ops_admin"], ["ops_admin"]),
+    ],
+    ids=["users", "members", "bare-list"],
+)
+def test_posture_administrators_tolerates_the_apis_shape_drift(payload, expected):
+    """SYNO.Core.Group.Member/list has answered data.users, data.members and a
+    bare list across DSM versions; every shape must name the administrators
+    rather than report an empty list."""
+    routes = posture_routes()
+    routes[("SYNO.Core.Group.Member", "list")] = ok(payload)
+    fake, g, p = dsm(routes)
+    with g, p:
+        result = SynologySecurity(BASE, "sid").posture()
+    assert result["success"] is True
+    assert result["administrators"] == expected
+    assert result["errors"] == []
+
+
+def test_posture_administrators_unknown_shape_is_an_error_not_empty():
+    """A shape the parser does not recognize must not read as 'no administrators'."""
+    routes = posture_routes()
+    routes[("SYNO.Core.Group.Member", "list")] = ok({"total": 1})
+    fake, g, p = dsm(routes)
+    with g, p:
+        result = SynologySecurity(BASE, "sid").posture()
+    assert result["success"] is False
+    assert result["administrators"] is None
+    assert result["errors"][0]["section"] == "administrators"
+    assert result["errors"][0]["error"]["code"] == "unrecognized_shape"
+
+
+READ_BACKS = [
+    (("SYNO.Core.Terminal", "set"), ("SYNO.Core.Terminal", "get"),
+     lambda sec: sec.set_terminal(enable_telnet=False)),
+    (("SYNO.Core.Security.AutoBlock", "set"), ("SYNO.Core.Security.AutoBlock", "get"),
+     lambda sec: sec.set_auto_block(attempts=5)),
+    (("SYNO.Core.Security.AutoBlock.Rules", "create"),
+     ("SYNO.Core.Security.AutoBlock.Rules", "list"),
+     lambda sec: sec.add_allow_list(["10.0.0.1"])),
+]
+
+
+@pytest.mark.parametrize(
+    "write_key,read_key,write", READ_BACKS, ids=["terminal", "autoblock", "allow-list"]
+)
+def test_confirmed_write_with_failed_read_back_is_unverified_success(write_key, read_key, write):
+    """DSM accepted the write; the confirming read failed. The write is
+    reported as applied-but-unverified with a re-read note, not as a failure
+    the caller would retry or disbelieve."""
+    real = Stateful.__call__
+
+    def read_back_fails_after_write(self, url, params=None, data=None, **kwargs):
+        sent = params if params is not None else data
+        if (sent["api"], sent["method"]) == read_key and any(
+            c[0] == write_key for c in self.calls
+        ):
+            self.calls.append(((sent["api"], sent["method"]), sent, "get"))
+            return _response({"success": False, "error": {"code": 119}})
+        return real(self, url, params=params, data=data, **kwargs)
+
+    fake, g, p = stateful(allow=["10.0.0.1"])
+    with g, p, patch.object(Stateful, "__call__", read_back_fails_after_write):
+        result = write(SynologySecurity(BASE, "sid"))
+    assert result["success"] is True
+    assert result["verified"] is False
+    assert result["after"] is None
+    assert result["read_back_error"]["code"] == 119
+    assert "synology_security_posture" in result["note"]
+
+
 WRITES = [
     (("SYNO.Core.Terminal", "set"), lambda sec: sec.set_terminal(enable_telnet=False)),
     (("SYNO.Core.Security.AutoBlock", "set"), lambda sec: sec.set_auto_block(attempts=5)),
@@ -712,6 +787,19 @@ def test_install_without_confirm_only_prechecks(server):
         content = asyncio.run(server._dispatch_tool("synology_dsm_update_install", {"base_url": BASE}))
     body = json.loads(content[0].text)
     assert body["installed"] is False
+    assert not fake.called("SYNO.Core.Upgrade", "start")
+
+
+def test_install_dry_run_note_names_blockers_when_there_are_any(server):
+    """Without confirm the call only checks; when the checks report blockers,
+    the note must not tell the caller to re-issue an install that would be
+    refused."""
+    fake, g, p = dsm(install_routes(state={"status": "none", "allow_upgrade": True}))
+    with g, p:
+        content = asyncio.run(server._dispatch_tool("synology_dsm_update_install", {"base_url": BASE}))
+    body = json.loads(content[0].text)
+    assert body["installed"] is False
+    assert "blockers" in body["note"]
     assert not fake.called("SYNO.Core.Upgrade", "start")
 
 

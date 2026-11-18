@@ -28,6 +28,7 @@
 import json
 from typing import Any, Callable, Dict, List, Optional
 
+from usermanagement.synology_users import group_member_names_from
 from utils.synology_api import SynologyAPIClient
 
 # Security Advisor rule statuses that are not findings.
@@ -205,11 +206,31 @@ class SynologySecurity:
             self._get("SYNO.Core.User", "list", 1, {"additional": ["expired"], "offset": 0, "limit": -1}),
             accounts,
         )
-        administrators = section(
-            "administrators",
-            self._get("SYNO.Core.Group.Member", "list", 1, {"group": "administrators"}),
-            lambda d: sorted(u.get("name") for u in d.get("users") or []),
+        # SYNO.Core.Group.Member's shape has drifted across DSM versions
+        # (data.users vs data.members vs a bare list), and a shape miss here
+        # must not read as "no administrators" in a security audit -- the
+        # section is only satisfied by a parse that produced a member list.
+        administrators_raw = self._get(
+            "SYNO.Core.Group.Member", "list", 1, {"group": "administrators"}
         )
+        administrators = None
+        if not administrators_raw.get("success"):
+            errors.append({"section": "administrators", "error": administrators_raw.get("error")})
+        else:
+            names = group_member_names_from(administrators_raw)
+            if names is None:
+                errors.append(
+                    {
+                        "section": "administrators",
+                        "error": {
+                            "code": "unrecognized_shape",
+                            "message": "SYNO.Core.Group.Member/list returned no member list; "
+                            "administrators are unknown, not absent",
+                        },
+                    }
+                )
+            else:
+                administrators = sorted(names)
 
         def advisor_summary(d: Dict[str, Any]) -> Dict[str, Any]:
             items = d.get("items") or {}
@@ -299,7 +320,17 @@ class SynologySecurity:
             return {**_write_failed("SYNO.Core.Terminal/set", written, "Re-read it with synology_security_posture before retrying."), "before": self._shape_terminal(current)}
         after = self._terminal()
         if not after.get("success"):
-            return {**_failed("SYNO.Core.Terminal/get (read-back)", after), "before": self._shape_terminal(current)}
+            # DSM confirmed the write; only the read-back failed. Report it
+            # as applied-but-unverified, like set_https_redirect below, so a
+            # caller does not conclude Telnet/SSH is unchanged when it is not.
+            return {
+                "success": True,
+                "verified": False,
+                "before": self._shape_terminal(current),
+                "after": None,
+                "note": "DSM accepted the change but the read-back failed. Re-read with synology_security_posture.",
+                "read_back_error": after.get("error"),
+            }
         shaped = self._shape_terminal(_data(after))
         applied = shaped["telnet_enabled"] == params["enable_telnet"] and shaped["ssh_enabled"] == params["enable_ssh"]
         return {
@@ -351,7 +382,16 @@ class SynologySecurity:
             return {**_write_failed("SYNO.Core.Security.AutoBlock/set", written, "Re-read it with synology_security_posture before retrying."), "before": self._shape_auto_block(current)}
         after = self._auto_block()
         if not after.get("success"):
-            return {**_failed("SYNO.Core.Security.AutoBlock/get (read-back)", after), "before": self._shape_auto_block(current)}
+            # DSM confirmed the write; only the read-back failed (see
+            # set_terminal above for why this is not a failure).
+            return {
+                "success": True,
+                "verified": False,
+                "before": self._shape_auto_block(current),
+                "after": None,
+                "note": "DSM accepted the change but the read-back failed. Re-read with synology_security_posture.",
+                "read_back_error": after.get("error"),
+            }
         got = _data(after)
         applied = all(got.get(k) == v for k, v in params.items())
         return {
@@ -374,7 +414,16 @@ class SynologySecurity:
             return {**_write_failed(f"SYNO.Core.Security.AutoBlock.Rules/{method}", written, "Re-read it with synology_security_posture before retrying."), "before": before_entries}
         after = self._allow_list()
         if not after.get("success"):
-            return {**_failed("SYNO.Core.Security.AutoBlock.Rules/list (read-back)", after), "before": before_entries}
+            # DSM confirmed the write; only the read-back failed (see
+            # set_terminal above for why this is not a failure).
+            return {
+                "success": True,
+                "verified": False,
+                "before": before_entries,
+                "after": None,
+                "note": "DSM accepted the change but the read-back failed. Re-read with synology_security_posture.",
+                "read_back_error": after.get("error"),
+            }
         after_entries = _data(after).get("entries") or []
         # DSM may store an entry in its own notation (a /22 as a dotted mask),
         # so membership is reported rather than asserted.
