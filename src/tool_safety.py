@@ -129,6 +129,17 @@ _DESTRUCTIVE_TOOLS = (
     "synology_set_user_permissions",
 )
 
+_CLASSIFIED = [name for name in (*_READ_ONLY_TOOLS, *_ADDITIVE_TOOLS, *_DESTRUCTIVE_TOOLS)]
+_DUPLICATES = {name for name in _CLASSIFIED if _CLASSIFIED.count(name) > 1}
+if _DUPLICATES:
+    # The dict merge below is last-write-wins, so a name in two lists would
+    # silently take the last classification. Fail at import instead.
+    raise ValueError(
+        f"Tool(s) classified more than once: {', '.join(sorted(_DUPLICATES))}. "
+        "Each tool belongs to exactly one of _READ_ONLY_TOOLS, _ADDITIVE_TOOLS, "
+        "_DESTRUCTIVE_TOOLS."
+    )
+
 TOOL_ANNOTATIONS: dict[str, types.ToolAnnotations] = {
     **{name: READ_ONLY for name in _READ_ONLY_TOOLS},
     **{name: ADDITIVE for name in _ADDITIVE_TOOLS},
@@ -137,9 +148,14 @@ TOOL_ANNOTATIONS: dict[str, types.ToolAnnotations] = {
 
 
 def annotations_for(name: str) -> types.ToolAnnotations:
-    """Return the safety hints for `name`, refusing a tool nobody classified."""
+    """Return the safety hints for `name`, refusing a tool nobody classified.
+
+    A copy per call: the three shared constants above stay single objects,
+    and one attribute assignment on a registered tool's annotations must not
+    reclassify every other tool in the same bucket.
+    """
     try:
-        return TOOL_ANNOTATIONS[name]
+        return TOOL_ANNOTATIONS[name].model_copy()
     except KeyError:
         raise ValueError(
             f"Tool {name!r} has no safety classification. Add it to "
@@ -174,8 +190,9 @@ def fence(text: str) -> str:
 def fence_content(content: list) -> list:
     """Fence every text item of a successful tool result.
 
-    Both the SDK path and the Xiaozhi bridge call this, so neither can return
-    NAS text unfenced.
+    Both the SDK path and the Xiaozhi bridge call this, so neither returns
+    successful NAS text unfenced. Error results are deliberately not fenced
+    (see mcp_server's error branch), and non-text items pass through as-is.
     """
     return [
         types.TextContent(type="text", text=fence(item.text))

@@ -24,6 +24,7 @@ import pytest
 from mcp import Client
 
 from config import config
+from tool_safety import annotations_for
 
 # Changes nothing on the NAS.
 READ_ONLY = {
@@ -160,10 +161,26 @@ def _tools(server):
 
 
 class TestClassification:
-    def test_lists_do_not_overlap(self):
-        assert not READ_ONLY & ADDITIVE
-        assert not READ_ONLY & DESTRUCTIVE
-        assert not ADDITIVE & DESTRUCTIVE
+    def test_source_lists_do_not_overlap(self):
+        """Disjointness is asserted on tool_safety's own tuples, not this
+        file's copies -- a name in two source lists would otherwise be
+        resolved silently by the last-write-wins dict merge."""
+        import tool_safety
+
+        ro, ad, de = (
+            set(tool_safety._READ_ONLY_TOOLS),
+            set(tool_safety._ADDITIVE_TOOLS),
+            set(tool_safety._DESTRUCTIVE_TOOLS),
+        )
+        assert not ro & ad and not ro & de and not ad & de
+
+    def test_mutating_one_tools_annotations_reclassifies_no_other(self, monkeypatch):
+        """annotations_for hands out per-registration copies, so one bad
+        assignment cannot flip a whole bucket."""
+        first = annotations_for("list_directory")
+        first.read_only_hint = False
+        second = annotations_for("get_file_info")
+        assert second.read_only_hint is True
 
     def test_every_registered_tool_is_classified(self, monkeypatch):
         names = set(_tools(_server(monkeypatch)))
