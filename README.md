@@ -789,10 +789,11 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 
 ### 📁 File Operations
 
-#### ✅ Creating Files and Directories
-
 File Station paths are share-relative — `/homes`, `/documents/notes.txt` — not
 filesystem paths like `/volume1/homes`.
+
+#### ✅ Creating Files and Directories
+![File Creation](assets/add.png)
 
 ```json
 // List directory
@@ -826,7 +827,7 @@ filesystem paths like `/volume1/homes`.
 // Move file
 {
   "source_path": "/temp/file.txt",
-  "destination_path": "/archive/file.txt",
+  "destination_path": "/archive/file.txt"
 }
 ```
 
