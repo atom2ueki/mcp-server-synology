@@ -427,18 +427,20 @@ class SynologySecurity:
         after_entries = _data(after).get("entries") or []
         # DSM may store an entry in its own notation (a /22 as a dotted mask),
         # so a CREATE whose request string is absent from the list is reported
-        # (not_listed_verbatim) rather than judged. A DELETE is the opposite:
+        # (presence_mismatched) rather than judged. A DELETE is the opposite:
         # the entry is named exactly as the list showed it, so a verbatim
         # survivor in the read-back proves the removal did not take -- the
         # same read_back_mismatch the terminal and auto-block writes report.
-        not_listed_verbatim = [e for e in entries if (e in after_entries) != (method == "create")]
-        applied = method == "create" or not not_listed_verbatim
+        # The field names entries whose presence in the read-back contradicts
+        # the request, in either direction.
+        presence_mismatched = [e for e in entries if (e in after_entries) != (method == "create")]
+        applied = method == "create" or not presence_mismatched
         return {
             "success": applied,
             "before": before_entries,
             "after": after_entries,
             "requested": list(entries),
-            "not_listed_verbatim": not_listed_verbatim,
+            "presence_mismatched": presence_mismatched,
             **({} if applied else {"error": _MISMATCH}),
         }
 

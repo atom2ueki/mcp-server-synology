@@ -551,7 +551,7 @@ def test_allow_add_sends_the_dialogs_parameters_and_reads_back():
     assert result["success"] is True
     assert result["before"] == []
     assert result["after"] == ["192.168.0.0/22", "192.168.0.5"]
-    assert result["not_listed_verbatim"] == []
+    assert result["presence_mismatched"] == []
     (_, sent, _), = fake.called("SYNO.Core.Security.AutoBlock.Rules", "create")
     assert json.loads(sent["ip"]) == ["192.168.0.0/22", "192.168.0.5"]
     assert sent["type"] == '"allow"' and sent["block_days"] == "0" and sent["overwrite"] == "true"
@@ -562,7 +562,7 @@ def test_allow_remove():
     with g, p:
         result = SynologySecurity(BASE, "sid").remove_allow_list(["10.0.0.1"])
     assert result["after"] == ["192.168.0.5"]
-    assert result["not_listed_verbatim"] == []
+    assert result["presence_mismatched"] == []
 
 
 def test_allow_remove_that_survives_the_read_back_is_a_mismatch():
@@ -582,7 +582,7 @@ def test_allow_remove_that_survives_the_read_back_is_a_mismatch():
         result = SynologySecurity(BASE, "sid").remove_allow_list(["10.0.0.1"])
     assert result["success"] is False
     assert result["error"]["code"] == "read_back_mismatch"
-    assert result["not_listed_verbatim"] == ["10.0.0.1"]
+    assert result["presence_mismatched"] == ["10.0.0.1"]
     assert result["after"] == ["10.0.0.1", "192.168.0.5"]
 
 
@@ -821,6 +821,20 @@ def test_install_dry_run_note_names_blockers_when_there_are_any(server):
     body = json.loads(content[0].text)
     assert body["installed"] is False
     assert "blockers" in body["note"]
+    assert not fake.called("SYNO.Core.Upgrade", "start")
+
+
+def test_install_dry_run_note_names_the_accepts_a_reissue_needs(server):
+    """With warnings or a required EULA and no blockers, the note must name
+    the accept_* flags the re-issue needs, since confirm=true alone is
+    refused by dsm_update_install."""
+    pre = ok({"precheck": False, "eulacheck": True, "eulacheck_content": "<p>terms</p>"})
+    fake, g, p = dsm(install_routes(precheck=pre))
+    with g, p:
+        content = asyncio.run(server._dispatch_tool("synology_dsm_update_install", {"base_url": BASE}))
+    body = json.loads(content[0].text)
+    assert body["installed"] is False
+    assert "accept_eula=true" in body["note"]
     assert not fake.called("SYNO.Core.Upgrade", "start")
 
 

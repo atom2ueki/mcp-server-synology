@@ -1555,12 +1555,22 @@ class SynologyMCPServer:
             result = await asyncio.to_thread(update.dsm_update_precheck)
             if result.get("success"):
                 result["installed"] = False
-                result["note"] = (
-                    "Checks only, and DSM's pre-install checks report blockers (see above); "
-                    "installing would be refused."
-                    if result.get("blockers")
-                    else "Checks only. No blockers were reported; re-issue with confirm=true to install."
-                )
+                if result.get("blockers"):
+                    result["note"] = (
+                        "Checks only, and DSM's pre-install checks report blockers (see above); "
+                        "installing would be refused."
+                    )
+                else:
+                    needed = ["confirm=true"]
+                    if result.get("warnings"):
+                        needed.append("accept_warnings=true (warnings above)")
+                    if result.get("eula_required"):
+                        needed.append("accept_eula=true (terms above)")
+                    result["note"] = (
+                        "Checks only. No blockers were reported; re-issue with "
+                        + " and ".join(needed)
+                        + " to install."
+                    )
             return self._emit(result)
         return self._emit(
             await asyncio.to_thread(
