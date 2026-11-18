@@ -46,7 +46,7 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard). The file require
   "synology": {
     "nas1": {
       "host": "192.168.1.100", "port": 5000,
-      "username": "...", "password": "...",
+      "username": "...", "password": "...",            // or "password_env": "NAME_OF_ENV_VAR"
       "note": "Primary",
       "otp_code": "123456",
       "device_id": "did_returned_by_dsm"
