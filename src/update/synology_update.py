@@ -307,6 +307,7 @@ class SynologyUpdate:
                 **_failed("SYNO.Core.Upgrade.Server.Download/progress", progress),
                 "started": True,
                 "version": status["update"]["version"],
+                "note": "The download is running; its progress could not be read. Poll synology_update_status.",
             }
         return {
             "success": True,

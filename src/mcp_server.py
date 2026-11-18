@@ -306,33 +306,33 @@ class SynologyMCPServer:
         # Updates and security posture
         self._register_tool("synology_update_status", "Read-only. Installed DSM version, the available DSM update (version, security release, whether it reboots), its download/install state, and installed packages with updates pending plus the package auto-update policy", TN, partial(self._handle_update_call, method_name="update_status"))
         self._register_tool("synology_security_posture", "Read-only. QuickConnect, auto-block and its allow list, Telnet/SSH, DSM's HTTP-to-HTTPS redirect, firewall, 2FA enforcement, admin/guest account state, administrators group members (DSM user accounts only; non-user members such as service accounts are omitted), and Security Advisor's last result and open findings", TN, self._handle_security_posture)
-        self._register_tool("synology_terminal_set", "Turn Telnet and/or SSH on or off (Control Panel > Terminal & SNMP). Omitted settings and the SSH port are kept. Requires confirm=true. Returns before/after.", TN_P({
+        self._register_tool("synology_terminal_set", "Turn Telnet and/or SSH on or off (Control Panel > Terminal & SNMP). Omitted settings and the SSH port are kept. Requires confirm=true. Returns before/after.", TN_PR({
             "enable_telnet": {"type": "boolean", "description": "Telnet on (true) or off (false). Omit to keep."},
             "enable_ssh": {"type": "boolean", "description": "SSH on (true) or off (false). Omit to keep."},
             "confirm": {"type": "boolean", "description": "Must be true."},
-        }), self._handle_terminal_set)
-        self._register_tool("synology_autoblock_set", "Configure auto-block (Security > Protection). Omitted settings are kept. Enabling is refused while the allow list is empty. Requires confirm=true. Returns before/after.", TN_P({
+        }, ["confirm"]), self._handle_terminal_set)
+        self._register_tool("synology_autoblock_set", "Configure auto-block (Security > Protection). Omitted settings are kept. Only an actual enable transition is refused while the allow list is empty. Requires confirm=true. Returns before/after.", TN_PR({
             "enable": {"type": "boolean", "description": "Auto-block on or off. Omit to keep."},
             "attempts": {"type": "integer", "description": "Failed login attempts that trigger a block."},
             "within_minutes": {"type": "integer", "description": "Window, in minutes, the attempts are counted over."},
             "expire_days": {"type": "integer", "description": "Days until a block lifts; 0 means never."},
             "confirm": {"type": "boolean", "description": "Must be true."},
-        }), self._handle_autoblock_set)
+        }, ["confirm"]), self._handle_autoblock_set)
         self._register_tool("synology_autoblock_allow_add", "Add entries to the auto-block allow list, which are never blocked: an IP, a subnet as ip/mask or ip/prefix (192.168.0.0/22), or a range a~b. Requires confirm=true. Returns before/after.", TN_PR({
             "entries": {"type": "array", "items": {"type": "string"}, "description": "IPs, subnets or ranges to allow."},
             "confirm": {"type": "boolean", "description": "Must be true."},
-        }, ["entries"]), partial(self._handle_allow_list, method_name="add_allow_list"))
+        }, ["entries", "confirm"]), partial(self._handle_allow_list, method_name="add_allow_list"))
         self._register_tool("synology_autoblock_allow_remove", "Remove entries from the auto-block allow list, named exactly as synology_security_posture lists them. Requires confirm=true. Returns before/after.", TN_PR({
             "entries": {"type": "array", "items": {"type": "string"}, "description": "Entries to remove."},
             "confirm": {"type": "boolean", "description": "Must be true."},
-        }, ["entries"]), partial(self._handle_allow_list, method_name="remove_allow_list"))
+        }, ["entries", "confirm"]), partial(self._handle_allow_list, method_name="remove_allow_list"))
         self._register_tool("synology_https_redirect_set", "Turn DSM's automatic HTTP-to-HTTPS redirect on or off (Login Portal > DSM). DSM restarts its web server. Requires confirm=true. Returns before/after.", TN_PR({
             "enable": {"type": "boolean", "description": "Redirect on (true) or off (false)."},
             "confirm": {"type": "boolean", "description": "Must be true."},
-        }, ["enable"]), self._handle_https_redirect_set)
-        self._register_tool("synology_dsm_update_download", "Download the available DSM update. Installs nothing. Requires confirm=true.", TN_P({
+        }, ["enable", "confirm"]), self._handle_https_redirect_set)
+        self._register_tool("synology_dsm_update_download", "Download the available DSM update. Installs nothing. Requires confirm=true.", TN_PR({
             "confirm": {"type": "boolean", "description": "Must be true. Downloads the DSM update onto the NAS."},
-        }), self._handle_dsm_update_download)
+        }, ["confirm"]), self._handle_dsm_update_download)
         self._register_tool("synology_dsm_update_install", "Install a downloaded DSM update, after DSM's own pre-install checks. Without confirm=true it only runs the checks and returns blockers, warnings and any EULA. The NAS may reboot.", TN_P({
             "confirm": {"type": "boolean", "description": "Must be true to install. Omit to run the pre-install checks only."},
             "accept_warnings": {"type": "boolean", "description": "Proceed past DSM's soft warnings (its confirm dialog). Default false."},
@@ -1672,7 +1672,7 @@ class SynologyMCPServer:
 
     @staticmethod
     def _refuse_unconfirmed(action: str) -> "ToolFailureError":
-        """The refusal for a destructive tool called without confirm=true.
+        """The refusal for a confirm-gated tool called without confirm=true.
 
         Raised, not returned: a refusal delivered as ordinary content leaves the
         protocol's error flag false, so a caller that checks isError rather than
@@ -1684,8 +1684,9 @@ class SynologyMCPServer:
                 "error": {
                     "code": "confirmation_required",
                     "message": (
-                        f"{action} is destructive and was not performed. "
-                        "Re-issue the call with confirm=true if that is intended."
+                        f"{action} was not performed: this tool requires "
+                        "confirm=true. Re-issue the call with confirm=true if "
+                        "that is intended."
                     ),
                 },
             }

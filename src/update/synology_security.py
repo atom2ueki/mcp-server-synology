@@ -366,13 +366,20 @@ class SynologySecurity:
             "within_mins": current.get("within_mins") if within_minutes is None else within_minutes,
             "expire_day": current.get("expire_day") if expire_days is None else expire_days,
         }
-        for name in ("attempts", "within_mins"):
-            if not isinstance(params[name], int) or isinstance(params[name], bool) or params[name] < 1:
-                # Name the tool argument (within_minutes), not the DSM field
-                # (within_mins): the tool gate rejects the DSM name.
-                shown = {"within_mins": "within_minutes"}.get(name, name)
-                return _refused("invalid_argument", f"{shown} must be a positive integer (Admin Center's minimum is 1)")
-        if not isinstance(params["expire_day"], int) or isinstance(params["expire_day"], bool) or params["expire_day"] < 0:
+        # Validate what the caller asked to change, not values inherited from
+        # the read-back: a stored oddity on the NAS must not refuse an
+        # unrelated change (it is sent back unchanged, as Admin Center does).
+        if attempts is not None and (
+            not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1
+        ):
+            return _refused("invalid_argument", "attempts must be a positive integer (Admin Center's minimum is 1)")
+        if within_minutes is not None and (
+            not isinstance(within_minutes, int) or isinstance(within_minutes, bool) or within_minutes < 1
+        ):
+            return _refused("invalid_argument", "within_minutes must be a positive integer (Admin Center's minimum is 1)")
+        if expire_days is not None and (
+            not isinstance(expire_days, int) or isinstance(expire_days, bool) or expire_days < 0
+        ):
             return _refused("invalid_argument", "expire_days must be 0 (never) or a positive integer")
         # The lockout guard fires only on an actual enable transition: an
         # omitted enable keeps the current value, so a knobs-only change on a
@@ -422,6 +429,18 @@ class SynologySecurity:
         before = self._allow_list()
         if not before.get("success"):
             return _failed("SYNO.Core.Security.AutoBlock.Rules/list", before)
+        if method == "delete":
+            # Entries are named exactly as the list shows them, so one that is
+            # not in the current list verbatim is a guaranteed no-op delete --
+            # refuse it rather than round-trip a request DSM will ignore and
+            # the survivor check would then misreport as a read-back mismatch.
+            unknown = [e for e in entries if e not in (_data(before).get("entries") or [])]
+            if unknown:
+                return _refused(
+                    "not_in_allow_list",
+                    "Not in the current allow list; name entries exactly as "
+                    f"synology_security_posture lists them: {', '.join(unknown)}",
+                )
         params: Dict[str, Any] = {"type": "allow", "ip": list(entries)}
         if method == "create":
             params = {"type": "allow", "block_days": 0, "overwrite": True, "ip": list(entries)}
@@ -442,14 +461,12 @@ class SynologySecurity:
                 "read_back_error": after.get("error"),
             }
         after_entries = _data(after).get("entries") or []
-        # DSM may store an entry in its own notation (a /22 as a dotted mask),
-        # so a CREATE whose request string is absent from the list is reported
-        # (presence_mismatched) rather than judged. A DELETE is the opposite:
-        # the entry is named exactly as the list showed it, so a verbatim
-        # survivor in the read-back proves the removal did not take -- the
-        # same read_back_mismatch the terminal and auto-block writes report.
         # The field names entries whose presence in the read-back contradicts
-        # the request, in either direction.
+        # the request, in either direction. What that means for success
+        # differs by direction -- and, for create, by entry form: a subnet or
+        # range may be stored in DSM's own notation and is only reported,
+        # while a literal IP is stored verbatim, so its absence after a
+        # create -- or survival after a delete -- is read_back_mismatch.
         presence_mismatched = [e for e in entries if (e in after_entries) != (method == "create")]
         if method == "create":
             # A subnet or range may be stored in DSM's own notation (a /22 as

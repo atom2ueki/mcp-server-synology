@@ -222,6 +222,7 @@ def test_download_reports_a_failed_progress_read_after_starting():
     assert result["started"] is True
     assert result["step"] == "SYNO.Core.Upgrade.Server.Download/progress"
     assert result["error"]["code"] == 400
+    assert result["note"] == "The download is running; its progress could not be read. Poll synology_update_status."
 
 
 def test_download_refuses_when_no_update():
@@ -657,6 +658,17 @@ def test_allow_remove_that_survives_the_read_back_is_a_mismatch():
     assert result["error"]["code"] == "read_back_mismatch"
     assert result["presence_mismatched"] == ["10.0.0.1"]
     assert result["after"] == ["10.0.0.1", "192.168.0.5"]
+
+
+def test_allow_remove_of_an_entry_not_in_the_list_is_refused():
+    """Entries are named exactly as the list shows them, so removing one that
+    is not listed verbatim is a guaranteed no-op; refuse it before the request."""
+    fake, g, p = stateful(allow=["10.0.0.1"])
+    with g, p:
+        result = SynologySecurity(BASE, "sid").remove_allow_list(["192.168.0.99"])
+    assert result["success"] is False
+    assert result["error"]["code"] == "not_in_allow_list"
+    assert not fake.called("SYNO.Core.Security.AutoBlock.Rules", "delete")
 
 
 def test_https_redirect_sends_the_whole_setting_back_with_one_change():
