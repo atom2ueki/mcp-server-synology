@@ -57,6 +57,17 @@
   (`input_schema`, `read_only_hint`).
 
 ### Fixed
+- **`delete` refuses a share root.** File Station paths are share-relative and directories are
+  deleted recursively, but the guard listed filesystem paths (`/volume1`, `/etc`, ...) that, apart
+  from `/homes`, cannot occur in a share-relative File Station path, so `delete("/photos")` would
+  remove the whole shared folder. The item's type is now read first and a one-segment directory is
+  refused before any delete task is started; a one-segment path whose type cannot be read is
+  refused too. A file inside a share (`delete("/photos/readme.txt")`) is still an ordinary delete,
+  as is a one-segment path positively read as a file (`delete("/readme.txt")` -- theoretical on
+  DSM, whose root holds only shares), and a path the NAS does not
+  have is reported as not-found rather than as share-root ambiguity. The path is normalized first,
+  so `//photos`, `/./photos` and `/photos/2024/..` are caught too, and DSM receives the same
+  normalized path the guard checked.
 - **A DSM failure now sets `isError` for health, NFS, Container Manager and user-management
   tools.** DSM reports most failures as HTTP 200 with `success: false`, and these handlers returned
   that body as ordinary content, so a refused `synology_delete_user` or a failed
