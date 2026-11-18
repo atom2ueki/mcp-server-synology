@@ -271,6 +271,7 @@ def test_install_refuses_when_not_downloaded():
         result = upd().dsm_update_install()
     assert result["success"] is False
     assert result["error"]["code"] == "precheck_refused"
+    assert "precheck.blockers" in result["error"]["message"]
     assert not fake.called("SYNO.Core.Upgrade", "start")
 
 
@@ -489,6 +490,7 @@ def test_telnet_off_keeps_ssh_and_its_port():
     with g, p:
         result = SynologySecurity(BASE, "sid").set_terminal(enable_telnet=False)
     assert result["success"] is True
+    assert result["verified"] is True
     assert result["before"]["telnet_enabled"] is True
     assert result["after"] == {"telnet_enabled": False, "ssh_enabled": True, "ssh_port": 22}
     (_, sent, how), = fake.called("SYNO.Core.Terminal", "set")
@@ -523,11 +525,34 @@ def test_autoblock_enable_refused_with_empty_allow_list():
     assert not fake.called("SYNO.Core.Security.AutoBlock", "set")
 
 
+def test_autoblock_knob_change_is_allowed_on_an_enabled_empty_list():
+    """A knobs-only change (no enable in the request) must go through even when
+    auto-block is already enabled with an empty allow list -- a state
+    synology_autoblock_allow_remove can create. Only an enable transition is
+    refused."""
+    fake, g, p = stateful(auto_block={"attempts": 10, "enable": True, "expire_day": 0, "within_mins": 5})
+    with g, p:
+        result = SynologySecurity(BASE, "sid").set_auto_block(attempts=5)
+    assert result["success"] is True
+    assert result["after"]["attempts"] == 5
+    assert fake.called("SYNO.Core.Security.AutoBlock", "set")
+
+
+def test_autoblock_validation_names_the_tool_argument():
+    fake, g, p = stateful(allow=["192.168.0.5"])
+    with g, p:
+        result = SynologySecurity(BASE, "sid").set_auto_block(within_minutes=0)
+    assert result["success"] is False
+    assert "within_minutes" in result["error"]["message"]
+    assert "within_mins " not in result["error"]["message"]
+
+
 def test_autoblock_enable_with_allow_list_sends_admin_centers_fields():
     fake, g, p = stateful(allow=["192.168.0.0/22"])
     with g, p:
         result = SynologySecurity(BASE, "sid").set_auto_block(enable=True, attempts=10, within_minutes=5, expire_days=0)
     assert result["success"] is True
+    assert result["verified"] is True
     assert result["after"] == {"enabled": True, "attempts": 10, "within_minutes": 5, "expire_days": 0}
     (_, sent, how), = fake.called("SYNO.Core.Security.AutoBlock", "set")
     assert how == "post"
@@ -549,6 +574,7 @@ def test_allow_add_sends_the_dialogs_parameters_and_reads_back():
     with g, p:
         result = SynologySecurity(BASE, "sid").add_allow_list(["192.168.0.0/22", "192.168.0.5"])
     assert result["success"] is True
+    assert result["verified"] is True
     assert result["before"] == []
     assert result["after"] == ["192.168.0.0/22", "192.168.0.5"]
     assert result["presence_mismatched"] == []
@@ -767,6 +793,20 @@ def test_posture_reports_a_failed_section_instead_of_hiding_it():
     assert result["errors"][0]["section"] == "firewall"
     assert result["errors"][0]["error"]["code"] == 105
     assert result["quickconnect"]["enabled"] is False
+
+
+def test_posture_keeps_the_allow_list_when_the_auto_block_read_fails():
+    """A successful allow-list read must not be dropped because its sibling
+    auto_block read failed."""
+    routes = posture_routes()
+    routes[("SYNO.Core.Security.AutoBlock", "get")] = {"success": False, "error": {"code": 105}}
+    routes[("SYNO.Core.Security.AutoBlock.Rules", "list")] = ok({"ip_info": [{"ip": "192.168.0.5"}], "offset": 0, "total": 1})
+    fake, g, p = dsm(routes)
+    with g, p:
+        result = SynologySecurity(BASE, "sid").posture()
+    assert result["success"] is False
+    assert result["auto_block"] is None
+    assert result["auto_block_allow_list"] == ["192.168.0.5"]
 
 
 # ----------------------------------------------------------------------

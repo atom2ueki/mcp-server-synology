@@ -68,8 +68,9 @@ def _refused(code: str, message: str) -> Dict[str, Any]:
 _MISMATCH = {"code": "read_back_mismatch", "message": "DSM accepted the change but the read-back differs"}
 
 
-# SYNO.Core.Web.DSM get fields that describe the NAS rather than configure it.
-# The Login Portal sends them back unchanged; so do we.
+# SYNO.Core.Web.DSM get fields whose values must travel back as integers:
+# the Login Portal coerces them (LoginStyleVueBundle.js), and so do we at
+# the write below.
 _WEB_DSM_PORT_FIELDS = ("http_port", "https_port")
 
 # Auto-block allow-list page size, the same one Admin Center's grid uses.
@@ -176,8 +177,13 @@ class SynologySecurity:
         )
         auto_block = section("auto_block", self._auto_block(), self._shape_auto_block)
         allow_list = section("auto_block_allow_list", self._allow_list(), lambda d: d.get("entries"))
+        auto_block_allow_list = None
         if isinstance(auto_block, dict):
             auto_block["allow_list"] = allow_list
+        elif allow_list is not None:
+            # The auto-block read failed but the allow list did not; report it
+            # under its own key rather than drop a successful read.
+            auto_block_allow_list = allow_list
         terminal = section("terminal", self._terminal(), self._shape_terminal)
         web = section("dsm_web", self._web_dsm(), self._shape_web_dsm)
         firewall = section(
@@ -288,6 +294,7 @@ class SynologySecurity:
             "success": not errors,
             "quickconnect": quickconnect,
             "auto_block": auto_block,
+            "auto_block_allow_list": auto_block_allow_list,
             "terminal": terminal,
             "dsm_web": web,
             "firewall": firewall,
@@ -335,6 +342,7 @@ class SynologySecurity:
         applied = shaped["telnet_enabled"] == params["enable_telnet"] and shaped["ssh_enabled"] == params["enable_ssh"]
         return {
             "success": applied,
+            "verified": True,
             "before": self._shape_terminal(current),
             "after": shaped,
             **({} if applied else {"error": _MISMATCH}),
@@ -360,10 +368,18 @@ class SynologySecurity:
         }
         for name in ("attempts", "within_mins"):
             if not isinstance(params[name], int) or isinstance(params[name], bool) or params[name] < 1:
-                return _refused("invalid_argument", f"{name} must be a positive integer (Admin Center's minimum is 1)")
+                # Name the tool argument (within_minutes), not the DSM field
+                # (within_mins): the tool gate rejects the DSM name.
+                shown = {"within_mins": "within_minutes"}.get(name, name)
+                return _refused("invalid_argument", f"{shown} must be a positive integer (Admin Center's minimum is 1)")
         if not isinstance(params["expire_day"], int) or isinstance(params["expire_day"], bool) or params["expire_day"] < 0:
             return _refused("invalid_argument", "expire_days must be 0 (never) or a positive integer")
-        if params["enable"] is True:
+        # The lockout guard fires only on an actual enable transition: an
+        # omitted enable keeps the current value, so a knobs-only change on a
+        # NAS that is already enabled (possibly with an emptied allow list,
+        # which synology_autoblock_allow_remove can produce) must still go
+        # through -- the tool's contract is "only the requested change".
+        if params["enable"] is True and current.get("enable") is not True:
             allow = self._allow_list()
             if not allow.get("success"):
                 return _failed("SYNO.Core.Security.AutoBlock.Rules/list", allow)
@@ -396,6 +412,7 @@ class SynologySecurity:
         applied = all(got.get(k) == v for k, v in params.items())
         return {
             "success": applied,
+            "verified": True,
             "before": self._shape_auto_block(current),
             "after": self._shape_auto_block(got),
             **({} if applied else {"error": _MISMATCH}),
@@ -437,6 +454,7 @@ class SynologySecurity:
         applied = method == "create" or not presence_mismatched
         return {
             "success": applied,
+            "verified": True,
             "before": before_entries,
             "after": after_entries,
             "requested": list(entries),

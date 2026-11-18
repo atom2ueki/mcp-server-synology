@@ -406,7 +406,7 @@ class SynologyUpdate:
             return pre
         refusal: Optional[str] = None
         if pre["blockers"]:
-            refusal = "DSM's pre-install checks refuse this install."
+            refusal = "The pre-install checks report blockers (see precheck.blockers); this install is refused."
         elif pre["warnings"] and not accept_warnings:
             refusal = "DSM raised warnings; re-run with accept_warnings=true once they are read."
         elif pre["eula_required"] and not accept_eula:
