@@ -45,6 +45,7 @@ NFS_TOOLS = [
 ]
 
 CONTAINER_TOOLS = [
+    "synology_container_list",
     "synology_container_health_summary",
     "synology_container_disk_usage",
     "synology_container_get",
