@@ -60,7 +60,8 @@ create_directory(folder_path="/volume1/projects", name="2026/q2/budgets", force_
 - **`delete` is recursive on directories.** It auto-detects file vs. directory. Confirm with the user before deleting anything that looks like a folder, especially if it's not empty.
 - **Overwrite is opt-in.** `create_file`, `move_file` and `copy_file` default `overwrite: false`. If the user says "replace the existing one", set `overwrite: true` explicitly — don't silently fail and retry.
 - **A server-side copy is not a database snapshot.** `copy_file` is byte-correct after completion, but a live SQLite database can change while it is copied. Use SQLite's online backup mechanism when consistency matters.
-- **Trash isn't automatic.** `delete` is permanent unless DSM Recycle Bin is enabled on the share. Mention this if the user is deleting something irreplaceable.
+- **Confirmation is required for deletion and overwrites.** Use the client's MCP 2026-07-28 confirmation form; unsupported clients are refused. Existing `confirm: true` flags on other tools are additional intent checks, not approval evidence.
+- **Trash is probed, not assumed.** `delete` tries a same-share MCP trash folder independently of DSM Recycle Bin. `auto` may permanently delete when trash setup is unavailable; `always` requires trash; `never` deletes directly. Inspect `soft_delete` and record `trash_path` and `original_path`. Once a move is attempted, a failure stops deletion. Share roots and traversal paths are refused in every mode.
 - **Case sensitivity** depends on the underlying filesystem (Btrfs/ext4 are case-sensitive, eCryptfs may differ). Don't assume.
 - **Path encoding**: paths with spaces, accents, or non-ASCII characters work fine; just pass them as-is in the JSON. Don't URL-encode.
 
