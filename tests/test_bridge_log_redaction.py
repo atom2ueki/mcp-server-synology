@@ -152,13 +152,13 @@ def test_the_guard_pattern_catches_plausible_future_credential_names():
 
 def test_redacted_keys_cover_every_credential_field_in_the_tool_schemas():
     """A credential argument must never be logged verbatim."""
-    from multiclient_bridge import _REDACTED_KEYS
+    from audit import is_secret_key
 
-    missing = _credential_argument_names() - set(_REDACTED_KEYS)
+    missing = {name for name in _credential_argument_names() if not is_secret_key(name)}
 
     assert not missing, (
-        f"tool arguments {sorted(missing)} carry secrets but are not in "
-        "_REDACTED_KEYS, so DEBUG logs would write them in the clear"
+        f"tool arguments {sorted(missing)} carry secrets but audit.is_secret_key "
+        "does not recognise them, so DEBUG logs would write them in the clear"
     )
 
 

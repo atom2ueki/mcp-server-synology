@@ -34,13 +34,13 @@ from health import SynologyHealth
 from iscsi import SynologyISCSI
 from iscsi.synology_iscsi import _uuid_list
 from nfs import SynologyNFS
+from paths import validate_delete_path
 from tool_policy import Risk, annotations_for, risk_for, unclassified
 from trash import (
     TrashPolicy,
     TrashUnavailableError,
     TrashVerificationError,
     soft_delete,
-    validate_delete_path,
 )
 from usermanagement import SynologyUserManager
 
@@ -1867,7 +1867,7 @@ class SynologyMCPServer:
         """Generic handler for no-argument SAN Manager calls."""
         base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(await asyncio.to_thread(getattr(iscsi, method_name)))
+        return self._emit_or_raise(await asyncio.to_thread(getattr(iscsi, method_name)))
 
     @staticmethod
     def _is_confirmed(arguments: dict) -> bool:
@@ -1903,7 +1903,7 @@ class SynologyMCPServer:
         )
 
     @staticmethod
-    def _emit(result: dict) -> list[types.TextContent]:
+    def _emit_or_raise(result: dict) -> list[types.TextContent]:
         """Render a tool result, raising when the operation did not succeed.
 
         The structured body is kept either way; raising is only how the MCP
@@ -1918,7 +1918,7 @@ class SynologyMCPServer:
         base_url = await self._resolve_base_url(arguments)
         name = arguments["name"]
         iscsi = self._get_iscsi(base_url)
-        return self._emit(await asyncio.to_thread(iscsi.lun_get, name))
+        return self._emit_or_raise(await asyncio.to_thread(iscsi.lun_get, name))
 
     async def _handle_lun_create(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating an iSCSI LUN."""
@@ -1932,7 +1932,7 @@ class SynologyMCPServer:
             lun_type=arguments.get("type", "thin"),
             description=arguments.get("description"),
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_lun_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting an iSCSI LUN. Refuses without confirm=true."""
@@ -1940,13 +1940,13 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
         base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(await asyncio.to_thread(iscsi.lun_delete, arguments["uuid"]))
+        return self._emit_or_raise(await asyncio.to_thread(iscsi.lun_delete, arguments["uuid"]))
 
     async def _handle_target_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting a single iSCSI target."""
         base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(
+        return self._emit_or_raise(
             await asyncio.to_thread(iscsi.target_get, arguments["target_id"])
         )
 
@@ -1969,7 +1969,7 @@ class SynologyMCPServer:
             chap_password=arguments.get("chap_password"),
             max_sessions=arguments.get("max_sessions", 0),
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_target_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting an iSCSI target. Refuses without confirm=true."""
@@ -1977,7 +1977,7 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
         base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(
+        return self._emit_or_raise(
             await asyncio.to_thread(iscsi.target_delete, arguments["target_id"])
         )
 
@@ -2051,7 +2051,7 @@ class SynologyMCPServer:
         }
         # A partial failure keeps every per-LUN result AND sets isError, so a
         # caller reading the protocol flag and one parsing the body agree.
-        return self._emit(payload)
+        return self._emit_or_raise(payload)
 
     async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting system log entries."""
@@ -2126,13 +2126,13 @@ class SynologyMCPServer:
         """Generic handler for no-argument reverse proxy reads."""
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
-        return self._emit(await asyncio.to_thread(getattr(proxy, method_name)))
+        return self._emit_or_raise(await asyncio.to_thread(getattr(proxy, method_name)))
 
     async def _handle_reverse_proxy_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting one reverse proxy entry."""
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
-        return self._emit(
+        return self._emit_or_raise(
             await asyncio.to_thread(proxy.get_entry, arguments["uuid_or_description"])
         )
 
@@ -2141,14 +2141,14 @@ class SynologyMCPServer:
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
         fields = {k: arguments[k] for k in self._REVERSE_PROXY_FIELDS if k in arguments}
-        return self._emit(await asyncio.to_thread(proxy.create_entry, **fields))
+        return self._emit_or_raise(await asyncio.to_thread(proxy.create_entry, **fields))
 
     async def _handle_reverse_proxy_update(self, arguments: dict) -> list[types.TextContent]:
         """Handle changing fields of a reverse proxy entry."""
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
         fields = {k: arguments[k] for k in self._REVERSE_PROXY_FIELDS if k in arguments}
-        return self._emit(
+        return self._emit_or_raise(
             await asyncio.to_thread(proxy.update_entry, arguments["uuid"], **fields)
         )
 
@@ -2160,7 +2160,7 @@ class SynologyMCPServer:
             )
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
-        return self._emit(await asyncio.to_thread(proxy.delete_entry, arguments["uuid"]))
+        return self._emit_or_raise(await asyncio.to_thread(proxy.delete_entry, arguments["uuid"]))
 
     # ------------------------------------------------------------------
     # Container Manager handlers

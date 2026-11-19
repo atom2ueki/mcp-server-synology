@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import os
 import posixpath
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -50,18 +49,6 @@ class TrashUnavailableError(RuntimeError):
 
 class TrashVerificationError(RuntimeError):
     """A move was attempted and its outcome is unknown. Do not hard-delete."""
-
-
-def validate_delete_path(path: str) -> str:
-    """Reject ambiguous paths and share/volume roots before either delete path."""
-    if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
-        raise ValueError("delete path must be absolute")
-    parts = path.strip("/").split("/")
-    if any(part in {".", "..", ""} for part in parts):
-        raise ValueError("delete path must be canonical; root deletion is refused")
-    if len(parts) < 2 or (re.fullmatch(r"volume\d+", parts[0]) and len(parts) < 3):
-        raise ValueError("refusing to delete a filesystem, volume, or share root")
-    return "/" + "/".join(parts)
 
 
 def _is_dir(filestation: Any, path: str) -> bool:

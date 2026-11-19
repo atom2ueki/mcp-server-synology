@@ -18,13 +18,14 @@ import os
 import signal
 import sys
 from typing import TYPE_CHECKING, Any, Dict, Optional
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from mcp_server import SynologyMCPServer
-from urllib.parse import urlparse
 
 import websockets
 
+from audit import is_secret_key
 from config import config
 
 # Configure logging
@@ -44,34 +45,11 @@ logger = logging.getLogger(__name__)
 # `chap_password` (synology_target_create, an iSCSI CHAP secret) was absent and
 # was logged verbatim.
 #
-# tests/test_bridge_log_redaction.py re-checks this list against the live
-# schemas, so a new credential field fails the suite rather than logging
-# silently -- but only for names its pattern recognises as credential-shaped.
-# That pattern covers the fields in use today plus the obvious shapes a new one
-# would take; a credential field named something it does not anticipate still
-# needs this set updated by hand.
-_REDACTED_KEYS = frozenset(
-    {
-        "_sid",
-        "authorization",
-        "chap_password",
-        "confirm_token",
-        "credential",
-        "credentials",
-        "device_id",
-        "did",
-        "otp_code",
-        "passwd",
-        "password",
-        "secret",
-        "secrets",
-        "session_id",
-        "sid",
-        "syno_token",
-        "synotoken",
-        "token",
-    }
-)
+# Masking keys come from audit.is_secret_key -- the same single source the
+# audit trail uses -- so the two log surfaces cannot drift apart. The
+# schema-coverage test in tests/test_bridge_log_redaction.py still forces new
+# credential-shaped fields through that matcher.
+
 
 
 def _redact(value: Any) -> Any:
@@ -87,7 +65,7 @@ def _redact(value: Any) -> Any:
     """
     if isinstance(value, dict):
         return {
-            key: ("***" if str(key).lower() in _REDACTED_KEYS else _redact(item))
+            key: ("***" if is_secret_key(str(key)) else _redact(item))
             for key, item in value.items()
         }
     if isinstance(value, list):

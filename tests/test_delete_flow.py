@@ -14,67 +14,14 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent))
+
+from fakes import FakeFileStation  # noqa: E402
 
 from audit import AuditLog  # noqa: E402
 from config import config  # noqa: E402
 from confirm import ConfirmationTokens  # noqa: E402
 from mcp_server import SynologyMCPServer, ToolFailureError  # noqa: E402
-
-
-class FakeFileStation:
-    def __init__(self, dirs=(), files=()):
-        self.dirs = set(dirs)
-        self.files = set(files)
-        self.deleted = []
-        self.fail_create = False
-        self.fail_move = False
-        self.pretend_move = False
-
-    def _exists(self, path):
-        return path in self.dirs or path in self.files
-
-    def get_file_info(self, path):
-        if path in self.dirs:
-            return {"type": "directory", "path": path}
-        if path in self.files:
-            return {"type": "file", "path": path}
-        raise FileNotFoundError(path)
-
-    def create_directory(self, parent, name, force_parent=False):
-        if self.fail_create:
-            raise RuntimeError("permission denied")
-        path = f"{parent.rstrip('/')}/{name}"
-        if path in self.dirs:
-            raise RuntimeError("already exists")
-        if force_parent:
-            parts = path.strip("/").split("/")
-            for index in range(1, len(parts)):
-                self.dirs.add("/" + "/".join(parts[:index]))
-        self.dirs.add(path)
-        return {"success": True, "full_path": path}
-
-    def move_file(self, source, destination, overwrite=False):
-        if self.fail_move:
-            raise RuntimeError("move failed")
-        if self.pretend_move:
-            return {"success": True}
-        if self._exists(destination):
-            raise RuntimeError("destination exists")
-        if source in self.files:
-            self.files.remove(source)
-            self.files.add(destination)
-        elif source in self.dirs:
-            self.dirs.remove(source)
-            self.dirs.add(destination)
-        else:
-            raise FileNotFoundError(source)
-        return {"success": True, "destination": destination}
-
-    def delete(self, path):
-        self.deleted.append(path)
-        self.files.discard(path)
-        self.dirs.discard(path)
-        return {"success": True, "path": path}
 
 
 def make_server(tmp_path, fs):

@@ -49,6 +49,15 @@ _SECRET_KEY = re.compile(
     re.IGNORECASE,
 )
 
+def is_secret_key(name: str) -> bool:
+    """True when an argument *name* marks its value as a credential.
+
+    Single source for every log surface in this process: the audit trail and
+    the bridge's DEBUG frames both mask through here, so the two cannot drift
+    apart -- the duplication this replaced was two hand-maintained lists.
+    """
+    return bool(_SECRET_KEY.match(str(name)))
+
 # One argument value is truncated to this many characters. `create_file` takes
 # a whole payload; the trail records that it was written, not a copy of it.
 MAX_VALUE_CHARS = 512
@@ -83,7 +92,7 @@ def redact(value: Any, *, key: str = "") -> Any:
     positives on ordinary strings like paths.
     """
     if isinstance(value, dict):
-        return {str(k): ("***" if _SECRET_KEY.match(str(k)) else redact(v, key=str(k)))
+        return {str(k): ("***" if is_secret_key(str(k)) else redact(v, key=str(k)))
                 for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact(item, key=key) for item in value]
