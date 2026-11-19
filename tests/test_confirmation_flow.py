@@ -26,18 +26,23 @@ SECRET = b"0" * 32
 
 
 class FakeSession:
-    def __init__(self, form: bool):
-        self.client_capabilities = types.ClientCapabilities(
-            elicitation=types.ElicitationCapability(
-                form=types.FormElicitationCapability() if form else None
-            )
-        )
+    def __init__(self, form: bool, bare: bool = False):
+        # bare=True models the spec's backwards-compat shape: an empty
+        # elicitation capability means form mode only. form=False models a
+        # client that declared only URL mode, which cannot answer the form.
+        if bare:
+            elicitation = types.ElicitationCapability()
+        elif form:
+            elicitation = types.ElicitationCapability(form=types.FormElicitationCapability())
+        else:
+            elicitation = None  # declared no elicitation at all
+        self.client_capabilities = types.ClientCapabilities(elicitation=elicitation)
 
 
 class FakeContext:
-    def __init__(self, version: str = "2026-07-28", form: bool = True):
+    def __init__(self, version: str = "2026-07-28", form: bool = True, bare: bool = False):
         self.protocol_version = version
-        self.session = FakeSession(form)
+        self.session = FakeSession(form, bare=bare)
         self.request_id = 1
 
 
@@ -165,6 +170,18 @@ class TestFallback:
         assert caught.value.payload["error"]["code"] == "confirmation_required"
         assert calls == []
         assert audit_lines(tmp_path)[-1]["outcome"] == "confirmation_required"
+
+    def test_bare_elicitation_capability_means_form(self, tmp_path):
+        # Spec backwards compat: {"elicitation": {}} == form mode only.
+        srv, calls = make_server(tmp_path)
+        result = asyncio_run(
+            srv._dispatch_tool(
+                "delete", {"path": "/media/library/x"}, FakeContext(bare=True),
+                params(arguments={"path": "/media/library/x"}),
+            )
+        )
+        assert isinstance(result, types.InputRequiredResult)
+        assert calls == []
 
     def test_client_without_form_capability_gets_confirmation_required(self, tmp_path):
         srv, calls = make_server(tmp_path)

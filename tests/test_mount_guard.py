@@ -13,12 +13,13 @@ pytestmark = pytest.mark.skipif(not ZSH, reason="mount guard requires zsh on mac
 GUARD = Path(__file__).parents[1] / "skills/synology-recovery/scripts/mount-guard-rm"
 
 
-def run_guard(tmp_path, arguments, *, mount_failure=False):
+def run_guard(tmp_path, arguments, *, mount_failure=False, mount_line=None):
     mountpoint = tmp_path / "NAS mount"
     mountpoint.mkdir(exist_ok=True)
     mounts = tmp_path / "mount-stub"
+    line = mount_line or ("server on " + str(mountpoint) + " (smbfs, nodev)")
     mounts.write_text("#!/bin/sh\n" + ("exit 1\n" if mount_failure else
-        f"printf '%s\\n' {shlex.quote('server on ' + str(mountpoint) + ' (smbfs, nodev)')}\n"))
+        f"printf '%s\\n' {shlex.quote(line)}\n"))
     mounts.chmod(0o700)
     rm = tmp_path / "rm-stub"
     marker = tmp_path / "executed"
@@ -49,6 +50,18 @@ def test_recursive_mount_deletion_is_refused_before_any_target_runs(tmp_path, ca
     assert result.returncode == 1
     assert not executed
     assert "refusing" in result.stderr
+
+
+def test_mountpoint_containing_on_fails_closed(tmp_path):
+    # "server on /tmp/x/Work on NAS (smbfs)" is ambiguous; the guard must not
+    # guess and must not exec rm.
+    result, executed = run_guard(
+        tmp_path, ["-rf", str(tmp_path / "local")],
+        mount_line="//u@h/s on /tmp/x/Work on NAS (smbfs, nodev)",
+    )
+    assert result.returncode == 1
+    assert not executed
+    assert "ambiguous" in result.stderr
 
 
 def test_unavailable_mount_table_fails_closed(tmp_path):

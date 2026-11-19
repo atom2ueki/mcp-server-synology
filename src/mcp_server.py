@@ -42,6 +42,7 @@ from trash import (
     TrashUnavailableError,
     TrashVerificationError,
     soft_delete,
+    trash_root_for,
 )
 from update import SynologySecurity, SynologyUpdate
 from usermanagement import SynologyUserManager
@@ -923,7 +924,13 @@ class SynologyMCPServer:
             return False
         capabilities = getattr(ctx.session, "client_capabilities", None)
         elicitation = getattr(capabilities, "elicitation", None) if capabilities else None
-        return getattr(elicitation, "form", None) is not None
+        if elicitation is None:
+            return False
+        # The spec's backwards-compat rule: an empty elicitation capability
+        # means form mode only (url unsupported, form implicitly declared).
+        form = getattr(elicitation, "form", None)
+        url = getattr(elicitation, "url", None)
+        return form is not None or (form is None and url is None)
 
     def _confirmation_plan(self, name: str, arguments: dict) -> str:
         details = {k: v for k, v in (arguments or {}).items() if k != "content"}
@@ -1073,6 +1080,10 @@ class SynologyMCPServer:
         if name in self._STRICT_ARG_TOOLS:
             refusal = self._reject_undeclared_arguments(name, arguments)
             if refusal:
+                self._record_audit(
+                    name, arguments, "rejected_unknown_argument", risk_for(name), 0.0,
+                    error=refusal.get("error", {}).get("message", ""),
+                )
                 raise ToolFailureError(refusal)
 
         risk = risk_for(name, arguments)
@@ -1107,11 +1118,17 @@ class SynologyMCPServer:
             execution_arguments.pop("nas_name", None)
             # Fail closed: an unrecorded destructive action must not run.
             try:
-                self.audit.ensure_writable()
-                self.audit.record(
-                    tool=name, arguments=arguments, outcome="started",
-                    duration_ms=0.0, risk=risk.value, event="tool_intent",
-                    extra={"confirmation": confirmation, "resolved_nas": target}, required=True,
+                await asyncio.to_thread(self.audit.ensure_writable)
+                await asyncio.to_thread(
+                    self.audit.record,
+                    tool=name,
+                    arguments=arguments,
+                    outcome="started",
+                    duration_ms=0.0,
+                    risk=risk.value,
+                    event="tool_intent",
+                    extra={"confirmation": confirmation, "resolved_nas": target},
+                    required=True,
                 )
             except AuditUnavailableError as exc:
                 raise ToolFailureError({
@@ -1710,6 +1727,21 @@ class SynologyMCPServer:
             raise ToolFailureError({
                 "success": False,
                 "error": {"code": "invalid_trash_policy", "message": "MCP_TRASH must be auto, always, or never"},
+            })
+        try:
+            trash_root = trash_root_for(path, policy)
+        except TrashUnavailableError:
+            trash_root = None
+        if trash_root and (path == trash_root or path.startswith(trash_root + "/")):
+            # Falling through to the hard delete would erase every recovery
+            # entry; a purge needs its own explicit operation.
+            raise ToolFailureError({
+                "success": False,
+                "error": {
+                    "code": "trash_root_delete",
+                    "message": f"Refused: {path} is inside the trash ({trash_root}). "
+                               "Trash purging is not exposed as a delete path.",
+                },
             })
 
         placement: dict = {"soft_delete": False}

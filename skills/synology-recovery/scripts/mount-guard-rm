@@ -45,13 +45,30 @@ mount_output=$("$MOUNT" 2>/dev/null) || {
   print -u2 "rm: refusing recursive deletion: cannot inspect mounted filesystems."
   exit 1
 }
-while IFS= read -r point; do
-  [[ -n "$point" ]] && mounts+=("${point:P}")
-done < <(print -r -- "$mount_output" | /usr/bin/sed -n 's/^.* on \(.*\) ([^)]*)$/\1/p')
-(( ${#mounts} )) || {
-  print -u2 "rm: refusing recursive deletion: mount table is empty or unrecognized."
+# `mount` prints "<source> on <mountpoint> (<fstype>, ...)". Splitting on the
+# literal " on " is ambiguous when a source or mountpoint contains those three
+# characters, and guessing wrong means `refusal` never sees the real mountpoint
+# and /bin/rm runs on a mounted filesystem. So: exactly one separator per line,
+# and fail closed for the whole call when any line is ambiguous.
+typeset -a fields
+typeset parse_ok=1
+typeset point
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  fields=("${(@s: on :)line}")
+  if (( ${#fields} != 2 )) || [[ "$line" != *" ("*")" ]]; then
+    parse_ok=0
+    break
+  fi
+  point="${fields[2]%% \(*}"
+  point="${point% }"
+  [[ -n "$point" ]] || { parse_ok=0; break }
+  mounts+=("${point:P}")
+done <<< "$mount_output"
+if (( ! parse_ok )) || (( ${#mounts} == 0 )); then
+  print -u2 "rm: refusing recursive deletion: mount table is ambiguous or unrecognized."
   exit 1
-}
+fi
 
 critical=(/ /System /Library /Applications /Users /private /var /usr /bin /sbin /etc /opt /tmp)
 task_home="${HOME:P}"

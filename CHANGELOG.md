@@ -38,7 +38,7 @@
   the confirmation gate.
 - **`skills/synology-recovery/`** — the snapshot-restore runbook distilled from
   a real incident: inventory, snapshot-vs-live diff, missing-only restore with
-  `cp --reflink=auto` (2.3 TB back in minutes, no extra space), verification by
+  `cp --reflink=always` (2.3 TB back in minutes, no extra space), verification by
   counts and checksums, the stale-mount trap, and the rule that `rm -rf` must
   never touch a mount point.
 - **Destructive tools require confirmation, bound to the exact call** — on an

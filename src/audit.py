@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 # secret, `session` is.
 _SECRET_KEY = re.compile(
     r"^(passwd|password|passphrase|secret|token|otp|otp_code|api[_-]?key|"
-    r"authorization|chap_password|sid|session|syno_token|confirm_token|device_id|did)$",
+    r"authorization|chap_password|sid|_sid|session_id|session|syno_token|synotoken|"
+    r"confirm_token|device_id|did|credentials|secrets)$",
     re.IGNORECASE,
 )
 
@@ -62,6 +63,10 @@ def is_secret_key(name: str) -> bool:
 # a whole payload; the trail records that it was written, not a copy of it.
 MAX_VALUE_CHARS = 512
 
+# Credentials embedded in a URL (ftp://user:pass@host, https://token@host). The
+# Download Station and reverse-proxy tools accept such URIs verbatim.
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)([^/@\s]+)@")
+
 # Keys that identify "what was touched", in priority order.
 _TARGET_KEYS = (
     "path",
@@ -70,6 +75,7 @@ _TARGET_KEYS = (
     "remote_path",
     "source_path",
     "destination_path",
+    "share_path",
     "target_path",
     "target",
 )
@@ -109,8 +115,10 @@ def redact(value: Any, *, key: str = "") -> Any:
         }
     if isinstance(value, (list, tuple)):
         return [redact(item, key=key) for item in value]
-    if isinstance(value, str) and len(value) > MAX_VALUE_CHARS:
-        return value[:MAX_VALUE_CHARS] + f"...({len(value)} chars)"
+    if isinstance(value, str):
+        value = _URL_USERINFO.sub(r"\1***@", value)
+        if len(value) > MAX_VALUE_CHARS:
+            return value[:MAX_VALUE_CHARS] + f"...({len(value)} chars)"
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return repr(value)[:MAX_VALUE_CHARS]
@@ -194,9 +202,22 @@ class AuditLog:
             logger.error("audit: cannot append to %s: %s", self.path, exc)
 
     def _append(self, line: str) -> None:
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.path, flags, 0o600)
         try:
-            remaining = memoryview(line.encode("utf-8"))
+            os.fchmod(fd, 0o600)  # creation mode does not fix a looser pre-existing file
+            data = line.encode("utf-8")
+            # A crash mid-write can leave a torn tail; a newline first keeps the
+            # next record parseable instead of gluing two JSON lines together.
+            try:
+                size = os.fstat(fd).st_size
+                if size:
+                    os.lseek(fd, size - 1, os.SEEK_SET)
+                    if os.read(fd, 1) != b"\n":
+                        data = b"\n" + data
+            except OSError:
+                pass
+            remaining = memoryview(data)
             while remaining:
                 written = os.write(fd, remaining)
                 if written <= 0:
@@ -240,8 +261,12 @@ class AuditLog:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            os.close(fd)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self.path, flags, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
         except OSError as exc:
             self._probe_ok_until = 0.0
             raise AuditUnavailableError(f"audit trail is not writable: {self.path}: {exc}") from exc

@@ -53,6 +53,17 @@ class TestRedaction:
         assert out["auth"] == {"api_key": "***", "user": "u"}
         assert out["items"] == [{"secret": "***"}]
 
+    def test_credential_aliases_stay_masked(self):
+        # Names the old bridge allowlist covered; the shared matcher must too.
+        for key in ("_sid", "session_id", "synotoken", "credentials", "secrets"):
+            assert redact({key: "SECRET"})[key] == "***", key
+
+    def test_url_userinfo_is_masked(self):
+        assert redact({"uri": "sftp://user:pass@host/path"})["uri"] == "sftp://***@host/path"
+
+    def test_share_path_is_recorded_as_the_target(self):
+        assert target_of({"share_path": "/videos/plex"}) == "/videos/plex"
+
     def test_named_header_records_mask_their_value(self):
         # custom_headers entries are {name, value}; neither key alone matches
         # the secret pattern, so the sibling name decides.

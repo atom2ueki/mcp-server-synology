@@ -86,7 +86,7 @@ async def test_handle_message_debug_log_is_redacted(caplog):
 
 
 # ---------------------------------------------------------------------------
-# _REDACTED_KEYS is an allowlist of exact names, so it silently rots: a tool
+# audit.is_secret_key is the shared matcher; a tool argument it does not
 # that declares a new credential field keeps logging it verbatim and nothing
 # fails. These tests read the real tool schemas, so adding such a field without
 # adding its name here is a test failure rather than a silent leak.
@@ -140,7 +140,7 @@ def _credential_argument_names():
 def test_the_guard_pattern_catches_plausible_future_credential_names():
     """The coverage test is only as wide as its pattern -- pin the pattern.
 
-    A narrow pattern is worse than no test: the comment above _REDACTED_KEYS
+    A narrow pattern is worse than no test: the comment above the matcher
     promises that 'the next credential field fails the suite', and that promise
     is only true for names this regex understands.
     """

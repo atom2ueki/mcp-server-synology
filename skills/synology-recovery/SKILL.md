@@ -120,7 +120,7 @@ done
 # overwrite). -print0/read -d '' keeps CJK, spaces and emoji intact.
 find "$S/<subpath>" -mindepth 1 -type f -print0 |
 while IFS= read -r -d '' file; do
-  rel="${file#$S/<subpath>/}"
+  rel="${file#"$S/<subpath>/"}"
   [ -e "$L/<subpath>/$rel" ] || [ -L "$L/<subpath>/$rel" ] || {
     destination="$L/<subpath>/$rel"
     parent=$(dirname "$destination")
@@ -129,7 +129,18 @@ while IFS= read -r -d '' file; do
       [ ! -L "$check" ] || { echo "symlink parent: $check" >&2; exit 1; }
       check=$(dirname "$check")
     done
-    mkdir -p "$parent" || exit 1
+    if [ ! -d "$parent" ]; then
+      mkdir -p "$parent" || exit 1
+      # mkdir applies the umask, which can widen a private 0700 directory.
+      # Copy mode and owner from the snapshot for every level we just made.
+      refresh="$parent"
+      while [ "$refresh" != "$L" ] && [ "$refresh" != "/" ]; do
+        reference="${refresh/#$L/$S}"
+        chmod "$(stat -f '%Lp' "$reference")" "$refresh" || exit 1
+        chown "$(stat -f '%u:%g' "$reference")" "$refresh" || exit 1
+        refresh=$(dirname "$refresh")
+      done
+    fi
     cp -an --reflink=always "$file" "$destination" || exit 1
   }
 done

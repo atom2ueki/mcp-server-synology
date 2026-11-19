@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -114,6 +115,17 @@ def soft_delete(
     if normalized == root or normalized.startswith(root + "/"):
         raise TrashUnavailableError(f"{normalized} is already inside {root}")
 
+    try:
+        filestation.get_file_info(normalized)
+    except FileNotFoundError:
+        # #136's contract: a missing target is not-found, not a trash failure
+        # (and must not leave empty trash scaffolding behind).
+        raise
+    except Exception as exc:
+        # Any other read failure means "cannot tell", which is not the same as
+        # missing: fall back to the normal delete path instead of guessing.
+        raise TrashUnavailableError(f"cannot read {normalized}: {exc}") from exc
+
     name = os.path.basename(normalized)
     if not name:
         raise TrashUnavailableError(f"cannot derive a name from {path}")
@@ -140,8 +152,16 @@ def soft_delete(
             f"cannot move {normalized} into {root}: {exc}; refusing to delete"
         ) from exc
 
-    actual = moved.get("destination_path", moved.get("destination", destination)) if isinstance(moved, dict) else destination
-    if actual != destination or not _path_exists(filestation, destination) or _path_exists(filestation, normalized):
+    raw_actual = (
+        moved.get("destination_path", moved.get("destination", destination))
+        if isinstance(moved, dict)
+        else destination
+    )
+    # FileStation normalizes paths (NFC); a macOS-sourced NFD name would
+    # otherwise look like a failed move after a successful one.
+    actual = unicodedata.normalize("NFC", str(raw_actual))
+    expected = unicodedata.normalize("NFC", destination)
+    if actual != expected or not _path_exists(filestation, destination) or _path_exists(filestation, normalized):
         raise TrashVerificationError(
             f"move reported success but {destination} is missing; refusing to delete"
         )
