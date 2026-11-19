@@ -475,6 +475,16 @@ for databases that may be changing during the copy.
   - `name` (required): LUN name or UUID from `synology_lun_list` output
 - **`synology_network`** - Get network interface status and transfer rates
 
+### 🔄 DSM Updates & Security Posture
+- **`synology_update_status`** - Read-only: installed DSM version, available update (version, security release, whether it reboots), download/install state, packages with pending updates, auto-update policy
+- **`synology_security_posture`** - Read-only: QuickConnect, auto-block and its allow list, Telnet/SSH, HTTPS redirect, firewall, 2FA enforcement, admin/guest account state, administrators, Security Advisor findings
+- **`synology_terminal_set`** - Turn Telnet/SSH on or off *(confirm=true)*
+- **`synology_autoblock_set`** - Configure auto-block; enabling with an empty allow list is refused *(confirm=true)*
+- **`synology_autoblock_allow_add` / `_remove`** - Manage the never-block allow list *(confirm=true)*
+- **`synology_https_redirect_set`** - Toggle DSM's HTTP→HTTPS redirect; restarts the web server *(confirm=true)*
+- **`synology_dsm_update_download`** - Download the available DSM update; installs nothing *(confirm=true)*
+- **`synology_dsm_update_install`** - Dry-run DSM's pre-install checks, or install with blockers/warnings/EULA each explicitly accepted; the NAS may reboot *(confirm=true to install)*
+
 ### SAN Manager (iSCSI provisioning)
 
 Wraps `SYNO.Core.ISCSI.LUN` and `SYNO.Core.ISCSI.Target`. Verified against DSM
@@ -630,7 +640,7 @@ misspelled `type` would silently take the default.
 
 For Claude Code, Claude Desktop, and claude.ai users, this repo ships an Anthropic Agent Skill that teaches Claude how to use the MCP tools effectively — picking the right tool, targeting the right NAS in multi-NAS setups, preferring aggregate health checks over fan-out calls, and using correct path conventions.
 
-The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across seven domains (auth, files, downloads, health, containers, shares/NFS, user management).
+The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across eight domains (auth, files, downloads, health, containers, shares/NFS, user management, updates & security) plus a reverse-proxy reference.
 
 **Install:**
 
@@ -733,12 +743,15 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 | `port` | No | API port (default: 5000 for HTTP, 5001 for HTTPS) |
 | `url` | Yes* | Full base URL (e.g., `https://nas.example.com`); wins over `host`/`port` — use for a NAS behind a reverse proxy |
 | `username` | Yes | NAS username |
-| `password` | Yes | NAS password |
+| `password` | Yes** | NAS password |
+| `password_env` | Yes** | Name of an environment variable holding the NAS password, read when settings.json is loaded, so the password is never stored in the file |
 | `otp_code` | No | One-shot 6-digit 2FA code (first login only, then remove) |
 | `device_id` | No | Long-lived trusted-device token from DSM (`did`); skip OTP on all future logins |
 | `note` | No | Optional description for your reference |
 
 *Either `host` or `url` is required per NAS entry.
+
+**Password source — set exactly one of `password` or `password_env`.** An entry with both, or whose variable is unset or empty, is skipped with a warning. Use `password_env` when a launcher fetches the password from a secret manager at start (for example `"password_env": "NAS1_PASSWORD"`); under Docker, add `- NAS1_PASSWORD` under the existing `environment:` list in docker-compose.yml, or the entry is skipped at startup.
 
 **Notes:**
 - The server will use port 5001 (HTTPS) if port is 5001, otherwise defaults to HTTP (5000)
@@ -843,24 +856,28 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 
 ### 📁 File Operations
 
+File Station paths are share-relative — `/photo`, `/documents/notes.txt` — not
+filesystem paths like `/volume1/photo`. (Note: `delete` additionally refuses
+paths under `/homes`, DSM's home-folder share.)
+
 #### ✅ Creating Files and Directories
 ![File Creation](assets/add.png)
 
 ```json
 // List directory
 {
-  "path": "/volume1/homes"
+  "path": "/homes"
 }
 
 // Search for PDFs
 {
-  "path": "/volume1/documents", 
+  "path": "/documents",
   "pattern": ".pdf"
 }
 
 // Create new file
 {
-  "path": "/volume1/documents/notes.txt",
+  "path": "/documents/notes.txt",
   "content": "My important notes\nLine 2 of notes",
   "overwrite": false
 }
@@ -872,13 +889,13 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 ```json
 // Delete file or directory (auto-detects type)
 {
-  "path": "/volume1/temp/old-file.txt"
+  "path": "/temp/old-file.txt"
 }
 
 // Move file
 {
-  "source_path": "/volume1/temp/file.txt",
-  "destination_path": "/volume1/archive/file.txt"
+  "source_path": "/temp/file.txt",
+  "destination_path": "/archive/file.txt"
 }
 ```
 
@@ -891,7 +908,7 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 // Create download task
 {
   "uri": "https://example.com/file.zip",
-  "destination": "/volume1/downloads"
+  "destination": "/downloads"
 }
 
 // Pause tasks

@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **`password_env` per-NAS setting** names an environment variable to read the NAS password from
+  when `settings.json` is loaded, so a launcher can pass it in from a secret manager and the file
+  never stores it. Previously a `settings.json` entry needed a plaintext `password`, and the legacy
+  `SYNOLOGY_PASSWORD` variable only applied when no NAS was defined, which also meant no persisted
+  `device_id`. An entry that sets both `password` and `password_env`, or whose variable is unset or
+  empty, is skipped with a warning. (#137)
 - **Per-call audit trail** — every tool call appends one JSON line to
   `logs/audit.jsonl` (path configurable): timestamp, run id, tool, risk class,
   target path, arguments with credential-shaped keys masked and long values
@@ -17,14 +23,15 @@
   `audit_unavailable` if it is not; **after** any call the append is best
   effort, because the action already happened and a lost line must not turn a
   success into an error for the caller.
-- **MCP tool annotations for all 98 tools** — `readOnlyHint`,
-  `destructiveHint`, `idempotentHint` and `openWorldHint`, derived from a single
-  risk table in `src/tool_policy.py` (`read` / `control` / `additive` /
-  `mutating` / `destructive`). Clients with approval UI can prompt on the calls
-  that matter; the annotations are hints, not enforcement, and the server's own
-  destructive pre-flight keys off the same table. An unclassified tool falls
-  back to `destructive`, matching the spec's pessimistic default, and the test
-  suite fails if the registry and the table drift apart.
+- **One classification table, two views** — `src/tool_safety.py` owns the MCP
+  annotations (`readOnlyHint` / `destructiveHint`) for every tool, refuses to
+  register a tool nobody classified, and fences NAS-sourced result text as
+  untrusted data; `src/tool_policy.py` derives the server's own risk tier
+  (`read` / `additive` / `destructive`, plus dynamic escalation when
+  `overwrite=true` or a password argument appears) from that same table — the
+  tier the audit trail records and the confirmation gate keys off. The
+  annotations are hints, not enforcement; an unclassified tool falls back to
+  `destructive`, matching the spec's pessimistic default.
 - **`skills/synology-recovery/`** — the snapshot-restore runbook distilled from
   a real incident: inventory, snapshot-vs-live diff, missing-only restore with
   `cp --reflink=auto` (2.3 TB back in minutes, no extra space), verification by
@@ -62,6 +69,66 @@
   35–50 s on a DS218+ (DSM 7.4.1-90080), and a timed-out write is reported as `outcome_unknown`
   rather than retried, since DSM may still apply it. A write DSM confirmed whose read-back then fails is
   still reported as a success, flagged `readback_failed`, so it is not retried into a duplicate.
+- **DSM/package update status, DSM update download and install, and security posture tools** —
+  read-only `synology_update_status` (installed DSM version, available update and its download
+  state, packages with pending updates, auto-update policy) and `synology_security_posture`
+  (QuickConnect, auto-block and its allow list, Telnet/SSH, HTTPS redirect, firewall, 2FA
+  enforcement, account state, administrators (every shape the API has used across DSM versions,
+  with an unrecognized one reported as an error rather than an empty list), Security Advisor
+  findings), plus confirm-gated
+  `synology_dsm_update_download`, `synology_dsm_update_install` (dry-runs DSM's own pre-install
+  checks without `confirm=true`, installs only past its blockers, warnings and EULA when they are
+  each explicitly accepted, refuses a major-version upgrade), `synology_terminal_set`,
+  `synology_autoblock_set`, `synology_autoblock_allow_add`/`_remove` and
+  `synology_https_redirect_set`. Every setting write changes only the fields asked for, sends back
+  what DSM's own UI sends, reads the setting back, and reports `outcome: unknown` when DSM gives no
+  answer so a possibly-applied write is never blindly retried; a write DSM confirmed whose
+  read-back then fails is reported as a success flagged `verified: false` with the read-back
+  error, never as a plain failure. Enabling auto-block is refused
+  while the allow list is empty. The tools are classified in `src/tool_safety.py`. (#130)
+
+- **MCP safety annotations on every tool.** Each tool now carries `ToolAnnotations`: 54 are
+  read-only, 20 additive (create, start, pause, grant, download; `destructiveHint: false`), and 35
+  destructive (delete, overwrite, rename, stop, replace config, remove access, change security
+  settings). Clients use these hints to decide what to auto-approve and what to confirm; without
+  them MCP treats every tool as destructive, so a client could not tell `list_directory` from
+  `delete`. The classification lives in `src/tool_safety.py`, and registering a tool that is not
+  in it raises, so a new tool cannot ship unclassified.
+- **Tool output is fenced as untrusted data.** Every successful result is wrapped in an
+  `<untrusted-data id="...">` block with a one-line preamble telling the model the content came
+  from the NAS and is data, not instructions. File names, file contents, container logs and
+  download names can be written by anyone with access to the NAS, so they are a prompt-injection
+  path into an agent holding admin rights. The id is random per call, so text containing a closing
+  tag cannot end the fence early. Error results are not wrapped. The Xiaozhi bridge, which answers
+  `tools/call` itself, applies the same fence, and its `tools/list` and `tools/call` responses now
+  use the MCP wire names (`inputSchema`, `readOnlyHint`) instead of Python field names
+  (`input_schema`, `read_only_hint`).
+
+### Fixed
+- **`delete` refuses a share root.** File Station paths are share-relative and directories are
+  deleted recursively, but the guard listed filesystem paths (`/volume1`, `/etc`, ...) that, apart
+  from `/homes`, cannot occur in a share-relative File Station path, so `delete("/photos")` would
+  remove the whole shared folder. The item's type is now read first and a one-segment directory is
+  refused before any delete task is started; a one-segment path whose type cannot be read is
+  refused too. A file inside a share (`delete("/photos/readme.txt")`) is still an ordinary delete,
+  as is a one-segment path positively read as a file (`delete("/readme.txt")` -- theoretical on
+  DSM, whose root holds only shares), and a path the NAS does not
+  have is reported as not-found rather than as share-root ambiguity. The path is normalized first,
+  so `//photos`, `/./photos` and `/photos/2024/..` are caught too, and DSM receives the same
+  normalized path the guard checked.
+- **A DSM failure now sets `isError` for health, NFS, Container Manager and user-management
+  tools.** DSM reports most failures as HTTP 200 with `success: false`, and these handlers returned
+  that body as ordinary content, so a refused `synology_delete_user` or a failed
+  `synology_set_user_permissions` reached the client flagged as a success. They now go through
+  `_emit`, as the iSCSI and reverse-proxy handlers already did; the JSON body is preserved on the
+  stdio and HTTP transports. Two exceptions: `synology_health_summary` composes its own
+  `success: true` summary and omits failed sub-reads (pre-existing), and the Xiaozhi bridge now
+  replaces these four modules' failed-call bodies with its generic `Error executing ...` text —
+  the bridge's catch-all is pre-existing, but the loss of the JSON body on that transport is new
+  for these tools here (the bridge's `ToolFailureError` handling on #130's branch restores it).
+- `synology_container_image_pull`, `synology_container_registry_download` and
+  `synology_container_registry_tags` declare `repository` as required. The handlers already read it
+  unconditionally, so a call without it failed with a bare `KeyError: 'repository'`.
 
 ### Changed
 - **`delete` no longer executes on the first call by default.** It returns

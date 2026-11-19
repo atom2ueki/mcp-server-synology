@@ -36,12 +36,14 @@ from iscsi.synology_iscsi import _uuid_list
 from nfs import SynologyNFS
 from paths import validate_delete_path
 from tool_policy import Risk, annotations_for, risk_for, unclassified
+from tool_safety import fence_content
 from trash import (
     TrashPolicy,
     TrashUnavailableError,
     TrashVerificationError,
     soft_delete,
 )
+from update import SynologySecurity, SynologyUpdate
 from usermanagement import SynologyUserManager
 
 # DSM's login codes, decoded. One table for both call sites (`_handle_login`
@@ -153,6 +155,8 @@ class SynologyMCPServer:
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.iscsi_instances: Dict[str, SynologyISCSI] = {}
         self.reverse_proxy_instances: Dict[str, SynologyReverseProxy] = {}
+        self.update_instances: Dict[str, SynologyUpdate] = {}
+        self.security_instances: Dict[str, SynologySecurity] = {}
         # One lock per NAS key, guarding the lazy login in _resolve_base_url.
         # Created lazily and only ever touched from the event-loop thread, so
         # the dict itself needs no locking.
@@ -219,7 +223,9 @@ class SynologyMCPServer:
                     # MCP 2026-07-28: the call is not finished; the client asks
                     # the user and retries with inputResponses + requestState.
                     return outcome
-                return CallToolResult(content=outcome)
+                # Results carry NAS-sourced text (file names, file contents,
+                # logs, download names), so fence it as data for the model.
+                return CallToolResult(content=fence_content(outcome))
             except ToolFailureError as failure:
                 # A refused or failed operation, carrying its structured payload.
                 # Returning it as ordinary content would leave the protocol's
@@ -266,7 +272,10 @@ class SynologyMCPServer:
             description=description,
             inputSchema=input_schema,
             # Hints, not enforcement: a client may ignore them. The server's
-            # own guard is `risk_for()` in _dispatch_tool.
+            # own guards are `risk_for()` in _dispatch_tool and the
+            # classification table in tool_safety.py, which refuses an
+            # unclassified tool at registration time.
+
             annotations=annotations_for(name),
         )
         self._tool_registry[name] = (tool, handler)
@@ -369,6 +378,42 @@ class SynologyMCPServer:
         self._register_tool("synology_ups", "Get UPS (uninterruptible power supply) status, battery level, and power info", TN, partial(self._handle_health_call, method_name="ups_info"))
         self._register_tool("synology_services", "List installed packages/services and their running status", TN, partial(self._handle_health_call, method_name="package_list"))
         self._register_tool("synology_system_log", "Get recent system log entries for diagnosing issues", TN_P({"offset": {"type": "integer", "description": "Starting offset (default: 0)"}, "limit": {"type": "integer", "description": "Max entries to return (default: 50)"}}), self._handle_system_log)
+        # Updates and security posture
+        self._register_tool("synology_update_status", "Read-only. Installed DSM version, the available DSM update (version, security release, whether it reboots), its download/install state, and installed packages with updates pending plus the package auto-update policy", TN, partial(self._handle_update_call, method_name="update_status"))
+        self._register_tool("synology_security_posture", "Read-only. QuickConnect, auto-block and its allow list, Telnet/SSH, DSM's HTTP-to-HTTPS redirect, firewall, 2FA enforcement, admin/guest account state, administrators group members (DSM user accounts only; non-user members such as service accounts are omitted), and Security Advisor's last result and open findings", TN, self._handle_security_posture)
+        self._register_tool("synology_terminal_set", "Turn Telnet and/or SSH on or off (Control Panel > Terminal & SNMP). Omitted settings and the SSH port are kept. Requires confirm=true. Returns before/after.", TN_PR({
+            "enable_telnet": {"type": "boolean", "description": "Telnet on (true) or off (false). Omit to keep."},
+            "enable_ssh": {"type": "boolean", "description": "SSH on (true) or off (false). Omit to keep."},
+            "confirm": {"type": "boolean", "description": "Must be true."},
+        }, ["confirm"]), self._handle_terminal_set)
+        self._register_tool("synology_autoblock_set", "Configure auto-block (Security > Protection). Omitted settings are kept. Only an actual enable transition is refused while the allow list is empty. Requires confirm=true. Returns before/after.", TN_PR({
+            "enable": {"type": "boolean", "description": "Auto-block on or off. Omit to keep."},
+            "attempts": {"type": "integer", "description": "Failed login attempts that trigger a block."},
+            "within_minutes": {"type": "integer", "description": "Window, in minutes, the attempts are counted over."},
+            "expire_days": {"type": "integer", "description": "Days until a block lifts; 0 means never."},
+            "confirm": {"type": "boolean", "description": "Must be true."},
+        }, ["confirm"]), self._handle_autoblock_set)
+        self._register_tool("synology_autoblock_allow_add", "Add entries to the auto-block allow list, which are never blocked: an IP, a subnet as ip/mask or ip/prefix (192.168.0.0/22), or a range a~b. Requires confirm=true. Returns before/after.", TN_PR({
+            "entries": {"type": "array", "items": {"type": "string"}, "description": "IPs, subnets or ranges to allow."},
+            "confirm": {"type": "boolean", "description": "Must be true."},
+        }, ["entries", "confirm"]), partial(self._handle_allow_list, method_name="add_allow_list"))
+        self._register_tool("synology_autoblock_allow_remove", "Remove entries from the auto-block allow list, named exactly as synology_security_posture lists them. Requires confirm=true. Returns before/after.", TN_PR({
+            "entries": {"type": "array", "items": {"type": "string"}, "description": "Entries to remove."},
+            "confirm": {"type": "boolean", "description": "Must be true."},
+        }, ["entries", "confirm"]), partial(self._handle_allow_list, method_name="remove_allow_list"))
+        self._register_tool("synology_https_redirect_set", "Turn DSM's automatic HTTP-to-HTTPS redirect on or off (Login Portal > DSM). DSM restarts its web server. Requires confirm=true. Returns before/after.", TN_PR({
+            "enable": {"type": "boolean", "description": "Redirect on (true) or off (false)."},
+            "confirm": {"type": "boolean", "description": "Must be true."},
+        }, ["enable", "confirm"]), self._handle_https_redirect_set)
+        self._register_tool("synology_dsm_update_download", "Download the available DSM update. Installs nothing. Requires confirm=true.", TN_PR({
+            "confirm": {"type": "boolean", "description": "Must be true. Downloads the DSM update onto the NAS."},
+        }, ["confirm"]), self._handle_dsm_update_download)
+        self._register_tool("synology_dsm_update_install", "Install a downloaded DSM update, after DSM's own pre-install checks. Without confirm=true it only runs the checks and returns blockers, warnings and any EULA. The NAS may reboot.", TN_P({
+            "confirm": {"type": "boolean", "description": "Must be true to install. Omit to run the pre-install checks only."},
+            "accept_warnings": {"type": "boolean", "description": "Proceed past DSM's soft warnings (its confirm dialog). Default false."},
+            "accept_eula": {"type": "boolean", "description": "Accept the update's terms when DSM requires it. Default false."},
+        }), self._handle_dsm_update_install)
+
         # SAN Manager (iSCSI) - LUN and target provisioning
         self._register_tool("synology_lun_create", "Create an iSCSI LUN on a volume. Returns its uuid and lun_id. On a btrfs volume DSM provisions thin by default.", TN_PR({
             "name": {"type": "string", "description": "LUN name, e.g. 'macmini-dev'"},
@@ -440,11 +485,11 @@ class SynologyMCPServer:
         self._register_tool("synology_container_image_delete", "Delete a Docker image", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="image_delete"))
         self._register_tool("synology_container_image_prune_preview", "Preview unused Docker images without deleting anything", CI, partial(self._handle_container_call, method_name="image_prune_preview"))
         self._register_tool("synology_container_image_prune", "Remove Docker images unused by any container; preserves containers, networks, and build cache", CI, partial(self._handle_container_call, method_name="image_prune"))
-        self._register_tool("synology_container_image_pull", "Pull a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}}, partial(self._handle_container_call, method_name="image_pull"))
+        self._register_tool("synology_container_image_pull", "Pull a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="image_pull"))
         self._register_tool("synology_container_registry_list", "List configured Docker registries", CI, partial(self._handle_container_call, method_name="registry_list"))
         self._register_tool("synology_container_registry_search", "Search for images in a Docker registry", CI | {"properties": {**CI["properties"], "query": {"type": "string", "description": "Search query for image name"}, "offset": {"type": "integer", "description": "Pagination offset (default: 0)"}, "limit": {"type": "integer", "description": "Max results to return (default: 50)"}}, "required": ["query"]}, partial(self._handle_container_call, method_name="registry_search"))
-        self._register_tool("synology_container_registry_tags", "List tags for a repository in a Docker registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}}, partial(self._handle_container_call, method_name="registry_tags"))
-        self._register_tool("synology_container_registry_download", "Download a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}}, partial(self._handle_container_call, method_name="registry_download"))
+        self._register_tool("synology_container_registry_tags", "List tags for a repository in a Docker registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="registry_tags"))
+        self._register_tool("synology_container_registry_download", "Download a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="registry_download"))
         self._register_tool("synology_container_network_list", "List Docker networks", CI, partial(self._handle_container_call, method_name="network_list"))
         self._register_tool("synology_container_network_get", "Get details of a Docker network", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Network name"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="network_get"))
         self._register_tool("synology_container_network_create", "Create a Docker network", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Network name"}, "driver": {"type": "string", "description": "Network driver (default: bridge)"}, "subnet": {"type": "string", "description": "Subnet CIDR (optional)"}, "gateway": {"type": "string", "description": "Gateway IP (optional)"}, "ip_range": {"type": "string", "description": "IP range (optional)"}, "enable_ipv6": {"type": "boolean", "description": "Enable IPv6 (default: false)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="network_create"))
@@ -727,6 +772,36 @@ class SynologyMCPServer:
 
         return self.iscsi_instances[base_url]
 
+    def _get_update(self, base_url: str) -> SynologyUpdate:
+        """Get or create the DSM/package update instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.update_instances:
+            self.update_instances[base_url] = SynologyUpdate(
+                base_url,
+                self.sessions[base_url],
+                verify_ssl=config.verify_ssl_for(base_url),
+                syno_token=self.syno_tokens.get(base_url),
+            )
+
+        return self.update_instances[base_url]
+
+    def _get_security(self, base_url: str) -> SynologySecurity:
+        """Get or create the security-posture instance for a base URL."""
+        if base_url not in self.sessions:
+            raise Exception(f"No active session for {base_url}. Please login first.")
+
+        if base_url not in self.security_instances:
+            self.security_instances[base_url] = SynologySecurity(
+                base_url,
+                self.sessions[base_url],
+                verify_ssl=config.verify_ssl_for(base_url),
+                syno_token=self.syno_tokens.get(base_url),
+            )
+
+        return self.security_instances[base_url]
+
     def _get_usermgr(self, base_url: str) -> SynologyUserManager:
         """Get or create UserManager instance for a base URL."""
         if base_url not in self.sessions:
@@ -795,6 +870,15 @@ class SynologyMCPServer:
             "synology_target_delete",
             "synology_target_map_lun",
             "synology_target_unmap_lun",
+            "synology_update_status",
+            "synology_security_posture",
+            "synology_dsm_update_download",
+            "synology_dsm_update_install",
+            "synology_terminal_set",
+            "synology_autoblock_set",
+            "synology_autoblock_allow_add",
+            "synology_autoblock_allow_remove",
+            "synology_https_redirect_set",
         }
     )
 
@@ -1114,6 +1198,8 @@ class SynologyMCPServer:
             self.iscsi_instances,
             self.reverse_proxy_instances,
             self.usermgr_instances,
+            self.update_instances,
+            self.security_instances,
         )
 
     def _get_base_url(self, arguments: dict, *, allow_login: bool = True) -> str:
@@ -1789,7 +1875,111 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         health = self._get_health(base_url)
         result = getattr(health, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
+
+    async def _handle_update_call(
+        self, arguments: dict, method_name: str
+    ) -> list[types.TextContent]:
+        """Generic handler for read-only update calls."""
+        base_url = await self._resolve_base_url(arguments)
+        update = self._get_update(base_url)
+        return self._emit_or_raise(await asyncio.to_thread(getattr(update, method_name)))
+
+    async def _handle_security_posture(self, arguments: dict) -> list[types.TextContent]:
+        """Read-only security posture."""
+        base_url = await self._resolve_base_url(arguments)
+        security = self._get_security(base_url)
+        return self._emit_or_raise(await asyncio.to_thread(security.posture))
+
+    async def _handle_terminal_set(self, arguments: dict) -> list[types.TextContent]:
+        """Telnet/SSH on or off. Refuses without confirm=true."""
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed("Changing Telnet/SSH")
+        changes = {k: arguments[k] for k in ("enable_telnet", "enable_ssh") if k in arguments}
+        if not changes or not all(isinstance(v, bool) for v in changes.values()):
+            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "Give enable_telnet and/or enable_ssh as booleans."}})
+        base_url = await self._resolve_base_url(arguments)
+        security = self._get_security(base_url)
+        return self._emit_or_raise(await asyncio.to_thread(security.set_terminal, **changes))
+
+    async def _handle_autoblock_set(self, arguments: dict) -> list[types.TextContent]:
+        """Auto-block settings. Refuses without confirm=true."""
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed("Changing auto-block")
+        changes = {k: arguments[k] for k in ("enable", "attempts", "within_minutes", "expire_days") if k in arguments}
+        if not changes:
+            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "Nothing to change."}})
+        if "enable" in changes and not isinstance(changes["enable"], bool):
+            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "enable must be a boolean."}})
+        base_url = await self._resolve_base_url(arguments)
+        security = self._get_security(base_url)
+        return self._emit_or_raise(await asyncio.to_thread(security.set_auto_block, **changes))
+
+    async def _handle_allow_list(self, arguments: dict, method_name: str) -> list[types.TextContent]:
+        """Add to or remove from the auto-block allow list. Refuses without confirm=true."""
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed("Changing the auto-block allow list")
+        entries = arguments.get("entries")
+        if not isinstance(entries, list) or not entries or not all(isinstance(e, str) and e.strip() for e in entries):
+            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "entries must be a non-empty list of strings."}})
+        base_url = await self._resolve_base_url(arguments)
+        security = self._get_security(base_url)
+        return self._emit_or_raise(await asyncio.to_thread(getattr(security, method_name), [e.strip() for e in entries]))
+
+    async def _handle_https_redirect_set(self, arguments: dict) -> list[types.TextContent]:
+        """DSM's HTTP-to-HTTPS redirect. Refuses without confirm=true."""
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed("Changing DSM's HTTPS redirect")
+        if not isinstance(arguments.get("enable"), bool):
+            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "enable must be a boolean."}})
+        base_url = await self._resolve_base_url(arguments)
+        security = self._get_security(base_url)
+        return self._emit_or_raise(await asyncio.to_thread(security.set_https_redirect, arguments["enable"]))
+
+    async def _handle_dsm_update_download(self, arguments: dict) -> list[types.TextContent]:
+        """Start the DSM update download. Refuses without confirm=true."""
+        if not self._is_confirmed(arguments):
+            raise self._refuse_unconfirmed("Downloading the DSM update")
+        base_url = await self._resolve_base_url(arguments)
+        update = self._get_update(base_url)
+        return self._emit_or_raise(await asyncio.to_thread(update.dsm_update_download))
+
+    async def _handle_dsm_update_install(self, arguments: dict) -> list[types.TextContent]:
+        """Pre-check, and with confirm=true install, the downloaded DSM update.
+
+        Without confirm the call is a dry run of DSM's own pre-install checks,
+        which change nothing, so it is not refused.
+        """
+        base_url = await self._resolve_base_url(arguments)
+        update = self._get_update(base_url)
+        if not self._is_confirmed(arguments):
+            result = await asyncio.to_thread(update.dsm_update_precheck)
+            if result.get("success"):
+                result["installed"] = False
+                if result.get("blockers"):
+                    result["note"] = (
+                        "Checks only, and DSM's pre-install checks report blockers (see above); "
+                        "installing would be refused."
+                    )
+                else:
+                    needed = ["confirm=true"]
+                    if result.get("warnings"):
+                        needed.append("accept_warnings=true (warnings above)")
+                    if result.get("eula_required"):
+                        needed.append("accept_eula=true (terms above)")
+                    result["note"] = (
+                        "Checks only. No blockers were reported; re-issue with "
+                        + " and ".join(needed)
+                        + " to install."
+                    )
+            return self._emit_or_raise(result)
+        return self._emit_or_raise(
+            await asyncio.to_thread(
+                update.dsm_update_install,
+                accept_warnings=arguments.get("accept_warnings") is True,
+                accept_eula=arguments.get("accept_eula") is True,
+            )
+        )
 
     async def _handle_disk_smart(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting SMART info for a specific disk."""
@@ -1797,7 +1987,7 @@ class SynologyMCPServer:
         disk_id = arguments["disk_id"]
         health = self._get_health(base_url)
         result = health.disk_smart_info(disk_id)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _resolve_base_url(self, arguments: dict) -> str:
         """Resolve the target NAS without ever logging in on the event loop.
@@ -1883,7 +2073,7 @@ class SynologyMCPServer:
 
     @staticmethod
     def _refuse_unconfirmed(action: str) -> "ToolFailureError":
-        """The refusal for a destructive tool called without confirm=true.
+        """The refusal for a confirm-gated tool called without confirm=true.
 
         Raised, not returned: a refusal delivered as ordinary content leaves the
         protocol's error flag false, so a caller that checks isError rather than
@@ -1895,8 +2085,9 @@ class SynologyMCPServer:
                 "error": {
                     "code": "confirmation_required",
                     "message": (
-                        f"{action} is destructive and was not performed. "
-                        "Re-issue the call with confirm=true if that is intended."
+                        f"{action} was not performed: this tool requires "
+                        "confirm=true. Re-issue the call with confirm=true if "
+                        "that is intended."
                     ),
                 },
             }
@@ -1907,7 +2098,10 @@ class SynologyMCPServer:
         """Render a tool result, raising when the operation did not succeed.
 
         The structured body is kept either way; raising is only how the MCP
-        layer is told to set isError.
+        layer is told to set isError. Every module method returns a dict; a
+        non-dict here is a broken module contract, and calling `.get` on it
+        raises into the generic error path (isError) rather than rendering
+        `null` as a success.
         """
         if result.get("success") is False:
             raise ToolFailureError(result)
@@ -2060,7 +2254,7 @@ class SynologyMCPServer:
         limit = arguments.get("limit", 50)
         health = self._get_health(base_url)
         result = health.system_log(offset=offset, limit=limit)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     # ------------------------------------------------------------------
     # NFS management handlers
@@ -2071,7 +2265,7 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         nfs = self._get_nfs(base_url)
         result = getattr(nfs, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_nfs_enable(self, arguments: dict) -> list[types.TextContent]:
         """Handle enabling/disabling NFS service."""
@@ -2080,7 +2274,7 @@ class SynologyMCPServer:
         nfs_v4 = arguments.get("nfs_v4", False)
         nfs = self._get_nfs(base_url)
         result = nfs.nfs_enable(enable=enable, nfs_v4=nfs_v4)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_nfs_set_permission(self, arguments: dict) -> list[types.TextContent]:
         """Handle setting NFS permissions on a share."""
@@ -2094,7 +2288,7 @@ class SynologyMCPServer:
             squash=arguments.get("squash", "root_squash"),
             security=arguments.get("security", "sys"),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_create_share(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new shared folder."""
@@ -2107,7 +2301,7 @@ class SynologyMCPServer:
             enable_recycle_bin=arguments.get("enable_recycle_bin", True),
             recycle_bin_admin_only=arguments.get("recycle_bin_admin_only", True),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     # ------------------------------------------------------------------
     # Login Portal reverse proxy handlers
@@ -2306,7 +2500,7 @@ class SynologyMCPServer:
         else:
             raise ValueError(f"Unknown container method: {method_name}")
 
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     # ------------------------------------------------------------------
     # User management handlers
@@ -2319,13 +2513,13 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = getattr(usermgr, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_get_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.get_user(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_create_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -2338,7 +2532,7 @@ class SynologyMCPServer:
             cannot_chg_passwd=arguments.get("cannot_chg_passwd", False),
             passwd_never_expire=arguments.get("passwd_never_expire", True),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_set_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -2351,19 +2545,19 @@ class SynologyMCPServer:
             email=arguments.get("email"),
             expired=arguments.get("expired"),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_delete_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.delete_user(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_list_group_members(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.list_group_members(arguments["group"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_add_to_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -2373,7 +2567,7 @@ class SynologyMCPServer:
         result = await asyncio.to_thread(
             usermgr.add_user_to_group, arguments["username"], arguments["groups"]
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_remove_from_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -2381,19 +2575,19 @@ class SynologyMCPServer:
         result = await asyncio.to_thread(
             usermgr.remove_user_from_group, arguments["username"], arguments["groups"]
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_get_permissions(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.get_user_permissions(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_set_permissions(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.set_user_permissions(arguments["name"], arguments["permissions"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._emit_or_raise(result)
 
     async def _run_stdio(self):
         """Serve the MCP protocol over stdio until the client disconnects."""
