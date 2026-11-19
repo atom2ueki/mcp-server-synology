@@ -343,6 +343,7 @@ def test_copy_tool_schema_and_count():
     # 84 before the iSCSI provisioning tools (#103); +8 = 92; +6 reverse proxy = 98.
     unconditional = set(tools) - {"synology_login", "synology_logout"}
     assert len(unconditional) == 98
+    assert "synology_confirm" not in tools
     assert tools["copy_file"].input_schema["required"] == [
         "source_path",
         "destination_folder",

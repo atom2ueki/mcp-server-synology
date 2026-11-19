@@ -348,6 +348,56 @@ docker-compose up
 🌟 Supports BOTH Xiaozhi and Claude/Cursor simultaneously!
 ```
 
+## 🧾 Audit Trail and Tool Annotations
+
+Every tool call appends a JSON result record to `logs/audit.jsonl` — the tool, its risk class, the path it acted on, redacted arguments, the outcome and the duration. It is deliberately independent of DSM: reading Log Center needs an admin account, and the MCP account is not one (`SYNO.Core.SyslogClient.Log` returns error 105).
+
+```json
+{"ts":"2026-10-23T01:25:36.412+00:00","event":"tool_call","run":"9f3c1a2b8d4e","pid":7,
+ "tool":"delete","risk":"destructive","target":"/videos/plex/Movies/Old/Movie.mkv",
+ "args":{"path":"/videos/plex/Movies/Old/Movie.mkv"},"outcome":"ok","duration_ms":41}
+```
+
+- **Fail closed for destructive calls.** Before a tool classified `destructive` runs, the server persists and flushes a `tool_intent` record. If it cannot, the call is refused with `audit_unavailable` — an unrecorded destructive action is not allowed to happen. Set `MCP_AUDIT=false` only if you deliberately want no trail (and no such protection).
+- **Best effort after the fact.** If the append fails after an action already ran, the loss is reported on stderr and the tool result is unchanged.
+- **Secrets are masked by key name** (`password`, `passwd`, `token`, `api_key`, `session`, `sid`, `chap_password`, …); long values such as file bodies are truncated to 512 characters.
+- **Rotation** is size-based: `audit.jsonl` → `.1` … `.5` by default.
+
+Tools also carry **MCP annotations** (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) derived from one risk table in `src/tool_policy.py`. They let a client with approval UI prompt on the calls that matter. They are **hints, not enforcement** — a client may ignore them, and the server never relies on them for safety. An unclassified tool falls back to `destructive`, per the spec's pessimistic default.
+
+### Destructive calls need confirmation
+
+A destructive call, including `create_file`, `copy_file`, or `move_file` with `overwrite: true`, first returns an MCP `2026-07-28` `InputRequiredResult` with a confirmation form and HMAC-signed `requestState`. The client collects consent and retries the exact call. State has a fresh nonce, expires, is consumed atomically once, and is invalidated by a server restart.
+
+Clients without this protocol and form capability receive `confirmation_required`; there is no model-callable token issuer or legacy approval fallback. `MCP_CONFIRM=off` explicitly disables the gate. Audit records carry `confirmation: round-trip | none`. The client's UI is responsible for human consent: a server cannot distinguish an actual human response from a client that automatically accepts forms.
+
+```json
+{"event":"tool_call","tool":"delete","risk":"destructive",
+ "target":"/videos/plex/a.mkv","outcome":"ok","confirmation":"round-trip"}
+```
+
+### Deletes go to a trash folder when the share can host one
+
+`delete` moves the target into `<share>/#trash/<date>/` first — a same-share move, so no extra space — and only unlinks when the share cannot host a trash folder. Nothing is assumed about the layout: `MCP_TRASH=auto` probes, falls back to a normal delete if the folder cannot be created, and records the placement (`event: "delete_placement"`, `outcome: soft|hard`) in the audit trail. `always` refuses instead of falling back; `never` deletes directly. The result reports `soft_delete`, `trash_path`, `trash_root`, and `original_path`. Use the recorded paths to restore; the trash layout does not mirror the source tree.
+
+If the MCP account cannot write the share root, point the trash inside the library with an absolute template: `MCP_TRASH_DIR=/videos/plex/.trash/{share}`.
+
+This is **not** DSM's Recycle Bin and does not require it to be enabled. Share roots and ambiguous traversal paths are always refused. Once a move has been attempted, any failure stops deletion; it never triggers a hard-delete retry. Name collisions use a unique subdirectory, preserving previous trash entries. Trash must stay in the source share. There is no automatic purge or retention schedule; remove retained items only through an explicitly approved operation.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `MCP_AUDIT` | `true` | `false` disables the trail and the destructive pre-flight |
+| `MCP_AUDIT_LOG` | `logs/audit.jsonl` | Trail path (`./logs` is mounted in Docker) |
+| `MCP_AUDIT_MAX_BYTES` | `10485760` | Rotate at this size (`0` disables rotation) |
+| `MCP_AUDIT_KEEP` | `5` | Rotated files to keep |
+| `MCP_CONFIRM` | `mrtr` | `mrtr` or `off` |
+| `MCP_CONFIRM_TTL_SECONDS` | `300` | Confirmation state lifetime |
+| `MCP_CONFIRM_SECRET` | — | HMAC key; otherwise generated once at `logs/.confirm-secret` |
+| `MCP_TRASH` | `auto` | `auto`, `always`, or `never` |
+| `MCP_TRASH_DIR` | `#trash` | Folder under the share, or an absolute `{share}` template |
+
+The same settings can live in `settings.json` under `server.audit` (`enabled`, `path`, `max_bytes`, `keep`), `server.confirm` (`mode`, `ttl_seconds`) and `server.trash` (`mode`, `dir`).
+
 ## 🛠️ Available MCP Tools
 
 ### 🔐 Authentication
@@ -588,6 +638,10 @@ The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progr
 - **Claude.ai / Claude Desktop**: upload the `synology-nas/` folder via the Skills settings page
 
 The skill is purely additive — it works alongside the MCP and only triggers on Synology/NAS-related prompts.
+
+### Recovery skill
+
+[`skills/synology-recovery/`](skills/synology-recovery/) is the companion runbook for **restoring files from Btrfs share snapshots** after an accidental delete, a failed bulk operation, or a runaway script. It covers inventory, diffing a snapshot against the live share, missing-only reflink restore that shares existing data blocks, verification, and the stale-mount trap that makes a damaged share look emptier than it is. Snapshot access needs an admin path (DSM UI or SSH with `sudo`); the MCP account can verify the result but cannot read `/volume1/@sharesnap`.
 
 ## ⚙️ Configuration Options
 

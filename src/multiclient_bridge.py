@@ -55,6 +55,7 @@ _REDACTED_KEYS = frozenset(
         "_sid",
         "authorization",
         "chap_password",
+        "confirm_token",
         "credential",
         "credentials",
         "device_id",
