@@ -10,7 +10,7 @@ timeline from session transcripts -- hours of work that one grep should answer.
 The record is deliberately boring and self-contained:
 
     {"ts": "...", "event": "tool_call", "run": "<uuid>", "pid": 7,
-     "tool": "delete", "risk": "destructive", "target": "/videos/plex/x",
+     "tool": "delete", "risk": "destructive", "target": "/media/library/x",
      "args": {...redacted...}, "outcome": "ok", "duration_ms": 41}
 
 Failure policy follows the OWASP agent guidance (fail closed for high-impact
