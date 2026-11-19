@@ -1,0 +1,113 @@
+#!/bin/zsh -f
+# mount-guard rm: refuse recursive deletes that would reach a mounted filesystem.
+#
+# A mount point is a directory whose contents live on another machine. `rm -rf`
+# on it does not delete a directory -- it deletes the server's files. The same
+# applies to a plain directory that happens to have a share mounted *inside* it.
+#
+# Installed ahead of /bin/rm in PATH so every shell gets the check. Only
+# recursive deletes are inspected; anything else is exec'd straight through.
+#
+# Deliberate limits: an explicit /bin/rm, `find -delete`, `rsync --delete` and
+# similar tools bypass this. It is a backstop against the common accident, not
+# a sandbox.
+
+REAL_RM=/bin/rm
+MOUNT=/sbin/mount
+
+typeset -a argv targets mounts critical
+argv=("$@")
+
+typeset recursive=0
+for arg in "${argv[@]}"; do
+  [[ "$arg" == "--" ]] && break
+  [[ "$arg" == "--recursive" ]] && { recursive=1; break }
+  if [[ "$arg" == -* && "$arg" != --* && "$arg" == *[rR]* ]]; then
+    recursive=1
+    break
+  fi
+done
+(( recursive )) || exec "$REAL_RM" "${argv[@]}"
+
+typeset literal=0
+for arg in "${argv[@]}"; do
+  if (( ! literal )) && [[ "$arg" == "--" ]]; then
+    literal=1
+    continue
+  fi
+  if (( ! literal )) && [[ "$arg" == -* ]]; then
+    continue
+  fi
+  targets+=("$arg")
+done
+
+mount_output=$("$MOUNT" 2>/dev/null) || {
+  print -u2 "rm: refusing recursive deletion: cannot inspect mounted filesystems."
+  exit 1
+}
+# `mount` prints "<source> on <mountpoint> (<fstype>, ...)". Splitting on the
+# literal " on " is ambiguous when a source or mountpoint contains those three
+# characters, and guessing wrong means `refusal` never sees the real mountpoint
+# and /bin/rm runs on a mounted filesystem. So: exactly one separator per line,
+# and fail closed for the whole call when any line is ambiguous.
+typeset -a fields
+typeset parse_ok=1
+typeset point
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  fields=("${(@s: on :)line}")
+  if (( ${#fields} != 2 )) || [[ "$line" != *" ("*")" ]]; then
+    parse_ok=0
+    break
+  fi
+  point="${fields[2]%% \(*}"
+  point="${point% }"
+  [[ -n "$point" ]] || { parse_ok=0; break }
+  mounts+=("${point:P}")
+done <<< "$mount_output"
+if (( ! parse_ok )) || (( ${#mounts} == 0 )); then
+  print -u2 "rm: refusing recursive deletion: mount table is ambiguous or unrecognized."
+  exit 1
+fi
+
+critical=(/ /System /Library /Applications /Users /private /var /usr /bin /sbin /etc /opt /tmp)
+task_home="${HOME:P}"
+
+# Prints the reason on stdout and returns 0 when the delete must be refused.
+refusal() {
+  local target="$1" path="$1" prefix point m
+  path="${target:P}"
+  if [[ "$path" == "$task_home" ]]; then
+    print -r -- "it is the home directory"
+    return 0
+  fi
+  for m in "${critical[@]}"; do
+    if [[ "$path" == "${m:P}" ]]; then
+      print -r -- "it is a critical system path"
+      return 0
+    fi
+  done
+  prefix="${path%/}/"
+  for point in "${mounts[@]}"; do
+    if [[ "$path" == "$point" ]]; then
+      print -r -- "it is a mounted filesystem ($point); deleting it would erase the server's files"
+      return 0
+    fi
+    if [[ "$point" == "$prefix"* ]]; then
+      print -r -- "$point is mounted inside it"
+      return 0
+    fi
+  done
+  return 1
+}
+
+for target in "${targets[@]}"; do
+  reason=$(refusal "$target")
+  if [[ -n "$reason" ]]; then
+    print -u2 "rm: refusing to delete '$target': $reason."
+    print -u2 "rm: unmount it first (diskutil unmount <path>), then remove the empty directory with rmdir."
+    exit 1
+  fi
+done
+
+exec "$REAL_RM" "${argv[@]}"

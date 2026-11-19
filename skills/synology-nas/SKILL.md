@@ -63,6 +63,23 @@ If the user asks "is the NAS healthy?" or "give me a system report," call `synol
 
 ### Read-only first
 
+Destructive tools and file operations with `overwrite: true` require the
+server's MCP 2026-07-28 confirmation form. Show the exact NAS, source,
+destination and overwrite/delete effect; let the client collect the user's
+answer. Unsupported clients receive `confirmation_required`. Treat that as a
+stop, and retain `MCP_CONFIRM=mrtr`; approval state comes from the client's UI.
+
+`delete` probes for a same-share MCP trash folder. Check `soft_delete` and
+`trash_path` in the result and report whether recovery is available. Trash is
+independent of DSM Recycle Bin and is not guaranteed. Share-root deletion is
+refused. For missing files, use [synology-recovery](../synology-recovery/SKILL.md).
+
+For mounted NAS paths, detach with `diskutil unmount` and remove only an empty
+mount directory with `rmdir` after successful detachment. A failed unmount stops
+cleanup. The optional [mount guard](../synology-recovery/scripts/mount-guard-rm)
+checks recursive `rm` calls reached through PATH; it is not a sandbox and
+cannot constrain direct `/bin/rm`, Python, or `rsync --delete`.
+
 When in doubt about a destructive action, list/inspect first:
 
 - Before `delete`: `get_file_info` to confirm the path resolves to what you think.

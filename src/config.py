@@ -111,6 +111,27 @@ class SynologyConfig:
         # not clear it (auto-login only runs once per process start today).
         self.synology_otp_code = os.getenv("SYNOLOGY_OTP_CODE")
 
+        # Audit trail (src/audit.py). On by default: it is the only per-call
+        # record readable without DSM admin rights, and a destructive call is
+        # refused when the trail cannot be written.
+        self.audit_enabled = os.getenv("MCP_AUDIT", "true").lower() != "false"
+        self.audit_log_path = os.getenv("MCP_AUDIT_LOG", "logs/audit.jsonl")
+        self.audit_log_max_bytes = int(os.getenv("MCP_AUDIT_MAX_BYTES", str(10 * 1024 * 1024)))
+        self.audit_log_keep = int(os.getenv("MCP_AUDIT_KEEP", "5"))
+
+        # Confirmation for destructive tools (src/confirm.py).
+        #   mrtr  — ask via the 2026-07-28 round-trip; unsupported clients refuse
+        #   off   — no confirmation (audit still records the call)
+        self.confirm_mode = os.getenv("MCP_CONFIRM", "mrtr").lower()
+        self.confirm_ttl_seconds = int(os.getenv("MCP_CONFIRM_TTL_SECONDS", "300"))
+        self.confirm_secret = os.getenv("MCP_CONFIRM_SECRET", "")
+        self.confirm_secret_file = os.getenv("MCP_CONFIRM_SECRET_FILE", "logs/.confirm-secret")
+
+        # Soft delete (src/trash.py). `auto` uses <share>/#trash when the share
+        # can host it and falls back to a normal delete when it cannot.
+        self.trash_mode = os.getenv("MCP_TRASH", "auto").lower()
+        self.trash_dir = os.getenv("MCP_TRASH_DIR", "#trash")
+
     def _check_file_permissions(self, path: Path) -> bool:
         """Check if secrets file has safe permissions (0600 or stricter).
 
@@ -415,6 +436,28 @@ class SynologyConfig:
                         self.http_port = http_section["port"]
                     if "path" in http_section:
                         self.http_path = http_section["path"]
+                    # Audit trail is a security control, not just logging: a
+                    # destructive tool refuses to run when the trail is
+                    # unwritable, so `enabled` here means "enforce and record".
+                    audit_section = server_section.get("audit", {})
+                    if "enabled" in audit_section:
+                        self.audit_enabled = bool(audit_section["enabled"])
+                    if "path" in audit_section:
+                        self.audit_log_path = audit_section["path"]
+                    if "max_bytes" in audit_section:
+                        self.audit_log_max_bytes = int(audit_section["max_bytes"])
+                    if "keep" in audit_section:
+                        self.audit_log_keep = int(audit_section["keep"])
+                    confirm_section = server_section.get("confirm", {})
+                    if "mode" in confirm_section:
+                        self.confirm_mode = str(confirm_section["mode"]).lower()
+                    if "ttl_seconds" in confirm_section:
+                        self.confirm_ttl_seconds = int(confirm_section["ttl_seconds"])
+                    trash_section = server_section.get("trash", {})
+                    if "mode" in trash_section:
+                        self.trash_mode = str(trash_section["mode"]).lower()
+                    if "dir" in trash_section:
+                        self.trash_dir = trash_section["dir"]
 
                 # Load Synology NAS credentials
                 synology_section = data.get("synology", {})

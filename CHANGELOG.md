@@ -9,6 +9,58 @@
   `SYNOLOGY_PASSWORD` variable only applied when no NAS was defined, which also meant no persisted
   `device_id`. An entry that sets both `password` and `password_env`, or whose variable is unset or
   empty, is skipped with a warning. (#137)
+- **Per-call audit trail** — every tool call appends one JSON line to
+  `logs/audit.jsonl` (path configurable): timestamp, run id, tool, risk class,
+  target path, arguments with credential-shaped keys masked and long values
+  truncated, outcome, duration and error. The trail exists because DSM's Log
+  Center needs an admin account the MCP deliberately does not have
+  (`SYNO.Core.SyslogClient.Log` → 105), which left operators reconstructing a
+  timeline from session transcripts. It is append-only, written `0600`, and
+  rotates by size (`MCP_AUDIT_LOG`, `MCP_AUDIT_MAX_BYTES`, `MCP_AUDIT_KEEP`,
+  `MCP_AUDIT`), with the same keys under `server.audit` in `settings.json`.
+  Failure policy is asymmetric on purpose: **before** a destructive tool runs
+  the server persists a flushed intent record and refuses the call with
+  `audit_unavailable` if it is not; **after** any call the append is best
+  effort, because the action already happened and a lost line must not turn a
+  success into an error for the caller.
+- **One classification table, two views** — `src/tool_safety.py` owns the MCP
+  annotations (`readOnlyHint` / `destructiveHint`) for every tool, refuses to
+  register a tool nobody classified, and fences NAS-sourced result text as
+  untrusted data; `src/tool_policy.py` derives the server's own risk tier
+  (`read` / `additive` / `destructive`, plus dynamic escalation when
+  `overwrite=true` or a password argument appears) from that same table — the
+  tier the audit trail records and the confirmation gate keys off. The
+  annotations are hints, not enforcement; an unclassified tool falls back to
+  `destructive`, matching the spec's pessimistic default. A `{name, value}`
+  header record (as in `custom_headers`) masks its value when the name is a
+  credential header, so a bearer token never reaches the trail. A DSM update
+  install without `confirm=true` is a read-only precheck and stays outside
+  the confirmation gate.
+- **`skills/synology-recovery/`** — the snapshot-restore runbook distilled from
+  a real incident: inventory, snapshot-vs-live diff, missing-only restore with
+  `cp --reflink=always` (2.3 TB back in minutes, no extra space), verification by
+  counts and checksums, the stale-mount trap, and the rule that `rm -rf` must
+  never touch a mount point.
+- **Destructive tools require confirmation, bound to the exact call** — on an
+  MCP `2026-07-28` connection the server answers the first call with
+  `InputRequiredResult` (an `elicitation/create` form plus an HMAC-signed,
+  single-use, expiring `requestState`) and executes only on the retry that
+  carries the approval. Unsupported clients fail closed; no model-callable
+  token issuer is exposed. State uses per-process signatures, fresh nonces,
+  short expiry and atomic consumption. Overwrite-capable file tools also go
+  through this gate when `overwrite=true`. `MCP_CONFIRM=mrtr|off`.
+- **Capability-detected soft delete** — `delete` first moves the target into
+  `<share>/#trash/<date>/` (a same-share move: instant, no extra space) and
+  falls back to a normal delete when the share cannot host the folder. Nothing
+  is assumed: `MCP_TRASH=auto` probes, `always` refuses when the trash is
+  unavailable, `never` deletes directly, and `MCP_TRASH_DIR` accepts an
+  absolute `{share}` template for accounts that cannot write the share root.
+  The audit trail records the placement (`event: "delete_placement"`,
+  `outcome: soft|hard`, `trash_path`). This is independent of DSM's Recycle
+  Bin and does not require it to be enabled. Ambiguous paths and share-root
+  deletes are refused. Move failures never fall through to a hard delete.
+  Trash collisions preserve the source name in a unique subdirectory.
+
 - **Login Portal reverse proxy tools** — `synology_reverse_proxy_list`, `_get`, `_create`, `_update`
   and `_delete`, plus `synology_access_control_profile_list`, wrapping
   `SYNO.Core.AppPortal.ReverseProxy` and `SYNO.Core.AppPortal.AccessControl`. Entries are returned
@@ -81,6 +133,11 @@
 - `synology_container_image_pull`, `synology_container_registry_download` and
   `synology_container_registry_tags` declare `repository` as required. The handlers already read it
   unconditionally, so a call without it failed with a bare `KeyError: 'repository'`.
+
+### Changed
+- **`delete` no longer executes on the first call by default.** It returns
+  a standard confirmation form, or `confirmation_required` for unsupported clients. Set `MCP_CONFIRM=off` to restore
+  the old single-call behaviour; the audit trail still records every call.
 
 ## [1.8.0] - 2026-09-29
 

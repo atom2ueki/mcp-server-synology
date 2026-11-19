@@ -1,11 +1,15 @@
 # src/mcp_server.py - MCP Server for Synology NAS operations
 
 import asyncio
+import hashlib
 import json
 import logging
 import threading
+import time
 from functools import partial
+from pathlib import Path
 from typing import Callable, Dict, Optional
+from uuid import uuid4
 
 import urllib3
 
@@ -19,15 +23,29 @@ from mcp.server.models import InitializationOptions
 from mcp.types import CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams
 
 from appportal import SynologyReverseProxy
+from audit import AuditLog, AuditUnavailableError, redact
 from auth import SynologyAuth
 from config import config
+from confirm import ConfirmationError, ConfirmationTokens, load_secret
 from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
 from filestation import SynologyFileStation
 from health import SynologyHealth
 from iscsi import SynologyISCSI
 from iscsi.synology_iscsi import _uuid_list
+from nfs import SynologyNFS
+from paths import validate_delete_path
+from tool_policy import Risk, annotations_for, risk_for, unclassified
+from tool_safety import fence_content
+from trash import (
+    TrashPolicy,
+    TrashUnavailableError,
+    TrashVerificationError,
+    soft_delete,
+    trash_root_for,
+)
 from update import SynologySecurity, SynologyUpdate
+from usermanagement import SynologyUserManager
 
 # DSM's login codes, decoded. One table for both call sites (`_handle_login`
 # and `_login_nas`) so the two cannot drift apart, which they already had.
@@ -88,9 +106,22 @@ class ToolFailureError(Exception):
     def __init__(self, payload: dict):
         super().__init__(payload.get("error", {}).get("message", "tool failed"))
         self.payload = payload
-from nfs import SynologyNFS
-from tool_safety import annotations_for, fence_content
-from usermanagement import SynologyUserManager
+
+
+def _answer_approved(answer: object) -> bool:
+    """True only for an explicit `accept` carrying `approve: true`.
+
+    `inputResponses` values arrive as SDK models or plain mappings depending on
+    the transport; both are handled. Anything else — decline, cancel, a missing
+    field, a truthy string — is a refusal.
+    """
+    if answer is None:
+        return False
+    action = answer.get("action") if isinstance(answer, dict) else getattr(answer, "action", None)
+    if action != "accept":
+        return False
+    content = answer.get("content") if isinstance(answer, dict) else getattr(answer, "content", None)
+    return isinstance(content, dict) and content.get("approve") is True
 
 # Suppress InsecureRequestWarning when verify_ssl is disabled (internal NAS devices).
 # urllib3's warning filter is process-global, so this has to consider any NAS that
@@ -136,8 +167,37 @@ class SynologyMCPServer:
         self._session_locks: Dict[str, threading.RLock] = {}
         self._session_locks_guard = threading.Lock()
         self._tool_registry: Dict[str, tuple[types.Tool, Callable]] = {}
+        # One id per process, so lines from a restarted server are still
+        # attributable to a single run without relying on timestamps.
+        self.run_id = uuid4().hex[:12]
+        self.audit = AuditLog(
+            config.audit_log_path,
+            enabled=config.audit_enabled,
+            max_bytes=config.audit_log_max_bytes,
+            keep=config.audit_log_keep,
+            run_id=self.run_id,
+        )
+        self.confirm = ConfirmationTokens(
+            load_secret(config.confirm_secret, Path(config.confirm_secret_file)),
+            ttl_seconds=config.confirm_ttl_seconds,
+        )
         self.server = self._create_server()
         self._register_all_tools()
+        self._warn_unclassified_tools()
+
+    def _warn_unclassified_tools(self) -> None:
+        """Report tools that fall back to the pessimistic DESTRUCTIVE risk.
+
+        Not fatal: the fallback is safe (destructive annotations, audit
+        pre-flight). Fatal here would turn a missing table entry into an
+        outage; the test suite fails instead, before the change ships.
+        """
+        missing = unclassified(self._tool_registry)
+        if missing:
+            logger.warning(
+                "Tools with no explicit risk entry (treated as DESTRUCTIVE): %s",
+                ", ".join(sorted(missing)),
+            )
 
     def _create_server(self) -> Server:
         """Create the MCP server with mcp 2.0 constructor-style handlers.
@@ -155,12 +215,18 @@ class SynologyMCPServer:
 
         async def on_call_tool(
             ctx: ServerRequestContext, params: CallToolRequestParams
-        ) -> CallToolResult:
+        ) -> CallToolResult | types.InputRequiredResult:
             try:
-                content = await self._dispatch_tool(params.name, params.arguments or {})
+                outcome = await self._dispatch_tool(
+                    params.name, params.arguments or {}, ctx, params
+                )
+                if isinstance(outcome, types.InputRequiredResult):
+                    # MCP 2026-07-28: the call is not finished; the client asks
+                    # the user and retries with inputResponses + requestState.
+                    return outcome
                 # Results carry NAS-sourced text (file names, file contents,
                 # logs, download names), so fence it as data for the model.
-                return CallToolResult(content=fence_content(content))
+                return CallToolResult(content=fence_content(outcome))
             except ToolFailureError as failure:
                 # A refused or failed operation, carrying its structured payload.
                 # Returning it as ordinary content would leave the protocol's
@@ -196,10 +262,21 @@ class SynologyMCPServer:
         handler: Callable,
     ):
         """Register a tool definition and its handler in the registry."""
+        risk = risk_for(name)
+        if risk is Risk.DESTRUCTIVE or name in {"create_file", "copy_file", "move_file", "synology_set_user"}:
+            description += (
+                "\n\nDestructive calls (including overwrite=true) require the client's "
+                "MCP 2026-07-28 confirmation form. Unsupported clients are refused."
+            )
         tool = types.Tool(
             name=name,
             description=description,
             inputSchema=input_schema,
+            # Hints, not enforcement: a client may ignore them. The server's
+            # own guards are `risk_for()` in _dispatch_tool and the
+            # classification table in tool_safety.py, which refuses an
+            # unclassified tool at registration time.
+
             annotations=annotations_for(name),
         )
         self._tool_registry[name] = (tool, handler)
@@ -266,7 +343,6 @@ class SynologyMCPServer:
         # Status & NAS listing
         self._register_tool("synology_status", "Check authentication status for Synology NAS instances", T, self._handle_status)
         self._register_tool("synology_list_nas", "List all configured NAS units from secrets.json. Returns NAS names, URLs, and connection status.", T, self._handle_list_nas)
-
         # File Station
         self._register_tool("list_shares", "List all available shares on the Synology NAS", TN, self._handle_list_shares)
         self._register_tool("list_directory", "List contents of a directory on the Synology NAS. Returns detailed information about files and folders including name, type, size, and timestamps.", TN_PR({"path": {"type": "string", "description": "Directory path to list (must start with /)"}}, ["path"]), self._handle_list_directory)
@@ -826,20 +902,303 @@ class SynologyMCPServer:
             },
         }
 
+    #: Protocol revision that replaced server-initiated requests with the
+    #: multi-round-trip `input_required` pattern.
+    _MRTR_VERSION = "2026-07-28"
+
+    @staticmethod
+    def _at_least(version: Optional[str], minimum: str) -> bool:
+        def parts(value: str) -> tuple[int, ...]:
+            try:
+                return tuple(int(piece) for piece in value.split("-"))
+            except (AttributeError, ValueError):
+                return ()
+
+        return parts(version or "") >= parts(minimum)
+
+    def _supports_confirmation_round_trip(
+        self, ctx: Optional[ServerRequestContext]
+    ) -> bool:
+        """Whether this connection can answer an inline form elicitation."""
+        if ctx is None or not self._at_least(ctx.protocol_version, self._MRTR_VERSION):
+            return False
+        capabilities = getattr(ctx.session, "client_capabilities", None)
+        elicitation = getattr(capabilities, "elicitation", None) if capabilities else None
+        if elicitation is None:
+            return False
+        # The spec's backwards-compat rule: an empty elicitation capability
+        # means form mode only (url unsupported, form implicitly declared).
+        form = getattr(elicitation, "form", None)
+        url = getattr(elicitation, "url", None)
+        return form is not None or (form is None and url is None)
+
+    def _confirmation_plan(self, name: str, arguments: dict) -> str:
+        details = {k: v for k, v in (arguments or {}).items() if k != "content"}
+        if "content" in (arguments or {}):
+            content = str(arguments["content"])
+            details["content_bytes"] = len(content.encode())
+            details["content_sha256"] = hashlib.sha256(content.encode()).hexdigest()
+        return (
+            f"Approve {name} with {json.dumps(redact(details), ensure_ascii=False)}? "
+            "This may overwrite or permanently delete data. Trash availability "
+            "is not guaranteed."
+        )
+
+    def _confirmation_error(self, name: str, message: str) -> ToolFailureError:
+        return ToolFailureError(
+            {
+                "success": False,
+                "error": {
+                    "code": "confirmation_required",
+                    "message": message,
+                    "tool": name,
+                    "next": (
+                        "Use a client supporting MCP 2026-07-28 form elicitation "
+                        "and approve the exact operation in its confirmation UI."
+                    ),
+                },
+            }
+        )
+
+    def _confirmation_target(self, name: str, arguments: dict) -> str:
+        """Resolve the approved NAS without logging in or mutating sessions."""
+        nas_name = arguments.get("nas_name")
+        if nas_name:
+            target = getattr(self, "nas_name_map", {}).get(nas_name)
+            if not target and nas_name in config.nas_configs:
+                target = config.get_synology_config(nas_name).get("base_url")
+            if not target and not config.nas_configs and nas_name == "default":
+                target = config.get_synology_config().get("base_url")
+        elif arguments.get("base_url"):
+            target = arguments["base_url"]
+        elif getattr(self, "sessions", {}):
+            target = next(iter(self.sessions))
+        elif len(config.nas_configs) == 1 or not config.nas_configs:
+            target = config.get_synology_config().get("base_url")
+        else:
+            target = None
+        if not isinstance(target, str) or not self._validate_url(target):
+            raise self._confirmation_error(name, "Specify an unambiguous nas_name or base_url before approval.")
+        return target.rstrip("/")
+
+    async def _confirm_destructive(
+        self,
+        name: str,
+        arguments: dict,
+        ctx: Optional[ServerRequestContext],
+        params: Optional[CallToolRequestParams],
+        target: str,
+    ) -> str | types.InputRequiredResult:
+        """Return how the call was confirmed, or an input-required result.
+
+        Only a signed round-trip state and an affirmative form response permit
+        execution. Clients without form elicitation fail closed.
+        """
+        if "confirm_token" in arguments:
+            raise self._confirmation_error(name, "confirm_token is no longer supported.")
+        if config.confirm_mode == "off":
+            return "none"
+
+        binding = {"arguments": arguments, "resolved_nas": target}
+        responses = getattr(params, "input_responses", None) if params is not None else None
+        state = getattr(params, "request_state", None) if params is not None else None
+        if responses is not None and state:
+            try:
+                self.confirm.consume(self.confirm.decode_state(state), name, binding)
+            except ConfirmationError as exc:
+                raise ToolFailureError(
+                    {
+                        "success": False,
+                        "error": {
+                            "code": "confirmation_invalid",
+                            "message": str(exc),
+                            "tool": name,
+                        },
+                    }
+                ) from exc
+            if not _answer_approved(responses.get("confirm")):
+                raise ToolFailureError(
+                    {
+                        "success": False,
+                        "error": {
+                            "code": "confirmation_declined",
+                            "message": f"{name} was not approved; nothing was executed.",
+                            "tool": name,
+                        },
+                    }
+                )
+            return "round-trip"
+
+        if config.confirm_mode == "mrtr" and self._supports_confirmation_round_trip(ctx):
+            state = self.confirm.encode_state(self.confirm.issue(name, binding))
+            return types.InputRequiredResult(
+                result_type="input_required",
+                input_requests={
+                    "confirm": types.ElicitRequest(
+                        method="elicitation/create",
+                        params=types.ElicitRequestFormParams(
+                            mode="form",
+                            message=self._confirmation_plan(name, {**arguments, "resolved_nas": target}),
+                            requested_schema={
+                                "type": "object",
+                                "properties": {
+                                    "approve": {
+                                        "type": "boolean",
+                                        "title": "Approve",
+                                        "description": "Run this destructive operation",
+                                        "default": False,
+                                    }
+                                },
+                                "required": ["approve"],
+                            },
+                        ),
+                    )
+                },
+                request_state=state,
+            )
+
+        raise self._confirmation_error(
+            name,
+            f"'{name}' is destructive and requires confirmation, but this client "
+            "cannot answer the inline confirmation request.",
+        )
+
     async def _dispatch_tool(
-        self, name: str, arguments: dict
-    ) -> list[types.TextContent]:
+        self,
+        name: str,
+        arguments: dict,
+        ctx: Optional[ServerRequestContext] = None,
+        params: Optional[CallToolRequestParams] = None,
+    ) -> list[types.TextContent] | types.InputRequiredResult:
         """Dispatch a tool call, raising on failure (caller handles isError)."""
         logger.debug(f"Executing tool: {name}")
         try:
             _, handler = self._tool_registry[name]
         except KeyError:
+            self._record_audit(name, arguments, "unknown_tool", Risk.DESTRUCTIVE, 0.0)
             raise ValueError(f"Unknown tool: {name}")
         if name in self._STRICT_ARG_TOOLS:
             refusal = self._reject_undeclared_arguments(name, arguments)
             if refusal:
+                self._record_audit(
+                    name, arguments, "rejected_unknown_argument", risk_for(name), 0.0,
+                    error=refusal.get("error", {}).get("message", ""),
+                )
                 raise ToolFailureError(refusal)
-        return await handler(arguments)
+
+        risk = risk_for(name, arguments)
+        confirmation = "none"
+        execution_arguments = arguments
+        if risk is Risk.DESTRUCTIVE:
+            try:
+                target = self._confirmation_target(name, arguments)
+                decision = await self._confirm_destructive(name, arguments, ctx, params, target)
+            except ToolFailureError as exc:
+                # A refused confirmation is as interesting as an executed call:
+                # the trail must show that someone was asked and said no, or
+                # that the client could not be asked at all.
+                code = exc.payload.get("error", {}).get("code", "")
+                if isinstance(code, str) and code.startswith("confirmation_"):
+                    self._record_audit(
+                        name, arguments, code, risk, 0.0,
+                        error=exc.payload.get("error", {}).get("message", ""),
+                        extra={"confirmation": code},
+                    )
+                raise
+            if isinstance(decision, types.InputRequiredResult):
+                self._record_audit(
+                    name, arguments, "confirmation_requested", risk, 0.0,
+                    extra={"confirmation": "round-trip"},
+                )
+                return decision
+            confirmation = decision
+            # Handlers resolve base_url explicitly; removing the alias prevents
+            # a name/session change after approval from redirecting execution.
+            execution_arguments = {**arguments, "base_url": target}
+            execution_arguments.pop("nas_name", None)
+            # Fail closed: an unrecorded destructive action must not run.
+            try:
+                await asyncio.to_thread(self.audit.ensure_writable)
+                await asyncio.to_thread(
+                    self.audit.record,
+                    tool=name,
+                    arguments=arguments,
+                    outcome="started",
+                    duration_ms=0.0,
+                    risk=risk.value,
+                    event="tool_intent",
+                    extra={"confirmation": confirmation, "resolved_nas": target},
+                    required=True,
+                )
+            except AuditUnavailableError as exc:
+                raise ToolFailureError({
+                    "success": False,
+                    "error": {
+                        "code": "audit_unavailable",
+                        "message": (
+                            f"Refused '{name}': the audit trail cannot be written "
+                            f"({exc}). Fix MCP_AUDIT_LOG or set MCP_AUDIT=false "
+                            "to run without a trail."
+                        ),
+                    },
+                }) from exc
+
+        started = time.perf_counter()
+        try:
+            if risk is Risk.DESTRUCTIVE and arguments.get("nas_name") and target not in self.sessions:
+                resolved = await asyncio.to_thread(self._get_base_url, arguments)
+                if resolved != target:
+                    raise self._confirmation_error(name, "NAS resolution changed after approval; retry with an explicit target.")
+            result = await handler(execution_arguments)
+        except Exception as exc:
+            self._record_audit(
+                name, arguments, "error", risk, started,
+                error=f"{type(exc).__name__}: {exc}",
+                extra={"confirmation": confirmation},
+            )
+            raise
+        failure = self._returned_failure(result)
+        self._record_audit(
+            name, arguments, "error" if failure is not None else "ok", risk, started,
+            error=json.dumps(redact(failure.get("error", failure))) if failure is not None else "",
+            extra={"confirmation": confirmation},
+        )
+        return result
+
+    @staticmethod
+    def _returned_failure(result: object) -> Optional[dict]:
+        """Recognize the structured DSM failures returned by older handlers."""
+        for block in result if isinstance(result, list) else []:
+            text = getattr(block, "text", "")
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict) and payload.get("success") is False:
+                return payload
+        return None
+
+    def _record_audit(
+        self,
+        name: str,
+        arguments: dict,
+        outcome: str,
+        risk: Risk,
+        started: float,
+        *,
+        error: str = "",
+        extra: Optional[dict] = None,
+    ) -> None:
+        """Append one audit line. Never raises: see `AuditLog.record`."""
+        self.audit.record(
+            tool=name,
+            arguments=arguments or {},
+            outcome=outcome,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            risk=risk.value,
+            error=error,
+            extra=extra,
+        )
 
     def _service_instance_dicts(self):
         """Canonical set of per-domain instance caches keyed by base_url.
@@ -1353,15 +1712,89 @@ class SynologyMCPServer:
         ]
 
     async def _handle_delete(self, arguments: dict) -> list[types.TextContent]:
-        """Handle deleting a file or directory on the Synology NAS."""
+        """Delete a file or directory, preferring the share's trash."""
+        try:
+            path = validate_delete_path(arguments["path"])
+        except ValueError as exc:
+            raise ToolFailureError({
+                "success": False,
+                "error": {"code": "invalid_delete_path", "message": str(exc)},
+            }) from exc
         base_url = await asyncio.to_thread(self._get_base_url, arguments)
-        path = arguments["path"]
-
         filestation = self._get_filestation(base_url)
-        result = await asyncio.to_thread(filestation.delete, path)
+        policy = TrashPolicy(config.trash_mode, config.trash_dir)
+        if policy.mode not in {"auto", "always", "never"}:
+            raise ToolFailureError({
+                "success": False,
+                "error": {"code": "invalid_trash_policy", "message": "MCP_TRASH must be auto, always, or never"},
+            })
+        try:
+            trash_root = trash_root_for(path, policy)
+        except TrashUnavailableError:
+            trash_root = None
+        if trash_root and (path == trash_root or path.startswith(trash_root + "/")):
+            # Falling through to the hard delete would erase every recovery
+            # entry; a purge needs its own explicit operation.
+            raise ToolFailureError({
+                "success": False,
+                "error": {
+                    "code": "trash_root_delete",
+                    "message": f"Refused: {path} is inside the trash ({trash_root}). "
+                               "Trash purging is not exposed as a delete path.",
+                },
+            })
 
+        placement: dict = {"soft_delete": False}
+        if policy.enabled:
+            try:
+                placement = await asyncio.to_thread(soft_delete, filestation, path, policy)
+            except TrashUnavailableError as exc:
+                if policy.required:
+                    raise ToolFailureError(
+                        {
+                            "success": False,
+                            "error": {
+                                "code": "trash_unavailable",
+                                "message": (
+                                    f"Refused '{path}': MCP_TRASH=always and the share "
+                                    f"cannot host a trash folder ({exc})."
+                                ),
+                            },
+                        }
+                    ) from exc
+                logger.warning("trash unavailable for %s; deleting permanently: %s", path, exc)
+            except TrashVerificationError as exc:
+                # A move was attempted and cannot be accounted for. Never fall
+                # through to a hard delete: the data may already be in the trash.
+                raise ToolFailureError(
+                    {
+                        "success": False,
+                        "error": {"code": "trash_verification_failed", "message": str(exc)},
+                    }
+                ) from exc
+
+        if not placement.get("soft_delete"):
+            placement = {
+                "soft_delete": False,
+                "delete_result": await asyncio.to_thread(filestation.delete, path),
+            }
+
+        self.audit.record(
+            tool="delete",
+            arguments={"path": path},
+            outcome="soft" if placement.get("soft_delete") else "hard",
+            duration_ms=0.0,
+            risk=Risk.DESTRUCTIVE.value,
+            event="delete_placement",
+            extra={
+                "trash_path": placement.get("trash_path"),
+                "trash_root": placement.get("trash_root"),
+            },
+        )
         return [
-            types.TextContent(type="text", text=f"Delete result: {json.dumps(result, indent=2)}")
+            types.TextContent(
+                type="text", text=f"Delete result: {json.dumps(placement, indent=2)}"
+            )
         ]
 
     async def _handle_ds_get_info(self, arguments: dict) -> list[types.TextContent]:
@@ -1474,7 +1907,7 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         health = self._get_health(base_url)
         result = getattr(health, method_name)()
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_update_call(
         self, arguments: dict, method_name: str
@@ -1482,13 +1915,13 @@ class SynologyMCPServer:
         """Generic handler for read-only update calls."""
         base_url = await self._resolve_base_url(arguments)
         update = self._get_update(base_url)
-        return self._emit(await asyncio.to_thread(getattr(update, method_name)))
+        return self._emit_or_raise(await asyncio.to_thread(getattr(update, method_name)))
 
     async def _handle_security_posture(self, arguments: dict) -> list[types.TextContent]:
         """Read-only security posture."""
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
-        return self._emit(await asyncio.to_thread(security.posture))
+        return self._emit_or_raise(await asyncio.to_thread(security.posture))
 
     async def _handle_terminal_set(self, arguments: dict) -> list[types.TextContent]:
         """Telnet/SSH on or off. Refuses without confirm=true."""
@@ -1499,7 +1932,7 @@ class SynologyMCPServer:
             raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "Give enable_telnet and/or enable_ssh as booleans."}})
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
-        return self._emit(await asyncio.to_thread(security.set_terminal, **changes))
+        return self._emit_or_raise(await asyncio.to_thread(security.set_terminal, **changes))
 
     async def _handle_autoblock_set(self, arguments: dict) -> list[types.TextContent]:
         """Auto-block settings. Refuses without confirm=true."""
@@ -1512,7 +1945,7 @@ class SynologyMCPServer:
             raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "enable must be a boolean."}})
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
-        return self._emit(await asyncio.to_thread(security.set_auto_block, **changes))
+        return self._emit_or_raise(await asyncio.to_thread(security.set_auto_block, **changes))
 
     async def _handle_allow_list(self, arguments: dict, method_name: str) -> list[types.TextContent]:
         """Add to or remove from the auto-block allow list. Refuses without confirm=true."""
@@ -1523,7 +1956,7 @@ class SynologyMCPServer:
             raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "entries must be a non-empty list of strings."}})
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
-        return self._emit(await asyncio.to_thread(getattr(security, method_name), [e.strip() for e in entries]))
+        return self._emit_or_raise(await asyncio.to_thread(getattr(security, method_name), [e.strip() for e in entries]))
 
     async def _handle_https_redirect_set(self, arguments: dict) -> list[types.TextContent]:
         """DSM's HTTP-to-HTTPS redirect. Refuses without confirm=true."""
@@ -1533,7 +1966,7 @@ class SynologyMCPServer:
             raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "enable must be a boolean."}})
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
-        return self._emit(await asyncio.to_thread(security.set_https_redirect, arguments["enable"]))
+        return self._emit_or_raise(await asyncio.to_thread(security.set_https_redirect, arguments["enable"]))
 
     async def _handle_dsm_update_download(self, arguments: dict) -> list[types.TextContent]:
         """Start the DSM update download. Refuses without confirm=true."""
@@ -1541,7 +1974,7 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed("Downloading the DSM update")
         base_url = await self._resolve_base_url(arguments)
         update = self._get_update(base_url)
-        return self._emit(await asyncio.to_thread(update.dsm_update_download))
+        return self._emit_or_raise(await asyncio.to_thread(update.dsm_update_download))
 
     async def _handle_dsm_update_install(self, arguments: dict) -> list[types.TextContent]:
         """Pre-check, and with confirm=true install, the downloaded DSM update.
@@ -1571,8 +2004,8 @@ class SynologyMCPServer:
                         + " and ".join(needed)
                         + " to install."
                     )
-            return self._emit(result)
-        return self._emit(
+            return self._emit_or_raise(result)
+        return self._emit_or_raise(
             await asyncio.to_thread(
                 update.dsm_update_install,
                 accept_warnings=arguments.get("accept_warnings") is True,
@@ -1586,7 +2019,7 @@ class SynologyMCPServer:
         disk_id = arguments["disk_id"]
         health = self._get_health(base_url)
         result = health.disk_smart_info(disk_id)
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _resolve_base_url(self, arguments: dict) -> str:
         """Resolve the target NAS without ever logging in on the event loop.
@@ -1656,7 +2089,7 @@ class SynologyMCPServer:
         """Generic handler for no-argument SAN Manager calls."""
         base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(await asyncio.to_thread(getattr(iscsi, method_name)))
+        return self._emit_or_raise(await asyncio.to_thread(getattr(iscsi, method_name)))
 
     @staticmethod
     def _is_confirmed(arguments: dict) -> bool:
@@ -1693,7 +2126,7 @@ class SynologyMCPServer:
         )
 
     @staticmethod
-    def _emit(result: dict) -> list[types.TextContent]:
+    def _emit_or_raise(result: dict) -> list[types.TextContent]:
         """Render a tool result, raising when the operation did not succeed.
 
         The structured body is kept either way; raising is only how the MCP
@@ -1711,7 +2144,7 @@ class SynologyMCPServer:
         base_url = await self._resolve_base_url(arguments)
         name = arguments["name"]
         iscsi = self._get_iscsi(base_url)
-        return self._emit(await asyncio.to_thread(iscsi.lun_get, name))
+        return self._emit_or_raise(await asyncio.to_thread(iscsi.lun_get, name))
 
     async def _handle_lun_create(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating an iSCSI LUN."""
@@ -1725,7 +2158,7 @@ class SynologyMCPServer:
             lun_type=arguments.get("type", "thin"),
             description=arguments.get("description"),
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_lun_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting an iSCSI LUN. Refuses without confirm=true."""
@@ -1733,13 +2166,13 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed(f"Deleting LUN {arguments.get('uuid')!r}")
         base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(await asyncio.to_thread(iscsi.lun_delete, arguments["uuid"]))
+        return self._emit_or_raise(await asyncio.to_thread(iscsi.lun_delete, arguments["uuid"]))
 
     async def _handle_target_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting a single iSCSI target."""
         base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(
+        return self._emit_or_raise(
             await asyncio.to_thread(iscsi.target_get, arguments["target_id"])
         )
 
@@ -1762,7 +2195,7 @@ class SynologyMCPServer:
             chap_password=arguments.get("chap_password"),
             max_sessions=arguments.get("max_sessions", 0),
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_target_delete(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting an iSCSI target. Refuses without confirm=true."""
@@ -1770,7 +2203,7 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed(f"Deleting target {arguments.get('target_id')!r}")
         base_url = await self._resolve_base_url(arguments)
         iscsi = self._get_iscsi(base_url)
-        return self._emit(
+        return self._emit_or_raise(
             await asyncio.to_thread(iscsi.target_delete, arguments["target_id"])
         )
 
@@ -1844,7 +2277,7 @@ class SynologyMCPServer:
         }
         # A partial failure keeps every per-LUN result AND sets isError, so a
         # caller reading the protocol flag and one parsing the body agree.
-        return self._emit(payload)
+        return self._emit_or_raise(payload)
 
     async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting system log entries."""
@@ -1853,7 +2286,7 @@ class SynologyMCPServer:
         limit = arguments.get("limit", 50)
         health = self._get_health(base_url)
         result = health.system_log(offset=offset, limit=limit)
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     # ------------------------------------------------------------------
     # NFS management handlers
@@ -1864,7 +2297,7 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         nfs = self._get_nfs(base_url)
         result = getattr(nfs, method_name)()
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_nfs_enable(self, arguments: dict) -> list[types.TextContent]:
         """Handle enabling/disabling NFS service."""
@@ -1873,7 +2306,7 @@ class SynologyMCPServer:
         nfs_v4 = arguments.get("nfs_v4", False)
         nfs = self._get_nfs(base_url)
         result = nfs.nfs_enable(enable=enable, nfs_v4=nfs_v4)
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_nfs_set_permission(self, arguments: dict) -> list[types.TextContent]:
         """Handle setting NFS permissions on a share."""
@@ -1887,7 +2320,7 @@ class SynologyMCPServer:
             squash=arguments.get("squash", "root_squash"),
             security=arguments.get("security", "sys"),
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_create_share(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new shared folder."""
@@ -1900,7 +2333,7 @@ class SynologyMCPServer:
             enable_recycle_bin=arguments.get("enable_recycle_bin", True),
             recycle_bin_admin_only=arguments.get("recycle_bin_admin_only", True),
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     # ------------------------------------------------------------------
     # Login Portal reverse proxy handlers
@@ -1919,13 +2352,13 @@ class SynologyMCPServer:
         """Generic handler for no-argument reverse proxy reads."""
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
-        return self._emit(await asyncio.to_thread(getattr(proxy, method_name)))
+        return self._emit_or_raise(await asyncio.to_thread(getattr(proxy, method_name)))
 
     async def _handle_reverse_proxy_get(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting one reverse proxy entry."""
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
-        return self._emit(
+        return self._emit_or_raise(
             await asyncio.to_thread(proxy.get_entry, arguments["uuid_or_description"])
         )
 
@@ -1934,14 +2367,14 @@ class SynologyMCPServer:
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
         fields = {k: arguments[k] for k in self._REVERSE_PROXY_FIELDS if k in arguments}
-        return self._emit(await asyncio.to_thread(proxy.create_entry, **fields))
+        return self._emit_or_raise(await asyncio.to_thread(proxy.create_entry, **fields))
 
     async def _handle_reverse_proxy_update(self, arguments: dict) -> list[types.TextContent]:
         """Handle changing fields of a reverse proxy entry."""
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
         fields = {k: arguments[k] for k in self._REVERSE_PROXY_FIELDS if k in arguments}
-        return self._emit(
+        return self._emit_or_raise(
             await asyncio.to_thread(proxy.update_entry, arguments["uuid"], **fields)
         )
 
@@ -1953,7 +2386,7 @@ class SynologyMCPServer:
             )
         base_url = await self._resolve_base_url(arguments)
         proxy = self._get_reverse_proxy(base_url)
-        return self._emit(await asyncio.to_thread(proxy.delete_entry, arguments["uuid"]))
+        return self._emit_or_raise(await asyncio.to_thread(proxy.delete_entry, arguments["uuid"]))
 
     # ------------------------------------------------------------------
     # Container Manager handlers
@@ -2099,7 +2532,7 @@ class SynologyMCPServer:
         else:
             raise ValueError(f"Unknown container method: {method_name}")
 
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     # ------------------------------------------------------------------
     # User management handlers
@@ -2112,13 +2545,13 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = getattr(usermgr, method_name)()
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_get_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.get_user(arguments["name"])
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_create_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -2131,7 +2564,7 @@ class SynologyMCPServer:
             cannot_chg_passwd=arguments.get("cannot_chg_passwd", False),
             passwd_never_expire=arguments.get("passwd_never_expire", True),
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_set_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -2144,19 +2577,19 @@ class SynologyMCPServer:
             email=arguments.get("email"),
             expired=arguments.get("expired"),
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_delete_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.delete_user(arguments["name"])
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_list_group_members(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.list_group_members(arguments["group"])
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_add_to_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -2166,7 +2599,7 @@ class SynologyMCPServer:
         result = await asyncio.to_thread(
             usermgr.add_user_to_group, arguments["username"], arguments["groups"]
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_remove_from_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -2174,19 +2607,19 @@ class SynologyMCPServer:
         result = await asyncio.to_thread(
             usermgr.remove_user_from_group, arguments["username"], arguments["groups"]
         )
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_get_permissions(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.get_user_permissions(arguments["name"])
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _handle_usermgr_set_permissions(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.set_user_permissions(arguments["name"], arguments["permissions"])
-        return self._emit(result)
+        return self._emit_or_raise(result)
 
     async def _run_stdio(self):
         """Serve the MCP protocol over stdio until the client disconnects."""

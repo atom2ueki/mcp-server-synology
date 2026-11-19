@@ -58,6 +58,28 @@ def _safe_print(*args, **kwargs):
 
 builtins.print = _safe_print
 
+# The destructive-confirmation gate is part of the server under test, but most
+# of the suite exercises handlers directly and has no client that can answer a
+# 2026-07-28 form. Default it off; suites that test the gate itself opt in with
+# @pytest.mark.confirmation (see test_confirmation_flow.py).
+@pytest.fixture(autouse=True)
+def _confirmation_gate_default_off(request, monkeypatch):
+    if request.node.get_closest_marker("confirmation"):
+        return
+    # Patch the object the server actually reads. tests/test_config.py reloads
+    # the config module, after which `from config import config` yields a
+    # different singleton than mcp_server's binding; patching only the fresh
+    # one left the server reading an unpatched copy and the gate firing.
+    import mcp_server
+
+    monkeypatch.setattr(mcp_server.config, "confirm_mode", "off")
+    import config as config_module
+
+    if config_module.config is not mcp_server.config:
+        monkeypatch.setattr(config_module.config, "confirm_mode", "off")
+
+
+
 
 # Add src directory to Python path
 src_path = Path(__file__).parent.parent / "src"
@@ -196,6 +218,9 @@ def test_destination(download_station):
 # Test markers for categorizing tests
 def pytest_configure(config):
     """Configure custom pytest markers."""
+    config.addinivalue_line(
+        "markers", "confirmation: needs the destructive-confirmation gate ON (default mrtr)"
+    )
     config.addinivalue_line("markers", "real_nas: tests that require real NAS connection")
     config.addinivalue_line("markers", "destructive: tests that modify NAS state")
     config.addinivalue_line("markers", "slow: tests that may take a long time")
