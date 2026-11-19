@@ -84,67 +84,67 @@ POLICY = TrashPolicy()
 
 class TestPlacement:
     def test_file_moves_into_dated_trash(self):
-        fs = FakeFileStation(dirs={"/videos", "/videos/plex"}, files={"/videos/plex/movie.mkv"})
-        result = soft_delete(fs, "/videos/plex/movie.mkv", POLICY, now=NOW)
+        fs = FakeFileStation(dirs={"/media", "/media/library"}, files={"/media/library/movie.mkv"})
+        result = soft_delete(fs, "/media/library/movie.mkv", POLICY, now=NOW)
         assert result["soft_delete"] is True
-        assert result["trash_path"].startswith("/videos/#trash/2026-10-26/")
+        assert result["trash_path"].startswith("/media/#trash/2026-10-26/")
         assert result["trash_path"].endswith("/movie.mkv")
-        assert result["trash_root"] == "/videos/#trash"
-        assert "/videos/plex/movie.mkv" not in fs.files
+        assert result["trash_root"] == "/media/#trash"
+        assert "/media/library/movie.mkv" not in fs.files
         assert result["trash_path"] in fs.files
 
     def test_directory_moves_into_trash(self):
         fs = FakeFileStation(
-            dirs={"/videos", "/videos/plex", "/videos/plex/show"}, files=set()
+            dirs={"/media", "/media/library", "/media/library/show"}, files=set()
         )
-        result = soft_delete(fs, "/videos/plex/show", POLICY, now=NOW)
-        assert result["trash_path"].startswith("/videos/#trash/2026-10-26/")
+        result = soft_delete(fs, "/media/library/show", POLICY, now=NOW)
+        assert result["trash_path"].startswith("/media/#trash/2026-10-26/")
         assert result["trash_path"].endswith("/show")
-        assert "/videos/plex/show" not in fs.dirs
+        assert "/media/library/show" not in fs.dirs
         assert result["trash_path"] in fs.dirs
 
     def test_trash_folders_are_created_on_demand(self):
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
-        soft_delete(fs, "/videos/a.bin", POLICY, now=NOW)
-        assert "/videos/#trash" in fs.dirs
-        assert "/videos/#trash/2026-10-26" in fs.dirs
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
+        soft_delete(fs, "/media/a.bin", POLICY, now=NOW)
+        assert "/media/#trash" in fs.dirs
+        assert "/media/#trash/2026-10-26" in fs.dirs
 
     def test_name_collision_preserves_previous_recovery(self):
         fs = FakeFileStation(
-            dirs={"/videos", "/videos/#trash", "/videos/#trash/2026-10-26"},
+            dirs={"/media", "/media/#trash", "/media/#trash/2026-10-26"},
             files={
-                "/videos/a.mkv",
-                "/videos/#trash/2026-10-26/a.mkv",
+                "/media/a.mkv",
+                "/media/#trash/2026-10-26/a.mkv",
             },
         )
-        result = soft_delete(fs, "/videos/a.mkv", POLICY, now=NOW)
-        assert result["trash_path"].startswith("/videos/#trash/2026-10-26/")
+        result = soft_delete(fs, "/media/a.mkv", POLICY, now=NOW)
+        assert result["trash_path"].startswith("/media/#trash/2026-10-26/")
         assert result["trash_path"].endswith("/a.mkv")
-        assert "/videos/#trash/2026-10-26/a.mkv" in fs.files
+        assert "/media/#trash/2026-10-26/a.mkv" in fs.files
 
     def test_custom_directory_name(self):
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
-        result = soft_delete(fs, "/videos/a.bin", TrashPolicy(dir_name=".trash"), now=NOW)
-        assert result["trash_root"] == "/videos/.trash"
-        assert result["trash_path"].startswith("/videos/.trash/2026-10-26/")
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
+        result = soft_delete(fs, "/media/a.bin", TrashPolicy(dir_name=".trash"), now=NOW)
+        assert result["trash_root"] == "/media/.trash"
+        assert result["trash_path"].startswith("/media/.trash/2026-10-26/")
         assert result["trash_path"].endswith("/a.bin")
 
     def test_absolute_path_template_for_read_only_share_roots(self):
         # Accounts that cannot write <share>/ can still use a trash inside the
         # library; {share} keeps one installation usable across shares.
-        fs = FakeFileStation(dirs={"/videos", "/videos/plex"}, files={"/videos/plex/a.bin"})
-        policy = TrashPolicy(dir_name="/videos/plex/.trash/{share}")
-        result = soft_delete(fs, "/videos/plex/a.bin", policy, now=NOW)
-        assert result["trash_root"] == "/videos/plex/.trash/videos"
-        assert result["trash_path"].startswith("/videos/plex/.trash/videos/2026-10-26/")
+        fs = FakeFileStation(dirs={"/media", "/media/library"}, files={"/media/library/a.bin"})
+        policy = TrashPolicy(dir_name="/media/library/.trash/{share}")
+        result = soft_delete(fs, "/media/library/a.bin", policy, now=NOW)
+        assert result["trash_root"] == "/media/library/.trash/media"
+        assert result["trash_path"].startswith("/media/library/.trash/media/2026-10-26/")
         assert result["trash_path"].endswith("/a.bin")
 
 
 class TestRefusals:
     def test_path_already_in_trash(self):
-        fs = FakeFileStation(files={"/videos/#trash/2026-10-26/a.bin"})
+        fs = FakeFileStation(files={"/media/#trash/2026-10-26/a.bin"})
         with pytest.raises(TrashUnavailableError, match="already inside"):
-            soft_delete(fs, "/videos/#trash/2026-10-26/a.bin", POLICY, now=NOW)
+            soft_delete(fs, "/media/#trash/2026-10-26/a.bin", POLICY, now=NOW)
 
     def test_filesystem_root(self):
         with pytest.raises(TrashUnavailableError, match="root"):
@@ -157,31 +157,31 @@ class TestRefusals:
 
 class TestFailureHandling:
     def test_unwritable_share_is_unavailable_before_any_move(self):
-        fs = FakeFileStation(dirs={"/videos", "/videos/plex"}, files={"/videos/plex/a.mkv"})
+        fs = FakeFileStation(dirs={"/media", "/media/library"}, files={"/media/library/a.mkv"})
         fs.fail_create = True
         with pytest.raises(TrashUnavailableError):
-            soft_delete(fs, "/videos/plex/a.mkv", POLICY, now=NOW)
-        assert "/videos/plex/a.mkv" in fs.files  # nothing moved
+            soft_delete(fs, "/media/library/a.mkv", POLICY, now=NOW)
+        assert "/media/library/a.mkv" in fs.files  # nothing moved
 
     def test_failed_move_keeps_source_is_unavailable(self):
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
         fs.fail_move = True
         with pytest.raises(TrashVerificationError):
-            soft_delete(fs, "/videos/a.bin", POLICY, now=NOW)
-        assert "/videos/a.bin" in fs.files
+            soft_delete(fs, "/media/a.bin", POLICY, now=NOW)
+        assert "/media/a.bin" in fs.files
 
     def test_failed_move_that_lost_source_is_not_fallback_safe(self):
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
         fs.fail_move = True
         fs.drop_source_on_failure = True
         with pytest.raises(TrashVerificationError, match="refusing to delete"):
-            soft_delete(fs, "/videos/a.bin", POLICY, now=NOW)
+            soft_delete(fs, "/media/a.bin", POLICY, now=NOW)
 
     def test_move_that_claimed_success_without_destination_is_not_fallback_safe(self):
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
         fs.pretend_move = True
         with pytest.raises(TrashVerificationError, match="missing"):
-            soft_delete(fs, "/videos/a.bin", POLICY, now=NOW)
+            soft_delete(fs, "/media/a.bin", POLICY, now=NOW)
 
 
 class TestPolicy:
@@ -201,7 +201,7 @@ def test_concurrent_same_named_directories_remain_separate_recovery_entries():
     from concurrent.futures import ThreadPoolExecutor
     class RealisticMove(FakeFileStation):
         def __init__(self):
-            super().__init__(dirs={"/videos", "/videos/A/show", "/videos/B/show"})
+            super().__init__(dirs={"/media", "/media/A/show", "/media/B/show"})
             self.ready = threading.Barrier(2)
             self.lock = threading.Lock()
         def move_file(self, source, destination, overwrite=False):
@@ -212,7 +212,7 @@ def test_concurrent_same_named_directories_remain_separate_recovery_entries():
                 super().move_file(source, destination, overwrite)
                 return {"success": True, "destination_path": destination}
     fs = RealisticMove()
-    paths = ["/videos/A/show", "/videos/B/show"]
+    paths = ["/media/A/show", "/media/B/show"]
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda path: soft_delete(fs, path, POLICY, now=NOW), paths))
     recovered = [r["trash_path"] for r in results]
@@ -226,6 +226,6 @@ def test_reported_move_destination_must_match_the_recovery_entry():
         def move_file(self, source, destination, overwrite=False):
             super().move_file(source, destination, overwrite)
             return {"destination_path": destination + "/nested"}
-    fs = Misreported(dirs={"/videos"}, files={"/videos/a.bin"})
+    fs = Misreported(dirs={"/media"}, files={"/media/a.bin"})
     with pytest.raises(TrashVerificationError):
-        soft_delete(fs, "/videos/a.bin", POLICY, now=NOW)
+        soft_delete(fs, "/media/a.bin", POLICY, now=NOW)

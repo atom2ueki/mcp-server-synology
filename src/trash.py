@@ -91,7 +91,7 @@ def trash_root_for(path: str, policy: TrashPolicy) -> str:
     `dir_name` is normally a folder name under the share (`#trash`), which is
     the cleanest default. A leading `/` makes it an absolute template instead,
     with `{share}` substituted — the escape hatch for accounts that cannot
-    write the share root but can write inside the library (`/videos/plex/.trash`).
+    write the share root but can write inside the library (`/media/library/.trash`).
     """
     normalized = "/" + path.strip("/")
     parts = normalized.split("/")

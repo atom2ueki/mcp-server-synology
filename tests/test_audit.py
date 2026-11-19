@@ -35,7 +35,7 @@ def make_log(tmp_path, **kwargs) -> AuditLog:
 class TestRedaction:
     def test_credentials_are_masked_by_key(self):
         out = redact({
-            "username": "atom2ueki",
+            "username": "mcp-bot",
             "password": "hunter2",
             "passwd": "hunter2",
             "token": "abc",
@@ -44,7 +44,7 @@ class TestRedaction:
             "device_id": "trusted-device-secret",
             "did": "trusted-device-secret",
         })
-        assert out["username"] == "atom2ueki"
+        assert out["username"] == "mcp-bot"
         for key in ("password", "passwd", "token", "chap_password", "session", "device_id", "did"):
             assert out[key] == "***", key
 
@@ -68,7 +68,7 @@ class TestRedaction:
 
 class TestTarget:
     def test_prefers_path_like_keys(self):
-        assert target_of({"path": "/videos/x", "folder_path": "/other"}) == "/videos/x"
+        assert target_of({"path": "/media/x", "folder_path": "/other"}) == "/media/x"
         assert target_of({"folder_path": "/dir"}) == "/dir"
         assert target_of({"uuid": "abc"}) is None
 
@@ -78,7 +78,7 @@ class TestRecord:
         log = make_log(tmp_path)
         log.record(
             tool="delete",
-            arguments={"path": "/videos/plex/x", "password": "nope"},
+            arguments={"path": "/media/library/x", "password": "nope"},
             outcome="ok",
             duration_ms=12.34,
             risk="destructive",
@@ -88,7 +88,7 @@ class TestRecord:
         entry = lines[0]
         assert entry["tool"] == "delete"
         assert entry["risk"] == "destructive"
-        assert entry["target"] == "/videos/plex/x"
+        assert entry["target"] == "/media/library/x"
         assert entry["outcome"] == "ok"
         assert entry["duration_ms"] == 12.3
         assert entry["run"] == "testrun"
@@ -121,7 +121,7 @@ class TestRotation:
     def test_rotates_at_size_limit_and_keeps_n_files(self, tmp_path):
         log = make_log(tmp_path, max_bytes=400, keep=2)
         for _ in range(10):
-            log.record(tool="list_directory", arguments={"path": "/videos/x"},
+            log.record(tool="list_directory", arguments={"path": "/media/x"},
                        outcome="ok", duration_ms=1, risk="read")
         assert log.path.exists()
         assert log.path.with_name("audit.jsonl.1").exists()
@@ -171,7 +171,7 @@ class TestFailClosed:
         from concurrent.futures import ThreadPoolExecutor
         def write(index):
             log = AuditLog(tmp_path / "shared.jsonl", max_bytes=300, keep=25)
-            log.record(tool="delete", arguments={"path": f"/videos/{index}"},
+            log.record(tool="delete", arguments={"path": f"/media/{index}"},
                        outcome="started", duration_ms=0, risk="destructive", required=True)
         with ThreadPoolExecutor(max_workers=6) as pool:
             list(pool.map(write, range(20)))
@@ -179,4 +179,4 @@ class TestFailClosed:
         for path in tmp_path.glob("shared.jsonl*"):
             if path.suffix != ".lock":
                 records.extend(read_lines(path))
-        assert {row["target"] for row in records} == {f"/videos/{i}" for i in range(20)}
+        assert {row["target"] for row in records} == {f"/media/{i}" for i in range(20)}

@@ -354,8 +354,8 @@ Every tool call appends a JSON result record to `logs/audit.jsonl` — the tool,
 
 ```json
 {"ts":"2026-10-23T01:25:36.412+00:00","event":"tool_call","run":"9f3c1a2b8d4e","pid":7,
- "tool":"delete","risk":"destructive","target":"/videos/plex/Movies/Old/Movie.mkv",
- "args":{"path":"/videos/plex/Movies/Old/Movie.mkv"},"outcome":"ok","duration_ms":41}
+ "tool":"delete","risk":"destructive","target":"/media/library/Movies/Old/Movie.mkv",
+ "args":{"path":"/media/library/Movies/Old/Movie.mkv"},"outcome":"ok","duration_ms":41}
 ```
 
 - **Fail closed for destructive calls.** Before a tool classified `destructive` runs, the server persists and flushes a `tool_intent` record. If it cannot, the call is refused with `audit_unavailable` — an unrecorded destructive action is not allowed to happen. Set `MCP_AUDIT=false` only if you deliberately want no trail (and no such protection).
@@ -373,14 +373,14 @@ Clients without this protocol and form capability receive `confirmation_required
 
 ```json
 {"event":"tool_call","tool":"delete","risk":"destructive",
- "target":"/videos/plex/a.mkv","outcome":"ok","confirmation":"round-trip"}
+ "target":"/media/library/a.mkv","outcome":"ok","confirmation":"round-trip"}
 ```
 
 ### Deletes go to a trash folder when the share can host one
 
 `delete` moves the target into `<share>/#trash/<date>/` first — a same-share move, so no extra space — and only unlinks when the share cannot host a trash folder. Nothing is assumed about the layout: `MCP_TRASH=auto` probes, falls back to a normal delete if the folder cannot be created, and records the placement (`event: "delete_placement"`, `outcome: soft|hard`) in the audit trail. `always` refuses instead of falling back; `never` deletes directly. The result reports `soft_delete`, `trash_path`, `trash_root`, and `original_path`. Use the recorded paths to restore; the trash layout does not mirror the source tree.
 
-If the MCP account cannot write the share root, point the trash inside the library with an absolute template: `MCP_TRASH_DIR=/videos/plex/.trash/{share}`.
+If the MCP account cannot write the share root, point the trash inside the library with an absolute template: `MCP_TRASH_DIR=/media/library/.trash/{share}`.
 
 This is **not** DSM's Recycle Bin and does not require it to be enabled. Share roots and ambiguous traversal paths are always refused. Once a move has been attempted, any failure stops deletion; it never triggers a hard-delete retry. Name collisions use a unique subdirectory, preserving previous trash entries. Trash must stay in the source share. There is no automatic purge or retention schedule; remove retained items only through an explicitly approved operation.
 

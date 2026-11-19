@@ -78,7 +78,7 @@ def audit_lines(tmp_path):
 class TestRoundTrip:
     def test_first_call_asks_and_does_not_execute(self, tmp_path):
         srv, calls = make_server(tmp_path)
-        result = asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, FakeContext(), params(arguments={"path": "/videos/x"})))
+        result = asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, FakeContext(), params(arguments={"path": "/media/x"})))
         assert isinstance(result, types.InputRequiredResult)
         assert result.result_type == "input_required"
         assert "confirm" in result.input_requests
@@ -91,28 +91,28 @@ class TestRoundTrip:
     def test_accept_retry_executes(self, tmp_path):
         srv, calls = make_server(tmp_path)
         ctx = FakeContext()
-        first = asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, ctx, params(arguments={"path": "/videos/x"})))
+        first = asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, ctx, params(arguments={"path": "/media/x"})))
         retry = params(
-            arguments={"path": "/videos/x"},
+            arguments={"path": "/media/x"},
             request_state=first.request_state,
             input_responses={"confirm": {"action": "accept", "content": {"approve": True}}},
         )
-        result = asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, ctx, retry))
+        result = asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, ctx, retry))
         assert [c.text for c in result] == ["executed"]
-        assert calls == [{"path": "/videos/x", "base_url": "http://nas.example:5000"}]
+        assert calls == [{"path": "/media/x", "base_url": "http://nas.example:5000"}]
         assert audit_lines(tmp_path)[-1]["confirmation"] == "round-trip"
 
     def test_decline_refuses(self, tmp_path):
         srv, calls = make_server(tmp_path)
         ctx = FakeContext()
-        first = asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, ctx, params(arguments={"path": "/videos/x"})))
+        first = asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, ctx, params(arguments={"path": "/media/x"})))
         retry = params(
-            arguments={"path": "/videos/x"},
+            arguments={"path": "/media/x"},
             request_state=first.request_state,
             input_responses={"confirm": {"action": "accept", "content": {"approve": False}}},
         )
         with pytest.raises(ToolFailureError) as caught:
-            asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, ctx, retry))
+            asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, ctx, retry))
         assert caught.value.payload["error"]["code"] == "confirmation_declined"
         assert calls == []
         refusal = audit_lines(tmp_path)[-1]
@@ -123,29 +123,29 @@ class TestRoundTrip:
     def test_state_does_not_transfer_to_other_arguments(self, tmp_path):
         srv, calls = make_server(tmp_path)
         ctx = FakeContext()
-        first = asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, ctx, params(arguments={"path": "/videos/x"})))
+        first = asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, ctx, params(arguments={"path": "/media/x"})))
         retry = params(
-            arguments={"path": "/videos/other"},
+            arguments={"path": "/media/other"},
             request_state=first.request_state,
             input_responses={"confirm": {"action": "accept", "content": {"approve": True}}},
         )
         with pytest.raises(ToolFailureError) as caught:
-            asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/other"}, ctx, retry))
+            asyncio_run(srv._dispatch_tool("delete", {"path": "/media/other"}, ctx, retry))
         assert caught.value.payload["error"]["code"] == "confirmation_invalid"
         assert calls == []
 
     def test_state_cannot_be_replayed(self, tmp_path):
         srv, calls = make_server(tmp_path)
         ctx = FakeContext()
-        first = asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, ctx, params(arguments={"path": "/videos/x"})))
+        first = asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, ctx, params(arguments={"path": "/media/x"})))
         retry = params(
-            arguments={"path": "/videos/x"},
+            arguments={"path": "/media/x"},
             request_state=first.request_state,
             input_responses={"confirm": {"action": "accept", "content": {"approve": True}}},
         )
-        asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, ctx, retry))
+        asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, ctx, retry))
         with pytest.raises(ToolFailureError) as caught:
-            asyncio_run(srv._dispatch_tool("delete", {"path": "/videos/x"}, ctx, retry))
+            asyncio_run(srv._dispatch_tool("delete", {"path": "/media/x"}, ctx, retry))
         assert caught.value.payload["error"]["code"] == "confirmation_invalid"
         assert len(calls) == 1
 
@@ -156,8 +156,8 @@ class TestFallback:
         with pytest.raises(ToolFailureError) as caught:
             asyncio_run(
                 srv._dispatch_tool(
-                    "delete", {"path": "/videos/x"}, FakeContext(version="2025-11-25"),
-                    params(arguments={"path": "/videos/x"}),
+                    "delete", {"path": "/media/x"}, FakeContext(version="2025-11-25"),
+                    params(arguments={"path": "/media/x"}),
                 )
             )
         assert caught.value.payload["error"]["code"] == "confirmation_required"
@@ -169,8 +169,8 @@ class TestFallback:
         with pytest.raises(ToolFailureError) as caught:
             asyncio_run(
                 srv._dispatch_tool(
-                    "delete", {"path": "/videos/x"}, FakeContext(form=False),
-                    params(arguments={"path": "/videos/x"}),
+                    "delete", {"path": "/media/x"}, FakeContext(form=False),
+                    params(arguments={"path": "/media/x"}),
                 )
             )
         assert caught.value.payload["error"]["code"] == "confirmation_required"
@@ -178,11 +178,11 @@ class TestFallback:
 
     def test_agent_supplied_token_cannot_bypass_form(self, tmp_path):
         srv, calls = make_server(tmp_path)
-        token = srv.confirm.issue("delete", {"path": "/videos/x"})
+        token = srv.confirm.issue("delete", {"path": "/media/x"})
         with pytest.raises(ToolFailureError) as caught:
             asyncio_run(srv._dispatch_tool(
-                "delete", {"path": "/videos/x", "confirm_token": token}, FakeContext(),
-                params(arguments={"path": "/videos/x"}),
+                "delete", {"path": "/media/x", "confirm_token": token}, FakeContext(),
+                params(arguments={"path": "/media/x"}),
             ))
         assert caught.value.payload["error"]["code"] == "confirmation_required"
         assert calls == []
@@ -195,8 +195,8 @@ class TestModes:
         srv, calls = make_server(tmp_path)
         result = asyncio_run(
             srv._dispatch_tool(
-                "delete", {"path": "/videos/x"}, FakeContext(version="2025-11-25"),
-                params(arguments={"path": "/videos/x"}),
+                "delete", {"path": "/media/x"}, FakeContext(version="2025-11-25"),
+                params(arguments={"path": "/media/x"}),
             )
         )
         assert [c.text for c in result] == ["executed"]
@@ -208,8 +208,8 @@ class TestModes:
         with pytest.raises(ToolFailureError) as caught:
             asyncio_run(
                 srv._dispatch_tool(
-                    "delete", {"path": "/videos/x"}, FakeContext(),
-                    params(arguments={"path": "/videos/x"}),
+                    "delete", {"path": "/media/x"}, FakeContext(),
+                    params(arguments={"path": "/media/x"}),
                 )
             )
         assert caught.value.payload["error"]["code"] == "confirmation_required"
@@ -229,7 +229,7 @@ def test_overwrite_requires_form_before_handler_runs(tmp_path, name):
         calls.append(arguments)
         return [types.TextContent(type="text", text="written")]
     srv._register_tool(name, "Write", {"type": "object", "properties": {}}, write)
-    args = {"path": "/videos/existing", "overwrite": True}
+    args = {"path": "/media/existing", "overwrite": True}
     first = asyncio_run(srv._dispatch_tool(name, args, FakeContext()))
     assert isinstance(first, types.InputRequiredResult)
     assert calls == []
@@ -244,7 +244,7 @@ def test_overwrite_requires_form_before_handler_runs(tmp_path, name):
 
 def test_audit_write_failure_stops_the_approved_handler(tmp_path, monkeypatch):
     srv, calls = make_server(tmp_path)
-    args = {"path": "/videos/x"}
+    args = {"path": "/media/x"}
     first = asyncio_run(srv._dispatch_tool("delete", args, FakeContext()))
     retry = params(
         arguments=args, request_state=first.request_state,
@@ -262,9 +262,9 @@ def test_audit_write_failure_stops_the_approved_handler(tmp_path, monkeypatch):
 def test_confirmation_form_names_destination_and_overwrite(tmp_path):
     srv, _ = make_server(tmp_path)
     prompt = srv._confirmation_plan("move_file", {
-        "source_path": "/videos/a", "destination_path": "/videos/b", "overwrite": True,
+        "source_path": "/media/a", "destination_path": "/media/b", "overwrite": True,
     })
-    assert "/videos/a" in prompt and "/videos/b" in prompt
+    assert "/media/a" in prompt and "/media/b" in prompt
     assert '"overwrite": true' in prompt
 
 
@@ -278,7 +278,7 @@ def test_real_sdk_round_trip(tmp_path, approve):
         return types.ElicitResult(action="accept", content={"approve": approve})
     async def exercise():
         async with Client(srv._create_server(), mode="2026-07-28", elicitation_callback=collect) as client:
-            result = await client.call_tool("delete", {"path": "/videos/x"})
+            result = await client.call_tool("delete", {"path": "/media/x"})
             assert client.protocol_version == "2026-07-28"
             assert result.is_error is (not approve)
     asyncio_run(exercise())
@@ -304,7 +304,7 @@ def test_configuration_and_password_overwrites_require_confirmation(tmp_path, na
 def test_approval_cannot_follow_default_to_another_nas(tmp_path):
     srv, calls = make_server(tmp_path)
     srv.sessions = {"http://nas-a:5000": "a", "http://nas-b:5000": "b"}
-    args = {"path": "/videos/x"}
+    args = {"path": "/media/x"}
     first = asyncio_run(srv._dispatch_tool("delete", args, FakeContext()))
     assert "http://nas-a:5000" in first.input_requests["confirm"].params.message
     del srv.sessions["http://nas-a:5000"]
@@ -319,12 +319,12 @@ def test_approval_cannot_follow_default_to_another_nas(tmp_path):
 def test_approved_alias_is_removed_from_execution_arguments(tmp_path):
     srv, calls = make_server(tmp_path)
     srv.nas_name_map = {"primary": "http://nas.example:5000"}
-    args = {"path": "/videos/x", "nas_name": "primary"}
+    args = {"path": "/media/x", "nas_name": "primary"}
     first = asyncio_run(srv._dispatch_tool("delete", args, FakeContext()))
     retry = params(arguments=args, request_state=first.request_state,
                    input_responses={"confirm": {"action": "accept", "content": {"approve": True}}})
     asyncio_run(srv._dispatch_tool("delete", args, FakeContext(), retry))
-    assert calls == [{"path": "/videos/x", "base_url": "http://nas.example:5000"}]
+    assert calls == [{"path": "/media/x", "base_url": "http://nas.example:5000"}]
 
 
 def test_structured_dsm_failure_is_audited_as_error(tmp_path):

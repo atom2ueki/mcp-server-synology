@@ -116,13 +116,13 @@ def delete(srv, path):
 
 class TestSoftDelete:
     def test_file_lands_in_trash_and_audit_records_it(self, tmp_path):
-        fs = FakeFileStation(dirs={"/videos", "/videos/plex"}, files={"/videos/plex/a.mkv"})
+        fs = FakeFileStation(dirs={"/media", "/media/library"}, files={"/media/library/a.mkv"})
         srv = make_server(tmp_path, fs)
-        payload = delete(srv, "/videos/plex/a.mkv")
+        payload = delete(srv, "/media/library/a.mkv")
 
         assert payload["soft_delete"] is True
-        assert payload["trash_path"].startswith("/videos/#trash/")
-        assert "/videos/plex/a.mkv" not in fs.files
+        assert payload["trash_path"].startswith("/media/#trash/")
+        assert "/media/library/a.mkv" not in fs.files
         assert fs.deleted == []  # nothing was unlinked
 
         placement = [e for e in audit_events(tmp_path) if e["event"] == "delete_placement"]
@@ -132,60 +132,60 @@ class TestSoftDelete:
 
 class TestFallback:
     def test_unwritable_share_falls_back_to_hard_delete(self, tmp_path):
-        fs = FakeFileStation(dirs={"/videos", "/videos/plex"}, files={"/videos/plex/a.mkv"})
+        fs = FakeFileStation(dirs={"/media", "/media/library"}, files={"/media/library/a.mkv"})
         fs.fail_create = True
         srv = make_server(tmp_path, fs)
-        payload = delete(srv, "/videos/plex/a.mkv")
+        payload = delete(srv, "/media/library/a.mkv")
 
         assert payload["soft_delete"] is False
-        assert fs.deleted == ["/videos/plex/a.mkv"]
+        assert fs.deleted == ["/media/library/a.mkv"]
         placement = [e for e in audit_events(tmp_path) if e["event"] == "delete_placement"]
         assert placement[-1]["outcome"] == "hard"
 
     def test_failed_move_keeps_source_and_refuses_hard_delete(self, tmp_path):
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
         fs.fail_move = True
         srv = make_server(tmp_path, fs)
         with pytest.raises(ToolFailureError) as caught:
-            delete(srv, "/videos/a.bin")
+            delete(srv, "/media/a.bin")
         assert caught.value.payload["error"]["code"] == "trash_verification_failed"
         assert fs.deleted == []
-        assert "/videos/a.bin" in fs.files
+        assert "/media/a.bin" in fs.files
 
 
 class TestRefusals:
     def test_always_mode_refuses_when_trash_is_unavailable(self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "trash_mode", "always")
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
         fs.fail_create = True
         srv = make_server(tmp_path, fs)
 
         with pytest.raises(ToolFailureError) as caught:
-            delete(srv, "/videos/a.bin")
+            delete(srv, "/media/a.bin")
         assert caught.value.payload["error"]["code"] == "trash_unavailable"
         assert fs.deleted == []
 
     def test_ambiguous_move_is_not_hard_deleted(self, tmp_path):
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
         fs.pretend_move = True
         srv = make_server(tmp_path, fs)
 
         with pytest.raises(ToolFailureError) as caught:
-            delete(srv, "/videos/a.bin")
+            delete(srv, "/media/a.bin")
         assert caught.value.payload["error"]["code"] == "trash_verification_failed"
         assert fs.deleted == []
 
     def test_never_mode_deletes_without_touching_the_trash(self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "trash_mode", "never")
-        fs = FakeFileStation(dirs={"/videos"}, files={"/videos/a.bin"})
+        fs = FakeFileStation(dirs={"/media"}, files={"/media/a.bin"})
         srv = make_server(tmp_path, fs)
-        payload = delete(srv, "/videos/a.bin")
+        payload = delete(srv, "/media/a.bin")
 
         assert payload["soft_delete"] is False
-        assert fs.deleted == ["/videos/a.bin"]
+        assert fs.deleted == ["/media/a.bin"]
 
 
-@pytest.mark.parametrize("path", ["/", "/videos", "/volume2", "/volume2/videos", "/videos/../photos", "/videos//x"])
+@pytest.mark.parametrize("path", ["/", "/media", "/volume2", "/volume2/media", "/media/../photos", "/media//x"])
 @pytest.mark.parametrize("mode", ["auto", "always", "never"])
 def test_roots_and_traversal_never_reach_the_nas(tmp_path, monkeypatch, path, mode):
     monkeypatch.setattr(config, "trash_mode", mode)
