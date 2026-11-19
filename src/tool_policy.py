@@ -41,6 +41,11 @@ def risk_for(tool_name: str, arguments: dict[str, Any] | None = None) -> Risk:
         return Risk.DESTRUCTIVE
     if tool_name == "synology_set_user" and "password" in (arguments or {}):
         return Risk.DESTRUCTIVE
+    # Without confirm=true the install tool only runs DSM's own pre-install
+    # checks and changes nothing; gating that read-only dry run would block
+    # legacy clients from ever seeing why an install is refused.
+    if tool_name == "synology_dsm_update_install" and (arguments or {}).get("confirm") is not True:
+        return Risk.READ
     hints = TOOL_ANNOTATIONS.get(tool_name)
     if hints is None:
         return Risk.DESTRUCTIVE

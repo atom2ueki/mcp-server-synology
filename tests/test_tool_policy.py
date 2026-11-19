@@ -48,7 +48,13 @@ class TestRiskView:
 
     def test_destructive_tools_map_to_destructive(self):
         assert risk_for("delete") is Risk.DESTRUCTIVE
-        assert risk_for("synology_dsm_update_install") is Risk.DESTRUCTIVE
+        assert risk_for("synology_terminal_set") is Risk.DESTRUCTIVE
+
+    def test_dsm_install_precheck_is_read_only(self):
+        # The handler's no-confirm branch runs DSM's pre-install checks only.
+        assert risk_for("synology_dsm_update_install", {}) is Risk.READ
+        assert risk_for("synology_dsm_update_install", {"confirm": False}) is Risk.READ
+        assert risk_for("synology_dsm_update_install", {"confirm": True}) is Risk.DESTRUCTIVE
 
     def test_unknown_tool_is_destructive(self):
         # The spec's pessimistic default; the confirmation gate keys off it.

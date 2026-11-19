@@ -218,6 +218,9 @@ def test_destination(download_station):
 # Test markers for categorizing tests
 def pytest_configure(config):
     """Configure custom pytest markers."""
+    config.addinivalue_line(
+        "markers", "confirmation: needs the destructive-confirmation gate ON (default mrtr)"
+    )
     config.addinivalue_line("markers", "real_nas: tests that require real NAS connection")
     config.addinivalue_line("markers", "destructive: tests that modify NAS state")
     config.addinivalue_line("markers", "slow: tests that may take a long time")

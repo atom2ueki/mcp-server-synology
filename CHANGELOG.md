@@ -31,7 +31,11 @@
   `overwrite=true` or a password argument appears) from that same table — the
   tier the audit trail records and the confirmation gate keys off. The
   annotations are hints, not enforcement; an unclassified tool falls back to
-  `destructive`, matching the spec's pessimistic default.
+  `destructive`, matching the spec's pessimistic default. A `{name, value}`
+  header record (as in `custom_headers`) masks its value when the name is a
+  credential header, so a bearer token never reaches the trail. A DSM update
+  install without `confirm=true` is a read-only precheck and stays outside
+  the confirmation gate.
 - **`skills/synology-recovery/`** — the snapshot-restore runbook distilled from
   a real incident: inventory, snapshot-vs-live diff, missing-only restore with
   `cp --reflink=auto` (2.3 TB back in minutes, no extra space), verification by

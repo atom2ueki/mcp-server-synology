@@ -53,6 +53,16 @@ class TestRedaction:
         assert out["auth"] == {"api_key": "***", "user": "u"}
         assert out["items"] == [{"secret": "***"}]
 
+    def test_named_header_records_mask_their_value(self):
+        # custom_headers entries are {name, value}; neither key alone matches
+        # the secret pattern, so the sibling name decides.
+        out = redact({"custom_headers": [
+            {"name": "Authorization", "value": "Bearer secret-token"},
+            {"name": "X-Trace-Id", "value": "abc123"},
+        ]})
+        assert out["custom_headers"][0] == {"name": "Authorization", "value": "***"}
+        assert out["custom_headers"][1] == {"name": "X-Trace-Id", "value": "abc123"}
+
     def test_long_payloads_are_truncated_not_copied(self):
         payload = "x" * (MAX_VALUE_CHARS * 2)
         out = redact({"content": payload})

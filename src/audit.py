@@ -86,14 +86,27 @@ class AuditUnavailableError(RuntimeError):
 def redact(value: Any, *, key: str = "") -> Any:
     """Return a JSON-safe copy of `value` with secrets masked and long strings cut.
 
-    Recurses through dicts and lists. Masking is by key name, so a password
-    passed as an unnamed positional value is not covered -- no MCP tool takes
-    arguments positionally, and the alternative (value sniffing) produces false
-    positives on ordinary strings like paths.
+    Recurses through dicts and lists. Masking is by key name, with one
+    structural exception: a ``{name, value}`` record (the shape of
+    `custom_headers` entries) masks its *value* when the sibling *name* is a
+    credential name, because neither key alone matches the pattern -- a bearer
+    token supplied as ``{"name": "Authorization", "value": "Bearer ..."}``
+    would otherwise reach the trail in plaintext.
+
+    A password passed as an unnamed positional value is still not covered --
+    no MCP tool takes arguments positionally, and the alternative (value
+    sniffing) produces false positives on ordinary strings like paths.
     """
     if isinstance(value, dict):
-        return {str(k): ("***" if is_secret_key(str(k)) else redact(v, key=str(k)))
-                for k, v in value.items()}
+        named_secret = "name" in value and is_secret_key(str(value["name"]))
+        return {
+            str(k): (
+                "***"
+                if is_secret_key(str(k)) or (named_secret and str(k) == "value")
+                else redact(v, key=str(k))
+            )
+            for k, v in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [redact(item, key=key) for item in value]
     if isinstance(value, str) and len(value) > MAX_VALUE_CHARS:
