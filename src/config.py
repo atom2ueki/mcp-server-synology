@@ -138,6 +138,14 @@ class SynologyConfig:
         #   read_only      — read-only tools only
         self.tool_profile = os.getenv("MCP_TOOL_PROFILE", "full").lower()
 
+        # Optional allow-list for File Station writes; empty means every share.
+        # Comma-separated so one env var stays readable in a compose file.
+        self.file_station_roots = [
+            part.strip()
+            for part in os.getenv("MCP_FILESTATION_ROOTS", "").split(",")
+            if part.strip()
+        ]
+
     def _check_file_permissions(self, path: Path) -> bool:
         """Check if secrets file has safe permissions (0600 or stricter).
 
@@ -461,6 +469,13 @@ class SynologyConfig:
                         self.confirm_ttl_seconds = int(confirm_section["ttl_seconds"])
                     if "tool_profile" in server_section:
                         self.tool_profile = str(server_section["tool_profile"]).lower()
+                    if "file_station_roots" in server_section:
+                        roots = server_section["file_station_roots"]
+                        if not isinstance(roots, list):
+                            raise ValueError(
+                                "server.file_station_roots must be a list of absolute paths"
+                            )
+                        self.file_station_roots = [str(root) for root in roots]
                     trash_section = server_section.get("trash", {})
                     if "mode" in trash_section:
                         self.trash_mode = str(trash_section["mode"]).lower()
