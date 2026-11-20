@@ -34,7 +34,16 @@ from health import SynologyHealth
 from iscsi import SynologyISCSI
 from iscsi.synology_iscsi import _uuid_list
 from nfs import SynologyNFS
-from paths import validate_delete_path
+from paths import (
+    PathOutsideRootsError,
+    copy_target,
+    create_directory_target,
+    ensure_within_roots,
+    normalize_roots,
+    rename_target,
+    validate_delete_path,
+    validate_write_path,
+)
 from tool_policy import Risk, annotations_for, risk_for, unclassified
 from tool_safety import fence_content
 from trash import (
@@ -190,6 +199,13 @@ class SynologyMCPServer:
                 config.tool_profile, ", ".join(sorted(self._TOOL_PROFILES)),
             )
         self._withheld_tools = 0
+        # Fail at startup on a malformed allow-list: an unreadable security
+        # setting must not silently widen writes to every share.
+        self._write_roots = normalize_roots(config.file_station_roots)
+        if self._write_roots:
+            logger.info(
+                "File Station writes confined to: %s", ", ".join(self._write_roots)
+            )
         self.server = self._create_server()
         self._register_all_tools()
         self._warn_unclassified_tools()
@@ -700,6 +716,30 @@ class SynologyMCPServer:
             inst_dict.pop(base_url, None)
 
         return base_url
+
+    @staticmethod
+    def _write_error(code: str, exc: ValueError) -> "ToolFailureError":
+        return ToolFailureError(
+            {"success": False, "error": {"code": code, "message": str(exc)}}
+        )
+
+    def _roots_for_writes(self) -> tuple[str, ...]:
+        # Instances built via __new__ (tests) skip __init__; normalize lazily.
+        roots = getattr(self, "_write_roots", None)
+        if roots is None:
+            roots = self._write_roots = normalize_roots(config.file_station_roots)
+        return roots
+
+    def _admit_write(self, path: str, *, allow_share_root: bool = False) -> str:
+        """Canonical write target, or a ToolFailureError naming the refusal."""
+        try:
+            return validate_write_path(
+                path, self._roots_for_writes(), allow_share_root=allow_share_root
+            )
+        except PathOutsideRootsError as exc:
+            raise self._write_error("path_outside_roots", exc) from exc
+        except ValueError as exc:
+            raise self._write_error("invalid_write_path", exc) from exc
 
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
@@ -1678,10 +1718,14 @@ class SynologyMCPServer:
 
     async def _handle_rename_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle renaming a file or directory."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
-        path = arguments["path"]
+        try:
+            target = rename_target(arguments["path"], arguments["new_name"])
+        except ValueError as exc:
+            raise self._write_error("invalid_write_path", exc) from exc
+        path = self._admit_write(target)
         new_name = arguments["new_name"]
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(filestation.rename_file, path, new_name)
 
@@ -1691,11 +1735,15 @@ class SynologyMCPServer:
 
     async def _handle_move_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle moving a file or directory."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
-        source_path = arguments["source_path"]
-        destination_path = arguments["destination_path"]
+        # A move removes the source, so both ends are writes: the source must
+        # be inside the roots too, or the allow-list would not stop deletions.
+        source_path = self._admit_write(arguments["source_path"])
+        destination_path = self._admit_write(
+            arguments["destination_path"], allow_share_root=True
+        )
         overwrite = arguments.get("overwrite", False)  # Default to False if not provided
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(
             filestation.move_file, source_path, destination_path, overwrite
@@ -1705,11 +1753,16 @@ class SynologyMCPServer:
 
     async def _handle_copy_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle a verified, server-side copy of one regular file."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         source_path = arguments["source_path"]
+        try:
+            target = copy_target(arguments["destination_folder"], source_path)
+        except ValueError as exc:
+            raise self._write_error("invalid_write_path", exc) from exc
+        self._admit_write(target)
         destination_folder = arguments["destination_folder"]
         overwrite = arguments.get("overwrite", False)
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(
             filestation.copy_file, source_path, destination_folder, overwrite
@@ -1719,12 +1772,12 @@ class SynologyMCPServer:
 
     async def _handle_create_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new file with specified content on the Synology NAS."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
-        path = arguments["path"]
+        path = self._admit_write(arguments["path"])
         content = arguments.get("content", "")
         overwrite = arguments.get("overwrite", False)
         encoding = arguments.get("encoding", "text")
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(
             filestation.create_file, path, content, overwrite, encoding
@@ -1738,11 +1791,16 @@ class SynologyMCPServer:
 
     async def _handle_create_directory(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new directory on the Synology NAS."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         folder_path = arguments["folder_path"]
         name = arguments["name"]
+        try:
+            target = create_directory_target(folder_path, name)
+        except ValueError as exc:
+            raise self._write_error("invalid_write_path", exc) from exc
+        self._admit_write(target)
         force_parent = arguments.get("force_parent", False)
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(
             filestation.create_directory, folder_path, name, force_parent
@@ -1763,6 +1821,10 @@ class SynologyMCPServer:
                 "success": False,
                 "error": {"code": "invalid_delete_path", "message": str(exc)},
             }) from exc
+        try:
+            path = ensure_within_roots(path, self._roots_for_writes())
+        except PathOutsideRootsError as exc:
+            raise self._write_error("path_outside_roots", exc) from exc
         base_url = await asyncio.to_thread(self._get_base_url, arguments)
         filestation = self._get_filestation(base_url)
         policy = TrashPolicy(config.trash_mode, config.trash_dir)

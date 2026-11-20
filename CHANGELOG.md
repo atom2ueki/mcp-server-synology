@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **`MCP_FILESTATION_ROOTS`** — optional, comma-separated allow-list for File Station
+  writes (`create_directory`, `create_file`, `copy_file`, `move_file`, `rename_file`,
+  `delete`). Moves check the source as well, since removing it is a write; copies check
+  only the destination. Out-of-list targets fail with `path_outside_roots` before any NAS
+  call, and every write still refuses share/volume/filesystem roots. Same key as
+  `server.file_station_roots`. Empty (default) keeps prior behaviour. (#138)
 - **`MCP_TOOL_PROFILE`** — `full` (default), `no_destructive` or `read_only` filters the
   tool registry at registration, so a withheld tool is never listed and cannot be called.
   Classification still runs for every tool, so an unclassified one still fails startup.
