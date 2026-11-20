@@ -252,6 +252,16 @@ docker logs -f synology-mcp-http
 
 You should see the server log `Starting Streamable HTTP MCP server on http://0.0.0.0:8765/mcp` and the auto-login succeed. uvicorn's own `Uvicorn running on …` banner is *not* printed at the compose file's defaults — it is INFO on the `uvicorn.error` logger, which the server pins to `warning` unless `DEBUG=true`.
 
+#### Pre-built image
+
+Instead of building locally, you can pull the image published to GitHub Container Registry on every release (`linux/amd64` and `linux/arm64`, so it also runs on ARM-based NAS models):
+
+```bash
+docker pull ghcr.io/atom2ueki/mcp-server-synology:latest   # or pin a release, e.g. :1.8.0
+```
+
+Tags: `X.Y.Z` and `X.Y` per release, `latest` for the newest stable release, and `edge` for manual builds from a branch. To use it with `docker-compose.http.yml`, replace `build: .` with `image: ghcr.io/atom2ueki/mcp-server-synology:1.8.0`. Like the locally built image, it contains no credentials; pass them at run time as described above.
+
 ### Reverse proxy
 
 Most MCP clients require HTTPS, so the HTTP endpoint must be fronted by a TLS-terminating reverse proxy. For DSM users, the built-in **Login Portal → Reverse Proxy** does the job:

@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **Published Docker image** — a new `docker-publish.yml` workflow builds the existing `Dockerfile`
+  for `linux/amd64` and `linux/arm64` and pushes it to
+  `ghcr.io/atom2ueki/mcp-server-synology` on every release tag (`X.Y.Z`, `X.Y`, `latest`), so a
+  deployment can `docker pull` instead of cloning and building. It needs no secrets, only the
+  workflow's `GITHUB_TOKEN`. The image still contains no credentials. A manual run from a branch
+  publishes `edge`.
 - **`password_env` per-NAS setting** names an environment variable to read the NAS password from
   when `settings.json` is loaded, so a launcher can pass it in from a secret manager and the file
   never stores it. Previously a `settings.json` entry needed a plaintext `password`, and the legacy
