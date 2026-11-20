@@ -132,6 +132,12 @@ class SynologyConfig:
         self.trash_mode = os.getenv("MCP_TRASH", "auto").lower()
         self.trash_dir = os.getenv("MCP_TRASH_DIR", "#trash")
 
+        # Opt-in least privilege: which tools exist at all.
+        #   full           — every tool (default)
+        #   no_destructive — read-only + additive tools only
+        #   read_only      — read-only tools only
+        self.tool_profile = os.getenv("MCP_TOOL_PROFILE", "full").lower()
+
     def _check_file_permissions(self, path: Path) -> bool:
         """Check if secrets file has safe permissions (0600 or stricter).
 
@@ -453,6 +459,8 @@ class SynologyConfig:
                         self.confirm_mode = str(confirm_section["mode"]).lower()
                     if "ttl_seconds" in confirm_section:
                         self.confirm_ttl_seconds = int(confirm_section["ttl_seconds"])
+                    if "tool_profile" in server_section:
+                        self.tool_profile = str(server_section["tool_profile"]).lower()
                     trash_section = server_section.get("trash", {})
                     if "mode" in trash_section:
                         self.trash_mode = str(trash_section["mode"]).lower()
