@@ -268,6 +268,10 @@ class SynologyMCPServer:
         )
 
     _TOOL_PROFILES = frozenset({"full", "no_destructive", "read_only"})
+    # Session establishment changes no NAS data, and withholding it would make
+    # every read fail on deployments without auto-login: a client could never
+    # create the session it needs. Kept in every profile.
+    _SESSION_TOOLS = frozenset({"synology_login", "synology_logout"})
     # Class defaults so an instance built via __new__ (tests) still registers;
     # __init__ overrides both from config.
     tool_profile = "full"
@@ -281,6 +285,8 @@ class SynologyMCPServer:
         deny list. Classification runs regardless, so an unclassified tool
         still fails at startup rather than hiding behind a profile.
         """
+        if name in self._SESSION_TOOLS:
+            return True
         if self.tool_profile == "full":
             return True
         hints = annotations_for(name)

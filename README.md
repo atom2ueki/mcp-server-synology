@@ -378,7 +378,7 @@ Clients without this protocol and form capability receive `confirmation_required
 
 ### Least privilege: tool profiles
 
-`MCP_TOOL_PROFILE` decides which tools exist at all: `full` (default), `no_destructive` (read-only + additive only) or `read_only`. Filtering happens at registration, so a withheld tool is not listed and cannot be called — stronger than a client-side deny list, and useful when an agent should monitor a NAS without changing it. The startup log names the profile and the number of withheld tools.
+`MCP_TOOL_PROFILE` decides which tools exist at all: `full` (default), `no_destructive` (read-only + additive only) or `read_only`. Filtering happens at registration, so a withheld tool is not listed and cannot be called — stronger than a client-side deny list, and useful when an agent should monitor a NAS without changing it. The startup log names the profile and the number of withheld tools. Session tools (`synology_login`/`synology_logout`) stay available in every profile: they change no NAS data and are the only way to read anything when auto-login is off.
 
 Container details are sanitized regardless of profile: `synology_container_get` keeps environment variable **names** (`env_keys`) and drops their values, because DSM returns database passwords and tokens in `Config.Env` and `profile.env_variables`.
 

@@ -55,6 +55,15 @@ class TestProfiles:
         read_only = set(server_for("read_only", monkeypatch)._tool_registry)
         assert read_only <= no_dest <= full
 
+    def test_session_tools_survive_read_only(self, monkeypatch):
+        # With auto-login off, login is the only way a client can read anything;
+        # a read-only profile must not hide it.
+        monkeypatch.setattr(config, "auto_login", False)
+        srv = server_for("read_only", monkeypatch)
+        assert "synology_login" in srv._tool_registry
+        assert "synology_logout" in srv._tool_registry
+        assert "delete" not in srv._tool_registry
+
     def test_unknown_profile_falls_back_to_full(self, monkeypatch):
         srv = server_for("YOLO", monkeypatch)
         assert srv.tool_profile == "full"
