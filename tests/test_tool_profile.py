@@ -31,9 +31,14 @@ class TestProfiles:
         assert srv._withheld_tools == 0
 
     def test_read_only_hides_everything_that_writes(self, monkeypatch):
+        # Force the no-credentials branch so login/logout are registered, as
+        # they are on CI and on any deployment without stored credentials.
+        monkeypatch.setattr(config, "has_synology_credentials", lambda: False)
         srv = server_for("read_only", monkeypatch)
         names = set(srv._tool_registry)
-        for name in names:
+        session_tools = {"synology_login", "synology_logout"}
+        assert session_tools <= names
+        for name in names - session_tools:
             assert TOOL_ANNOTATIONS[name].read_only_hint is True, name
         assert "delete" not in names
         assert "create_directory" not in names
