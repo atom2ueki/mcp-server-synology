@@ -78,6 +78,21 @@ class TestContainerGet:
         assert client.get_container("missing") == failure
 
 
+class TestMultipleCarriers:
+    def test_names_merge_across_env_and_environment(self):
+        fixture = {
+            "env": ["A=1"],
+            "environment": {"B": "2"},
+            "env_variables": [{"key": "C", "value": "3"}],
+        }
+        clean = SynologyContainer._sanitize_details(fixture)
+        assert clean == {"env_keys": ["A", "B", "C"]}
+
+    def test_sanitizing_twice_is_stable(self):
+        once = SynologyContainer._sanitize_details(fixture_response())
+        assert SynologyContainer._sanitize_details(once) == once
+
+
 class TestProjectSanitization:
     def test_env_variables_are_not_smuggled_through(self):
         fixture = {

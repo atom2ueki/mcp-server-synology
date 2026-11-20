@@ -309,14 +309,22 @@ class SynologyContainer:
         """Recursively omit credentials and Compose source; keep env var names."""
         if isinstance(value, dict):
             clean: Dict[Any, Any] = {}
+            env_names: List[str] = []
             for key, item in value.items():
                 lower = str(key).lower()
                 if lower in cls._SENSITIVE_KEYS or is_secret_key(lower):
                     continue
                 if lower in cls._ENV_KEYS:
-                    clean["env_keys"] = cls._env_names(item)
+                    # A response can carry several carriers (env and
+                    # environment, say); merge them instead of letting the
+                    # last one overwrite the names of the first.
+                    for name in cls._env_names(item):
+                        if name not in env_names:
+                            env_names.append(name)
                     continue
                 clean[key] = cls._sanitize_details(item)
+            if env_names:
+                clean["env_keys"] = env_names
             return clean
         if isinstance(value, list):
             return [cls._sanitize_details(item) for item in value]
