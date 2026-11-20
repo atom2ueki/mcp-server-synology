@@ -378,10 +378,21 @@ Clients without this protocol and form capability receive `confirmation_required
 
 ### Confining File Station writes
 
-`MCP_FILESTATION_ROOTS` (settings: `server.file_station_roots`, a list) confines writes to chosen subtrees:
+`MCP_FILESTATION_WRITE_PATHS` confines writes to chosen subtrees, and a NAS entry overrides it per device:
 
 ```bash
-MCP_FILESTATION_ROOTS=/volume1/media,/volume1/backups
+MCP_FILESTATION_WRITE_PATHS=/volume1/media,/volume1/backups
+```
+
+```json
+{
+  "synology": {
+    "nas1": {
+      "host": "192.168.1.10",
+      "filestation_write_paths": ["/volume1/docker/app/config"]
+    }
+  }
+}
 ```
 
 It applies to `create_directory`, `create_file`, `copy_file`, `move_file`, `rename_file` and `delete`; with file copies only the destination is checked, while a move checks both ends because removing the source is a write too. A structurally valid path outside the list fails with `path_outside_roots` before any NAS call. Roots are canonicalized at startup and a malformed entry aborts startup rather than silently widening access; leaving the setting empty keeps today's behaviour. Independently of the list, a write whose target is a share, volume or filesystem root is always refused.

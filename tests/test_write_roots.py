@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from config import config  # noqa: E402
 from mcp_server import SynologyMCPServer, ToolFailureError  # noqa: E402
 from paths import (  # noqa: E402
     PathOutsideRootsError,
@@ -27,9 +28,18 @@ from paths import (  # noqa: E402
 ROOT = "/media"
 
 
-def make_server(roots):
+BASE_URL = "https://nas.example:5001"
+
+
+def make_server(monkeypatch, roots):
     srv = SynologyMCPServer.__new__(SynologyMCPServer)
-    srv._write_roots = tuple(roots)
+    srv._get_base_url = lambda arguments: BASE_URL
+    srv._get_filestation = lambda url: (_ for _ in ()).throw(
+        AssertionError("write reached File Station")
+    )
+    monkeypatch.setattr(
+        config, "file_station_write_paths_for", lambda base_url: tuple(roots)
+    )
     return srv
 
 
@@ -116,21 +126,21 @@ class TestComposedTargets:
 
 
 class TestHandlers:
-    def test_create_file_outside_roots_is_refused_before_any_call(self):
-        srv = make_server([ROOT])
+    def test_create_file_outside_roots_is_refused_before_any_call(self, monkeypatch):
+        srv = make_server(monkeypatch, [ROOT])
         with pytest.raises(ToolFailureError) as caught:
             asyncio.run(srv._handle_create_file({"path": "/backup/x.txt"}))
         assert caught.value.payload["error"]["code"] == "path_outside_roots"
-        assert "MCP_FILESTATION_ROOTS" in caught.value.payload["error"]["message"]
+        assert "write paths" in caught.value.payload["error"]["message"]
 
-    def test_delete_outside_roots_is_refused(self):
-        srv = make_server([ROOT])
+    def test_delete_outside_roots_is_refused(self, monkeypatch):
+        srv = make_server(monkeypatch, [ROOT])
         with pytest.raises(ToolFailureError) as caught:
             asyncio.run(srv._handle_delete({"path": "/backup/x.txt"}))
         assert caught.value.payload["error"]["code"] == "path_outside_roots"
 
-    def test_move_refuses_a_source_outside_roots(self):
-        srv = make_server([ROOT])
+    def test_move_refuses_a_source_outside_roots(self, monkeypatch):
+        srv = make_server(monkeypatch, [ROOT])
         with pytest.raises(ToolFailureError) as caught:
             asyncio.run(
                 srv._handle_move_file(
@@ -142,8 +152,8 @@ class TestHandlers:
             )
         assert caught.value.payload["error"]["code"] == "path_outside_roots"
 
-    def test_copy_refuses_a_target_outside_roots(self):
-        srv = make_server([ROOT])
+    def test_copy_refuses_a_target_outside_roots(self, monkeypatch):
+        srv = make_server(monkeypatch, [ROOT])
         with pytest.raises(ToolFailureError) as caught:
             asyncio.run(
                 srv._handle_copy_file(
@@ -155,8 +165,8 @@ class TestHandlers:
             )
         assert caught.value.payload["error"]["code"] == "path_outside_roots"
 
-    def test_create_directory_refuses_a_target_outside_roots(self):
-        srv = make_server([ROOT])
+    def test_create_directory_refuses_a_target_outside_roots(self, monkeypatch):
+        srv = make_server(monkeypatch, [ROOT])
         with pytest.raises(ToolFailureError) as caught:
             asyncio.run(
                 srv._handle_create_directory(
@@ -165,8 +175,8 @@ class TestHandlers:
             )
         assert caught.value.payload["error"]["code"] == "path_outside_roots"
 
-    def test_rename_refuses_a_dot_name(self):
-        srv = make_server([])
+    def test_rename_refuses_a_dot_name(self, monkeypatch):
+        srv = make_server(monkeypatch, [])
         with pytest.raises(ToolFailureError) as caught:
             asyncio.run(
                 srv._handle_rename_file(

@@ -108,6 +108,71 @@ class TestSynologyConfig:
                 assert "test_nas" in cfg.nas_configs
                 assert cfg.nas_configs["test_nas"]["base_url"] == "http://192.168.1.100:5000"
 
+    def test_file_station_write_paths_per_nas(self, tmp_path):
+        """A per-NAS list wins; a NAS without one uses the global env value."""
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.1",
+                    "port": 5000,
+                    "username": "a",
+                    "password": "b",
+                    "filestation_write_paths": ["/volume1/media/", "/volume1//media"],
+                },
+                "nas2": {"host": "192.168.1.2", "port": 5000, "username": "c", "password": "d"},
+            }
+        }
+
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with clear_env(MCP_FILESTATION_WRITE_PATHS="/volume1/shared"):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+
+                assert cfg.file_station_write_paths_for("http://192.168.1.1:5000") == (
+                    "/volume1/media",
+                )
+                assert cfg.file_station_write_paths_for("http://192.168.1.2:5000") == (
+                    "/volume1/shared",
+                )
+                # Unknown base URL (explicit login, legacy .env mode) uses the global list.
+                assert cfg.file_station_write_paths_for("http://10.0.0.9:5000") == (
+                    "/volume1/shared",
+                )
+
+    def test_file_station_write_paths_reject_invalid_entries(self, tmp_path):
+        """A relative root or a non-list value is a startup error, not a silent pass."""
+        for bad in (["media"], "/volume1/media"):
+            secrets_data = {
+                "synology": {
+                    "nas1": {
+                        "host": "192.168.1.1",
+                        "port": 5000,
+                        "username": "a",
+                        "password": "b",
+                        "filestation_write_paths": bad,
+                    }
+                }
+            }
+            secrets_file = tmp_path / "secrets.json"
+            secrets_file.write_text(json.dumps(secrets_data))
+            os.chmod(str(secrets_file), 0o600)
+
+            reload_config()
+
+            with clear_env():
+                with patch("config.SETTINGS_FILE", secrets_file):
+                    from config import SynologyConfig
+
+                    with pytest.raises(ValueError):
+                        SynologyConfig()
+
     def test_get_nas_names(self, tmp_path):
         """Test getting NAS names from secrets.json."""
         secrets_data = {

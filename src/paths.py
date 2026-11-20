@@ -5,7 +5,7 @@ Two independent guards live here:
 
 * structural — reject ambiguous paths and share/volume roots, so a client that
   passes only ``/media`` cannot turn a delete into "the whole share";
-* allow-list — optional ``MCP_FILESTATION_ROOTS`` confines writes to chosen
+* allow-list — optional ``MCP_FILESTATION_WRITE_PATHS`` confines writes to chosen
   subtrees. It is empty by default, which keeps today's behaviour.
 
 The policy runs before any network call, and for `delete` it runs before the
@@ -68,7 +68,7 @@ def validate_delete_path(path: str) -> str:
 
 
 def normalize_roots(roots: Iterable[str] | None) -> tuple[str, ...]:
-    """Validate and canonicalize ``MCP_FILESTATION_ROOTS``.
+    """Validate and canonicalize the File Station write allow-list.
 
     A relative, empty, or ``..``-containing root is a configuration error, not
     something to silently drop: dropping it would widen access. ``/`` is
@@ -100,7 +100,7 @@ def ensure_within_roots(canonical: str, roots: Iterable[str] | None) -> str:
     if any(canonical == root or canonical.startswith(root + "/") for root in allowed):
         return canonical
     raise PathOutsideRootsError(
-        f"{canonical} is outside MCP_FILESTATION_ROOTS ({', '.join(allowed)})"
+        f"{canonical} is outside the configured File Station write paths ({', '.join(allowed)})"
     )
 
 
