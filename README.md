@@ -376,6 +376,12 @@ Clients without this protocol and form capability receive `confirmation_required
  "target":"/media/library/a.mkv","outcome":"ok","confirmation":"round-trip"}
 ```
 
+### Least privilege: tool profiles
+
+`MCP_TOOL_PROFILE` decides which tools exist at all: `full` (default), `no_destructive` (read-only + additive only) or `read_only`. Filtering happens at registration, so a withheld tool is not listed and cannot be called — stronger than a client-side deny list, and useful when an agent should monitor a NAS without changing it. The startup log names the profile and the number of withheld tools.
+
+Container details are sanitized regardless of profile: `synology_container_get` keeps environment variable **names** (`env_keys`) and drops their values, because DSM returns database passwords and tokens in `Config.Env` and `profile.env_variables`.
+
 ### Deletes go to a trash folder when the share can host one
 
 `delete` moves the target into `<share>/#trash/<date>/` first — a same-share move, so no extra space — and only unlinks when the share cannot host a trash folder. Nothing is assumed about the layout: `MCP_TRASH=auto` probes, falls back to a normal delete if the folder cannot be created, and records the placement (`event: "delete_placement"`, `outcome: soft|hard`) in the audit trail. `always` refuses instead of falling back; `never` deletes directly. The result reports `soft_delete`, `trash_path`, `trash_root`, and `original_path`. Use the recorded paths to restore; the trash layout does not mirror the source tree.

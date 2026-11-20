@@ -3,7 +3,9 @@
 import json
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from audit import is_secret_key
 
 _IMAGE_ID_RE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
 _DIGEST_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+._-]*:[0-9a-fA-F]{32,}$")
@@ -169,8 +171,17 @@ class SynologyContainer:
         return {"success": True, "data": {"mode": "api", "images": {"count": len(image_items), "size_bytes": image_bytes}, "containers": {"count": len(container_items), "size_bytes": container_bytes}, "volumes": {"supported": False}, "build_cache": {"supported": False}}}
 
     def get_container(self, name: str) -> Dict[str, Any]:
-        """Get one Container Manager container by name."""
-        return self._container_name_request("get", name)
+        """Get one container without exposing environment variable values.
+
+        The DSM response carries `details.Config.Env` (NAME=value strings) and
+        `profile.env_variables` ({key, value} objects); both would otherwise put
+        database passwords and API tokens into the model's context. Names are
+        kept (useful for "is TZ set?") and values are dropped.
+        """
+        result = self._container_name_request("get", name)
+        if not result.get("success"):
+            return result
+        return self._sanitize_details(result)
 
     def start_container(self, name: str) -> Dict[str, Any]:
         """Start a Container Manager container by name."""
@@ -267,38 +278,65 @@ class SynologyContainer:
             force_parent="true",
         )
 
-    def get_project(self, name: str) -> Dict[str, Any]:
-        """Get a project without exposing Compose, environment, or secret fields."""
-        result = self._project_id_request("get", name)
-        if not result.get("success"):
-            return result
-        return self._sanitize_project_details(result)
-
-    @classmethod
-    def _sanitize_project_details(cls, value: Any) -> Any:
-        """Recursively omit fields that can contain credentials or Compose source."""
-        sensitive_keys = {
+    _SENSITIVE_KEYS = frozenset(
+        {
             "compose",
             "content",
             "credential",
             "credentials",
-            "env",
-            "environment",
             "passwd",
             "password",
             "secret",
             "secrets",
             "token",
         }
+    )
+    # Environment carriers in the Container Manager response. Their values are
+    # dropped and their variable names kept, in one canonical `env_keys` list.
+    _ENV_KEYS = frozenset(
+        {"env", "envs", "environment", "env_variables", "environment_variables"}
+    )
+
+    def get_project(self, name: str) -> Dict[str, Any]:
+        """Get a project without exposing Compose, environment, or secret fields."""
+        result = self._project_id_request("get", name)
+        if not result.get("success"):
+            return result
+        return self._sanitize_details(result)
+
+    @classmethod
+    def _sanitize_details(cls, value: Any) -> Any:
+        """Recursively omit credentials and Compose source; keep env var names."""
         if isinstance(value, dict):
-            return {
-                key: cls._sanitize_project_details(item)
-                for key, item in value.items()
-                if str(key).lower() not in sensitive_keys
-            }
+            clean: Dict[Any, Any] = {}
+            for key, item in value.items():
+                lower = str(key).lower()
+                if lower in cls._SENSITIVE_KEYS or is_secret_key(lower):
+                    continue
+                if lower in cls._ENV_KEYS:
+                    clean["env_keys"] = cls._env_names(item)
+                    continue
+                clean[key] = cls._sanitize_details(item)
+            return clean
         if isinstance(value, list):
-            return [cls._sanitize_project_details(item) for item in value]
+            return [cls._sanitize_details(item) for item in value]
         return value
+
+    @staticmethod
+    def _env_names(value: Any) -> List[str]:
+        """Variable names from `NAME=value` strings, `{key, value}` objects, or a map."""
+        names: List[str] = []
+        if isinstance(value, dict):
+            names = [str(key) for key in value]
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    names.append(item.split("=", 1)[0])
+                elif isinstance(item, dict):
+                    name = item.get("key", item.get("name"))
+                    if name:
+                        names.append(str(name))
+        return names
 
     def start_project(self, name: str) -> Dict[str, Any]:
         """Start a Container Manager project by name."""

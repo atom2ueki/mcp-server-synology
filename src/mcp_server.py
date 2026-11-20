@@ -181,9 +181,22 @@ class SynologyMCPServer:
             load_secret(config.confirm_secret, Path(config.confirm_secret_file)),
             ttl_seconds=config.confirm_ttl_seconds,
         )
+        self.tool_profile = (
+            config.tool_profile if config.tool_profile in self._TOOL_PROFILES else "full"
+        )
+        if config.tool_profile not in self._TOOL_PROFILES:
+            logger.warning(
+                "Unknown MCP_TOOL_PROFILE %r; using 'full'. Valid: %s",
+                config.tool_profile, ", ".join(sorted(self._TOOL_PROFILES)),
+            )
+        self._withheld_tools = 0
         self.server = self._create_server()
         self._register_all_tools()
         self._warn_unclassified_tools()
+        logger.info(
+            "Tool profile %s: %d tools registered, %d withheld",
+            self.tool_profile, len(self._tool_registry), self._withheld_tools,
+        )
 
     def _warn_unclassified_tools(self) -> None:
         """Report tools that fall back to the pessimistic DESTRUCTIVE risk.
@@ -254,6 +267,27 @@ class SynologyMCPServer:
             on_call_tool=on_call_tool,
         )
 
+    _TOOL_PROFILES = frozenset({"full", "no_destructive", "read_only"})
+    # Class defaults so an instance built via __new__ (tests) still registers;
+    # __init__ overrides both from config.
+    tool_profile = "full"
+    _withheld_tools = 0
+
+    def _profile_allows(self, name: str) -> bool:
+        """Whether the active profile exposes `name` at all.
+
+        Filtering happens at registration: a withheld tool is absent from
+        tools/list and cannot be called, which is stronger than a client-side
+        deny list. Classification runs regardless, so an unclassified tool
+        still fails at startup rather than hiding behind a profile.
+        """
+        if self.tool_profile == "full":
+            return True
+        hints = annotations_for(name)
+        if hints.read_only_hint:
+            return True
+        return self.tool_profile == "no_destructive" and not hints.destructive_hint
+
     def _register_tool(
         self,
         name: str,
@@ -263,6 +297,10 @@ class SynologyMCPServer:
     ):
         """Register a tool definition and its handler in the registry."""
         risk = risk_for(name)
+        hints = annotations_for(name)  # refuses an unclassified tool, profile or not
+        if not self._profile_allows(name):
+            self._withheld_tools += 1
+            return
         if risk is Risk.DESTRUCTIVE or name in {"create_file", "copy_file", "move_file", "synology_set_user"}:
             description += (
                 "\n\nDestructive calls (including overwrite=true) require the client's "
@@ -276,8 +314,7 @@ class SynologyMCPServer:
             # own guards are `risk_for()` in _dispatch_tool and the
             # classification table in tool_safety.py, which refuses an
             # unclassified tool at registration time.
-
-            annotations=annotations_for(name),
+            annotations=hints,
         )
         self._tool_registry[name] = (tool, handler)
 
