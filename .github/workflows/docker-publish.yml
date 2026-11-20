@@ -59,7 +59,11 @@ jobs:
 
       # Tag 1.8.0 or v1.8.0 -> `1.8.0`, `1.8` and `latest`. The default
       # `latest=auto` flavor leaves `latest` (and the short `1.8` tag) alone for
-      # pre-releases. A manual run from a branch -> `edge` only.
+      # pre-releases. The trigger above also accepts PEP 440 spellings such as
+      # v1.9.0rc1 (the form PyPI uses), which the semver rules do not match, so
+      # the pep440 rule below gives those a `1.9.0rc1` tag; without it such a
+      # tag would build an image with no tag at all. A manual run from a branch
+      # -> `edge` only.
       - id: meta
         uses: docker/metadata-action@v6
         with:
@@ -67,6 +71,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=pep440,pattern={{version}}
             type=raw,value=edge,enable=${{ github.ref_type == 'branch' }}
 
       - uses: docker/build-push-action@v7
