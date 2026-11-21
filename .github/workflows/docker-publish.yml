@@ -24,10 +24,17 @@ on:
 permissions:
   contents: read
 
-# Two runs for the same ref would race on the same tags. Do not cancel the one
-# in flight: a half-pushed multi-arch manifest is worse than waiting.
+# Publishes are serialized, not just per-ref: overlapping releases (v1.9.0 then
+# v1.9.1 within minutes) would race on the shared `1.9` and `latest` aliases,
+# and the run that finishes last wins them — not necessarily the newest. One
+# static group keeps every push in order. GitHub keeps one running and one
+# pending run per group, so a third run arriving while two are queued cancels
+# the middle one (it must be re-run manually) — releases here are cut one at a
+# time, so that trade is fine.
+# Never cancel in flight: a half-pushed multi-arch manifest is worse than
+# waiting, and a cancelled release run would leave `latest` stale.
 concurrency:
-  group: docker-publish-${{ github.ref }}
+  group: docker-publish
   cancel-in-progress: false
 
 jobs:
@@ -59,11 +66,13 @@ jobs:
 
       # Tag 1.8.0 or v1.8.0 -> `1.8.0`, `1.8` and `latest`. The default
       # `latest=auto` flavor leaves `latest` (and the short `1.8` tag) alone for
-      # pre-releases. The trigger above also accepts PEP 440 spellings such as
-      # v1.9.0rc1 (the form PyPI uses), which the semver rules do not match, so
-      # the pep440 rule below gives those a `1.9.0rc1` tag; without it such a
-      # tag would build an image with no tag at all. A manual run from a branch
-      # -> `edge` only.
+      # pre-releases. The trigger above also accepts PEP 440 pre-release
+      # spellings such as 1.9.0rc1 or v1.9.0rc1 (the repo's own tags are bare
+      # `1.8.0`-style, and PyPI normalises away any leading `v`), which the
+      # semver rules do not match, so the pep440 rule below gives those a
+      # `1.9.0rc1` tag; without it metadata-action would emit no tags at all
+      # and build-push-action would fail on the empty tag list. A manual run
+      # from a branch -> `edge` only.
       - id: meta
         uses: docker/metadata-action@v6
         with:

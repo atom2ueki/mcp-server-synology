@@ -262,6 +262,8 @@ docker pull ghcr.io/atom2ueki/mcp-server-synology:latest   # or pin a release ta
 
 Tags: `X.Y.Z` and `X.Y` per stable release, `latest` for the newest stable release (pre-releases only get their own version tag, never `latest`), and `edge` for manual builds from a branch. Images exist only for releases tagged after the publish workflow was added; releases up to and including `1.8.0` have no image, so until the next release is out, build locally (above) or use `edge` if the maintainer has published one. To use it with `docker-compose.http.yml`, replace `build: .` with `image: ghcr.io/atom2ueki/mcp-server-synology:latest` (or a pinned `X.Y.Z`). Like the locally built image, it contains no credentials; pass them at run time as described above.
 
+GHCR creates the package as **private** on first publish; the maintainer makes it public once (Packages → mcp-server-synology → Package settings → Change visibility). Until then, `docker pull` fails anonymously — you can still pull after `docker login ghcr.io` with a GitHub token that has `read:packages`.
+
 ### Reverse proxy
 
 Most MCP clients require HTTPS, so the HTTP endpoint must be fronted by a TLS-terminating reverse proxy. For DSM users, the built-in **Login Portal → Reverse Proxy** does the job:
