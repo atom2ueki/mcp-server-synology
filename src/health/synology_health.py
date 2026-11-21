@@ -33,21 +33,6 @@ class SynologyHealth:
         """Make an authenticated call to /webapi/entry.cgi."""
         return self._api.get(api, method, version, extra_params)
 
-    def _api_call_with_fallback(
-        self,
-        primary_api: str,
-        primary_method: str,
-        fallback_api: str,
-        fallback_method: str,
-        version: int = 1,
-        extra_params: Optional[Dict] = None,
-    ) -> Dict[str, Any]:
-        """Try the primary API, fall back to an alternative if it fails."""
-        result = self._api_call(primary_api, primary_method, version, extra_params)
-        if result.get("success"):
-            return result
-        return self._api_call(fallback_api, fallback_method, version, extra_params)
-
     # ------------------------------------------------------------------
     # System
     # ------------------------------------------------------------------

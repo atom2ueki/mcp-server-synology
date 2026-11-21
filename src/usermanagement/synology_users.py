@@ -161,16 +161,6 @@ class SynologyUserManager:
             },
         )
 
-    def get_group(self, name: str) -> Dict[str, Any]:
-        """Get info for a specific group."""
-        return self._api_call(
-            "SYNO.Core.Group",
-            "get",
-            extra_params={
-                "name": name,
-            },
-        )
-
     def list_group_members(self, group: str) -> Dict[str, Any]:
         """List members of a group.
 

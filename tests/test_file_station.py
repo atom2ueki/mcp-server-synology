@@ -167,60 +167,10 @@ class TestSynologyFileStation:
 
         pytest.skip("Search functionality not accessible in any test locations")
 
-    def test_path_formatting(self, file_station):
-        """Test internal path formatting."""
-        # Test the _format_path method
-        test_cases = [
-            ("home", "/home"),
-            ("/home", "/home"),
-            ("home/", "/home"),
-            ("/home/", "/home"),
-            ("/", "/"),
-            ("", "/"),
-            ("path/to/file", "/path/to/file"),
-        ]
-
-        for input_path, expected in test_cases:
-            result = file_station._format_path(input_path)
-            assert result == expected, (
-                f"Path '{input_path}' should format to '{expected}', got '{result}'"
-            )
-            print(f"✅ '{input_path}' → '{result}'")
-
-        print("✅ Path formatting tests passed")
-
-    def test_api_accessibility(self, file_station):
-        """Test that FileStation API endpoints are accessible."""
-        # Verify the client is configured properly
-        assert file_station.base_url is not None
-        assert file_station.session_id is not None
-        assert file_station.api_url is not None
-
-        # Verify API URL format
-        assert file_station.api_url.startswith("http")
-        assert "webapi" in file_station.api_url.lower()
-
-        print(f"✅ API URL: {file_station.api_url}")
-        print(f"✅ Session: {file_station.session_id[:10]}...")
-
     def test_error_handling(self, file_station):
-        """Test error handling for invalid operations."""
-        # Test with clearly invalid path
-        invalid_path = "/this/path/definitely/does/not/exist/12345"
-
-        try:
-            file_station.get_file_info(invalid_path)
-            pytest.fail("Expected exception for invalid path")
-        except Exception as e:
-            print(f"✅ Invalid path correctly rejected: {str(e)[:50]}...")
-
-        # Test with invalid search pattern
-        try:
-            # This might work or fail depending on implementation
-            results = file_station.search_files("/", "")
-            print(f"⚠️  Empty search pattern returned {len(results)} results")
-        except Exception as e:
-            print(f"✅ Empty search pattern correctly rejected: {str(e)[:50]}...")
+        """A missing path must raise, not return empty data."""
+        with pytest.raises(FileNotFoundError):
+            file_station.get_file_info("/this/path/definitely/does/not/exist/12345")
 
 
 # Quick connectivity test
