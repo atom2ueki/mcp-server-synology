@@ -8,6 +8,7 @@ would surface as an AttributeError instead of a ToolFailureError.
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from config import config  # noqa: E402
 from mcp_server import SynologyMCPServer, ToolFailureError  # noqa: E402
 from paths import (  # noqa: E402
     PathOutsideRootsError,
+    admit_write,
     copy_target,
     create_directory_target,
     ensure_within_roots,
@@ -125,6 +127,49 @@ class TestComposedTargets:
             rename_target("/volume1/media/x.mkv", "..")
 
 
+class TestAdmitWrite:
+    def test_returns_canonical_arguments_for_each_tool(self):
+        roots = [ROOT]
+        assert admit_write("create_file", {"path": "/media/a.txt"}, roots) == {
+            "path": "/media/a.txt"
+        }
+        assert admit_write(
+            "rename_file", {"path": "/media/a", "new_name": "b"}, roots
+        ) == {"path": "/media/a"}
+        assert admit_write(
+            "move_file",
+            {"source_path": "/media/a", "destination_path": "/media/dst"},
+            roots,
+        ) == {"source_path": "/media/a", "destination_path": "/media/dst"}
+        assert admit_write(
+            "copy_file", {"source_path": "/media/a", "destination_folder": "/media"},
+            roots,
+        ) == {"destination_folder": "/media"}
+        assert admit_write(
+            "create_directory", {"folder_path": "/media", "name": "x"}, roots
+        ) == {"folder_path": "/media", "name": "x"}
+
+    def test_rename_refuses_a_source_outside_the_roots(self):
+        # The destination equals a configured root exactly, so checking only
+        # the sibling would let a rename reach an outside source.
+        with pytest.raises(PathOutsideRootsError):
+            admit_write(
+                "rename_file", {"path": "/media/a", "new_name": "b"},
+                ["/media/b"],
+            )
+
+    def test_rename_validates_the_destination_sibling(self):
+        with pytest.raises(PathOutsideRootsError):
+            admit_write(
+                "rename_file", {"path": "/media/a", "new_name": "b"},
+                ["/media/a"],
+            )
+
+    def test_unknown_tool_is_not_silently_admitted(self):
+        with pytest.raises(KeyError):
+            admit_write("delete", {"path": "/media/a"}, [ROOT])
+
+
 class TestHandlers:
     def test_create_file_outside_roots_is_refused_before_any_call(self, monkeypatch):
         srv = make_server(monkeypatch, [ROOT])
@@ -174,6 +219,24 @@ class TestHandlers:
                 )
             )
         assert caught.value.payload["error"]["code"] == "path_outside_roots"
+
+    def test_rename_passes_the_source_and_validates_the_destination(self, monkeypatch):
+        seen = {}
+
+        def rename(path, new_name):
+            seen["args"] = (path, new_name)
+            return {"success": True}
+
+        srv = SynologyMCPServer.__new__(SynologyMCPServer)
+        srv._get_base_url = lambda arguments: BASE_URL
+        srv._get_filestation = lambda url: SimpleNamespace(rename_file=rename)
+        monkeypatch.setattr(
+            config, "file_station_write_paths_for", lambda base_url: (ROOT,)
+        )
+
+        asyncio.run(srv._handle_rename_file({"path": "/media/a", "new_name": "b"}))
+
+        assert seen["args"] == ("/media/a", "b")
 
     def test_rename_refuses_a_dot_name(self, monkeypatch):
         srv = make_server(monkeypatch, [])

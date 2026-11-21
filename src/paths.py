@@ -104,6 +104,53 @@ def ensure_within_roots(canonical: str, roots: Iterable[str] | None) -> str:
     )
 
 
+def admit_write(
+    tool: str,
+    arguments: dict,
+    roots: Iterable[str] | None = None,
+) -> dict[str, str]:
+    """Validate one File Station write; return canonical argument values.
+
+    This is the single seam the handlers cross: each tool's target shape lives
+    here, so a caller never has to know whether the target is a file path, a
+    folder plus a name, or both ends of a move. Raises ValueError (including
+    PathOutsideRootsError) before anything reaches the NAS.
+    """
+    if tool == "create_file":
+        return {"path": validate_write_path(arguments["path"], roots)}
+
+    if tool == "rename_file":
+        # Validate the destination, but rename the source: DSM takes the item
+        # to rename plus the new name, not the derived path.
+        source = validate_write_path(arguments["path"], roots)
+        target = rename_target(source, arguments["new_name"])
+        validate_write_path(target, roots)
+        return {"path": source}
+
+    if tool == "move_file":
+        # A move removes the source, so both ends are writes.
+        return {
+            "source_path": validate_write_path(arguments["source_path"], roots),
+            "destination_path": validate_write_path(
+                arguments["destination_path"], roots, allow_share_root=True
+            ),
+        }
+
+    if tool == "copy_file":
+        folder = canonical_path(arguments["destination_folder"])
+        validate_write_path(copy_target(folder, arguments["source_path"]), roots)
+        return {"destination_folder": folder}
+
+    if tool == "create_directory":
+        folder = canonical_path(arguments["folder_path"])
+        validate_write_path(
+            create_directory_target(folder, arguments["name"]), roots
+        )
+        return {"folder_path": folder, "name": arguments["name"]}
+
+    raise KeyError(f"not a guarded File Station write: {tool}")
+
+
 def validate_write_path(
     path: str,
     roots: Iterable[str] | None = None,
@@ -128,6 +175,11 @@ def validate_write_path(
         )
     _refuse_protected(canonical, _PROTECTED_WRITE)
     return ensure_within_roots(canonical, roots)
+
+
+def canonical_path(path: str) -> str:
+    """Absolute, dot-free, without collapsing the path's own meaning."""
+    return _canonical(path, "path")
 
 
 def create_directory_target(folder_path: str, name: str) -> str:
