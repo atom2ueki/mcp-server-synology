@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Published Docker image** — a new `docker-publish.yml` workflow builds the existing `Dockerfile`
+  for `linux/amd64` and `linux/arm64` and pushes it to
+  `ghcr.io/atom2ueki/mcp-server-synology` on every release tag, so a deployment can
+  `docker pull` instead of cloning and building. Stable releases get `X.Y.Z`, `X.Y` and `latest`;
+  pre-releases (e.g. `1.9.0rc1`) get only their own version tag and never `latest`. The first
+  image appears with the first release tagged after this workflow exists. It needs no secrets,
+  only the workflow's `GITHUB_TOKEN`. The image still contains no credentials. A manual run from
+  a branch publishes `edge`.
 - **`MCP_FILESTATION_WRITE_PATHS`** — optional, comma-separated allow-list for File Station
   writes (`create_directory`, `create_file`, `copy_file`, `move_file`, `rename_file`,
   `delete`), overridable per NAS with `synology.<name>.filestation_write_paths`. Moves

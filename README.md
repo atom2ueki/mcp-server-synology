@@ -102,6 +102,8 @@ docker-compose up -d
 docker-compose up -d --build
 ```
 
+Instead of building locally, you can pull the published image and use it in `docker-compose.yml` exactly as described for the HTTP compose file in [Pre-built image](#pre-built-image) below — replace `build: .` with `image: ghcr.io/atom2ueki/mcp-server-synology:latest` (or a pinned `X.Y.Z`).
+
 ### 4️⃣ Alternative: Local Python
 
 ```bash
@@ -251,6 +253,18 @@ docker logs -f synology-mcp-http
 ```
 
 You should see the server log `Starting Streamable HTTP MCP server on http://0.0.0.0:8765/mcp` and the auto-login succeed. uvicorn's own `Uvicorn running on …` banner is *not* printed at the compose file's defaults — it is INFO on the `uvicorn.error` logger, which the server pins to `warning` unless `DEBUG=true`.
+
+#### Pre-built image
+
+Instead of building locally, you can pull the image published to GitHub Container Registry on every release (`linux/amd64` and `linux/arm64`, so it also runs on ARM-based NAS models):
+
+```bash
+docker pull ghcr.io/atom2ueki/mcp-server-synology:latest   # or pin a release tag, e.g. :X.Y.Z
+```
+
+Tags: `X.Y.Z` and `X.Y` per stable release, `latest` for the newest stable release (pre-releases only get their own version tag, never `latest`), and `edge` for manual builds from a branch. Images exist only for releases tagged after the publish workflow was added; releases up to and including `1.8.0` have no image, so until the next release is out, build locally (above) or use `edge` if the maintainer has published one. To use it with `docker-compose.http.yml`, replace `build: .` with `image: ghcr.io/atom2ueki/mcp-server-synology:latest` (or a pinned `X.Y.Z`). Like the locally built image, it contains no credentials; pass them at run time as described above.
+
+GHCR creates the package as **private** on first publish; the maintainer makes it public once (Packages → mcp-server-synology → Package settings → Change visibility). Until then, `docker pull` fails anonymously — you can still pull after `docker login ghcr.io` with a GitHub token that has `read:packages`.
 
 ### Reverse proxy
 
