@@ -120,8 +120,12 @@ def admit_write(
         return {"path": validate_write_path(arguments["path"], roots)}
 
     if tool == "rename_file":
-        target = rename_target(arguments["path"], arguments["new_name"])
-        return {"path": validate_write_path(target, roots)}
+        # Validate the destination, but rename the source: DSM takes the item
+        # to rename plus the new name, not the derived path.
+        source = canonical_path(arguments["path"])
+        target = rename_target(source, arguments["new_name"])
+        validate_write_path(target, roots)
+        return {"path": source}
 
     if tool == "move_file":
         # A move removes the source, so both ends are writes.

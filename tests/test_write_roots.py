@@ -8,6 +8,7 @@ would surface as an AttributeError instead of a ToolFailureError.
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -134,7 +135,7 @@ class TestAdmitWrite:
         }
         assert admit_write(
             "rename_file", {"path": "/media/a", "new_name": "b"}, roots
-        ) == {"path": "/media/b"}
+        ) == {"path": "/media/a"}
         assert admit_write(
             "move_file",
             {"source_path": "/media/a", "destination_path": "/media/dst"},
@@ -147,6 +148,13 @@ class TestAdmitWrite:
         assert admit_write(
             "create_directory", {"folder_path": "/media", "name": "x"}, roots
         ) == {"folder_path": "/media", "name": "x"}
+
+    def test_rename_validates_the_destination_sibling(self):
+        with pytest.raises(PathOutsideRootsError):
+            admit_write(
+                "rename_file", {"path": "/media/a", "new_name": "b"},
+                ["/media/a"],
+            )
 
     def test_unknown_tool_is_not_silently_admitted(self):
         with pytest.raises(KeyError):
@@ -202,6 +210,24 @@ class TestHandlers:
                 )
             )
         assert caught.value.payload["error"]["code"] == "path_outside_roots"
+
+    def test_rename_passes_the_source_and_validates_the_destination(self, monkeypatch):
+        seen = {}
+
+        def rename(path, new_name):
+            seen["args"] = (path, new_name)
+            return {"success": True}
+
+        srv = SynologyMCPServer.__new__(SynologyMCPServer)
+        srv._get_base_url = lambda arguments: BASE_URL
+        srv._get_filestation = lambda url: SimpleNamespace(rename_file=rename)
+        monkeypatch.setattr(
+            config, "file_station_write_paths_for", lambda base_url: (ROOT,)
+        )
+
+        asyncio.run(srv._handle_rename_file({"path": "/media/a", "new_name": "b"}))
+
+        assert seen["args"] == ("/media/a", "b")
 
     def test_rename_refuses_a_dot_name(self, monkeypatch):
         srv = make_server(monkeypatch, [])
