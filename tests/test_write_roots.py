@@ -149,6 +149,15 @@ class TestAdmitWrite:
             "create_directory", {"folder_path": "/media", "name": "x"}, roots
         ) == {"folder_path": "/media", "name": "x"}
 
+    def test_rename_refuses_a_source_outside_the_roots(self):
+        # The destination equals a configured root exactly, so checking only
+        # the sibling would let a rename reach an outside source.
+        with pytest.raises(PathOutsideRootsError):
+            admit_write(
+                "rename_file", {"path": "/media/a", "new_name": "b"},
+                ["/media/b"],
+            )
+
     def test_rename_validates_the_destination_sibling(self):
         with pytest.raises(PathOutsideRootsError):
             admit_write(
