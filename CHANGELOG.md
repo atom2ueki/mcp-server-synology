@@ -11,6 +11,21 @@
   image appears with the first release tagged after this workflow exists. It needs no secrets,
   only the workflow's `GITHUB_TOKEN`. The image still contains no credentials. A manual run from
   a branch publishes `edge`.
+- **`MCP_FILESTATION_WRITE_PATHS`** — optional, comma-separated allow-list for File Station
+  writes (`create_directory`, `create_file`, `copy_file`, `move_file`, `rename_file`,
+  `delete`), overridable per NAS with `synology.<name>.filestation_write_paths`. Moves
+  check the source as well, since removing it is a write; copies check only the
+  destination. Out-of-list targets fail with `path_outside_roots` before the write, and
+  every write still refuses share/volume/filesystem roots. Empty (default) keeps prior
+  behaviour. (#140)
+- **`MCP_TOOL_PROFILE`** — `full` (default), `no_destructive` or `read_only` filters the
+  tool registry at registration, so a withheld tool is never listed and cannot be called.
+  Classification still runs for every tool, so an unclassified one still fails startup.
+  Same key as `server.tool_profile` in settings.json.
+- **Container details no longer leak environment values** — `synology_container_get`
+  returns `env_keys` (variable names only) for `Config.Env` and `profile.env_variables`;
+  credential-shaped keys are dropped at any depth. `get_project` benefits from the same
+  sanitizer, which now also recognises `env_variables`. (#139)
 - **`password_env` per-NAS setting** names an environment variable to read the NAS password from
   when `settings.json` is loaded, so a launcher can pass it in from a secret manager and the file
   never stores it. Previously a `settings.json` entry needed a plaintext `password`, and the legacy

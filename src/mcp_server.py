@@ -34,7 +34,15 @@ from health import SynologyHealth
 from iscsi import SynologyISCSI
 from iscsi.synology_iscsi import _uuid_list
 from nfs import SynologyNFS
-from paths import validate_delete_path
+from paths import (
+    PathOutsideRootsError,
+    copy_target,
+    create_directory_target,
+    ensure_within_roots,
+    rename_target,
+    validate_delete_path,
+    validate_write_path,
+)
 from tool_policy import Risk, annotations_for, risk_for, unclassified
 from tool_safety import fence_content
 from trash import (
@@ -181,9 +189,22 @@ class SynologyMCPServer:
             load_secret(config.confirm_secret, Path(config.confirm_secret_file)),
             ttl_seconds=config.confirm_ttl_seconds,
         )
+        self.tool_profile = (
+            config.tool_profile if config.tool_profile in self._TOOL_PROFILES else "full"
+        )
+        if config.tool_profile not in self._TOOL_PROFILES:
+            logger.warning(
+                "Unknown MCP_TOOL_PROFILE %r; using 'full'. Valid: %s",
+                config.tool_profile, ", ".join(sorted(self._TOOL_PROFILES)),
+            )
+        self._withheld_tools = 0
         self.server = self._create_server()
         self._register_all_tools()
         self._warn_unclassified_tools()
+        logger.info(
+            "Tool profile %s: %d tools registered, %d withheld",
+            self.tool_profile, len(self._tool_registry), self._withheld_tools,
+        )
 
     def _warn_unclassified_tools(self) -> None:
         """Report tools that fall back to the pessimistic DESTRUCTIVE risk.
@@ -254,6 +275,33 @@ class SynologyMCPServer:
             on_call_tool=on_call_tool,
         )
 
+    _TOOL_PROFILES = frozenset({"full", "no_destructive", "read_only"})
+    # Session establishment changes no NAS data, and withholding it would make
+    # every read fail on deployments without auto-login: a client could never
+    # create the session it needs. Kept in every profile.
+    _SESSION_TOOLS = frozenset({"synology_login", "synology_logout"})
+    # Class defaults so an instance built via __new__ (tests) still registers;
+    # __init__ overrides both from config.
+    tool_profile = "full"
+    _withheld_tools = 0
+
+    def _profile_allows(self, name: str) -> bool:
+        """Whether the active profile exposes `name` at all.
+
+        Filtering happens at registration: a withheld tool is absent from
+        tools/list and cannot be called, which is stronger than a client-side
+        deny list. Classification runs regardless, so an unclassified tool
+        still fails at startup rather than hiding behind a profile.
+        """
+        if name in self._SESSION_TOOLS:
+            return True
+        if self.tool_profile == "full":
+            return True
+        hints = annotations_for(name)
+        if hints.read_only_hint:
+            return True
+        return self.tool_profile == "no_destructive" and not hints.destructive_hint
+
     def _register_tool(
         self,
         name: str,
@@ -263,6 +311,10 @@ class SynologyMCPServer:
     ):
         """Register a tool definition and its handler in the registry."""
         risk = risk_for(name)
+        hints = annotations_for(name)  # refuses an unclassified tool, profile or not
+        if not self._profile_allows(name):
+            self._withheld_tools += 1
+            return
         if risk is Risk.DESTRUCTIVE or name in {"create_file", "copy_file", "move_file", "synology_set_user"}:
             description += (
                 "\n\nDestructive calls (including overwrite=true) require the client's "
@@ -276,8 +328,7 @@ class SynologyMCPServer:
             # own guards are `risk_for()` in _dispatch_tool and the
             # classification table in tool_safety.py, which refuses an
             # unclassified tool at registration time.
-
-            annotations=annotations_for(name),
+            annotations=hints,
         )
         self._tool_registry[name] = (tool, handler)
 
@@ -657,6 +708,27 @@ class SynologyMCPServer:
             inst_dict.pop(base_url, None)
 
         return base_url
+
+    @staticmethod
+    def _write_error(code: str, exc: ValueError) -> "ToolFailureError":
+        return ToolFailureError(
+            {"success": False, "error": {"code": code, "message": str(exc)}}
+        )
+
+    def _admit_write(
+        self, path: str, base_url: str, *, allow_share_root: bool = False
+    ) -> str:
+        """Canonical write target, or a ToolFailureError naming the refusal."""
+        try:
+            return validate_write_path(
+                path,
+                config.file_station_write_paths_for(base_url),
+                allow_share_root=allow_share_root,
+            )
+        except PathOutsideRootsError as exc:
+            raise self._write_error("path_outside_roots", exc) from exc
+        except ValueError as exc:
+            raise self._write_error("invalid_write_path", exc) from exc
 
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
@@ -1635,10 +1707,14 @@ class SynologyMCPServer:
 
     async def _handle_rename_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle renaming a file or directory."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
-        path = arguments["path"]
+        try:
+            target = rename_target(arguments["path"], arguments["new_name"])
+        except ValueError as exc:
+            raise self._write_error("invalid_write_path", exc) from exc
         new_name = arguments["new_name"]
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        path = self._admit_write(target, base_url)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(filestation.rename_file, path, new_name)
 
@@ -1648,11 +1724,15 @@ class SynologyMCPServer:
 
     async def _handle_move_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle moving a file or directory."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
-        source_path = arguments["source_path"]
-        destination_path = arguments["destination_path"]
         overwrite = arguments.get("overwrite", False)  # Default to False if not provided
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        # A move removes the source, so both ends are writes: the source must
+        # be inside the roots too, or the allow-list would not stop deletions.
+        source_path = self._admit_write(arguments["source_path"], base_url)
+        destination_path = self._admit_write(
+            arguments["destination_path"], base_url, allow_share_root=True
+        )
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(
             filestation.move_file, source_path, destination_path, overwrite
@@ -1662,11 +1742,16 @@ class SynologyMCPServer:
 
     async def _handle_copy_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle a verified, server-side copy of one regular file."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         source_path = arguments["source_path"]
+        try:
+            target = copy_target(arguments["destination_folder"], source_path)
+        except ValueError as exc:
+            raise self._write_error("invalid_write_path", exc) from exc
         destination_folder = arguments["destination_folder"]
         overwrite = arguments.get("overwrite", False)
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        self._admit_write(target, base_url)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(
             filestation.copy_file, source_path, destination_folder, overwrite
@@ -1676,12 +1761,12 @@ class SynologyMCPServer:
 
     async def _handle_create_file(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new file with specified content on the Synology NAS."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
-        path = arguments["path"]
         content = arguments.get("content", "")
         overwrite = arguments.get("overwrite", False)
         encoding = arguments.get("encoding", "text")
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        path = self._admit_write(arguments["path"], base_url)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(
             filestation.create_file, path, content, overwrite, encoding
@@ -1695,11 +1780,16 @@ class SynologyMCPServer:
 
     async def _handle_create_directory(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new directory on the Synology NAS."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         folder_path = arguments["folder_path"]
         name = arguments["name"]
+        try:
+            target = create_directory_target(folder_path, name)
+        except ValueError as exc:
+            raise self._write_error("invalid_write_path", exc) from exc
         force_parent = arguments.get("force_parent", False)
 
+        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        self._admit_write(target, base_url)
         filestation = self._get_filestation(base_url)
         result = await asyncio.to_thread(
             filestation.create_directory, folder_path, name, force_parent
@@ -1721,6 +1811,12 @@ class SynologyMCPServer:
                 "error": {"code": "invalid_delete_path", "message": str(exc)},
             }) from exc
         base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        try:
+            path = ensure_within_roots(
+                path, config.file_station_write_paths_for(base_url)
+            )
+        except PathOutsideRootsError as exc:
+            raise self._write_error("path_outside_roots", exc) from exc
         filestation = self._get_filestation(base_url)
         policy = TrashPolicy(config.trash_mode, config.trash_dir)
         if policy.mode not in {"auto", "always", "never"}:

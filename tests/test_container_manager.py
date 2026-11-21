@@ -343,14 +343,18 @@ def test_project_get_omits_compose_environment_and_secret_fields():
     ):
         result = container.get_project("media")
 
+    # `env` is replaced by its variable names; values never reach the caller.
     assert result == {
         "success": True,
         "data": {
             "id": "abc-123",
             "name": "media",
-            "containers": [{"name": "media-app", "status": "running"}],
+            "containers": [
+                {"name": "media-app", "status": "running", "env_keys": ["TOKEN"]}
+            ],
         },
     }
+    assert "secret" not in json.dumps(result)
 
 
 def test_project_update_quotes_service_portal_params_like_create():

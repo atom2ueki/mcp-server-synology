@@ -13,6 +13,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
+from paths import normalize_roots
+
 # Setup logger
 logger = logging.getLogger("synology-mcp")
 
@@ -131,6 +133,23 @@ class SynologyConfig:
         # can host it and falls back to a normal delete when it cannot.
         self.trash_mode = os.getenv("MCP_TRASH", "auto").lower()
         self.trash_dir = os.getenv("MCP_TRASH_DIR", "#trash")
+
+        # Opt-in least privilege: which tools exist at all.
+        #   full           — every tool (default)
+        #   no_destructive — read-only + additive tools only
+        #   read_only      — read-only tools only
+        self.tool_profile = os.getenv("MCP_TOOL_PROFILE", "full").lower()
+
+        # Optional allow-list for File Station writes, shared by every NAS;
+        # empty means every share. A NAS entry overrides it with
+        # `filestation_write_paths`. Comma-separated so one env var stays
+        # readable in a compose file. Normalized at load so a malformed root
+        # aborts startup instead of silently widening access.
+        self.file_station_write_paths = normalize_roots(
+            part.strip()
+            for part in os.getenv("MCP_FILESTATION_WRITE_PATHS", "").split(",")
+            if part.strip()
+        )
 
     def _check_file_permissions(self, path: Path) -> bool:
         """Check if secrets file has safe permissions (0600 or stricter).
@@ -453,6 +472,8 @@ class SynologyConfig:
                         self.confirm_mode = str(confirm_section["mode"]).lower()
                     if "ttl_seconds" in confirm_section:
                         self.confirm_ttl_seconds = int(confirm_section["ttl_seconds"])
+                    if "tool_profile" in server_section:
+                        self.tool_profile = str(server_section["tool_profile"]).lower()
                     trash_section = server_section.get("trash", {})
                     if "mode" in trash_section:
                         self.trash_mode = str(trash_section["mode"]).lower()
@@ -570,12 +591,24 @@ class SynologyConfig:
                         )
                         nas_verify_ssl = self.verify_ssl
 
+                    nas_write_paths = nas_info.get("filestation_write_paths")
+                    if nas_write_paths is not None:
+                        if not isinstance(nas_write_paths, list):
+                            raise ValueError(
+                                f"synology.{nas_name}.filestation_write_paths must be "
+                                "a list of absolute paths"
+                            )
+                        nas_write_paths = normalize_roots(
+                            str(path) for path in nas_write_paths
+                        )
+
                     self.nas_configs[nas_name] = {
                         "base_url": base_url,
                         "username": username,
                         "password": password,
 
                         "verify_ssl": nas_verify_ssl,
+                        "filestation_write_paths": nas_write_paths,
                         "note": nas_info.get("note", ""),
                         "otp_code": otp_code,
                         "device_id": device_id,
@@ -601,6 +634,24 @@ class SynologyConfig:
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
+
+    def file_station_write_paths_for(self, base_url: str) -> tuple[str, ...]:
+        """File Station write allow-list for a NAS, by base URL.
+
+        A per-NAS `filestation_write_paths` entry wins; otherwise the global
+        `MCP_FILESTATION_WRITE_PATHS` applies. The global list is the useful
+        default for the single-NAS case, while multi-NAS deployments need
+        different trees per device.
+        """
+        target = self._normalize_base_url(base_url)
+        for cfg in self.nas_configs.values():
+            configured = cfg.get("base_url")
+            if configured and self._normalize_base_url(configured) == target:
+                paths = cfg.get("filestation_write_paths")
+                if paths is not None:
+                    return tuple(paths)
+                break
+        return self.file_station_write_paths
 
     def verify_ssl_for(self, base_url: str) -> bool:
         """Return the SSL verification policy for a NAS, by base URL.
