@@ -110,7 +110,8 @@
   answer so a possibly-applied write is never blindly retried; a write DSM confirmed whose
   read-back then fails is reported as a success flagged `verified: false` with the read-back
   error, never as a plain failure. Enabling auto-block is refused
-  while the allow list is empty. The tools are classified in `src/tool_safety.py`. (#130)
+  while the allow list is empty. Each tool's annotations live on its `ToolSpec` in
+  `src/tools/`; `src/tool_policy.py` derives the risk tier from them. (#130)
 
 - **MCP safety annotations on every tool.** Each tool declares `ToolAnnotations` on its
   `ToolSpec`: 54 are read-only, 18 additive (create, start, pause, grant, download;
