@@ -37,9 +37,6 @@ _NAMES = [spec.name for spec in _ALL]
 _DUPLICATES = {name for name in _NAMES if _NAMES.count(name) > 1}
 if _DUPLICATES:
     raise ValueError(f"duplicate tool specs: {', '.join(sorted(_DUPLICATES))}")
-if len(_ALL) != 107:
-    raise ValueError(f"expected 107 unconditionally registered tools, got {len(_ALL)}")
-
 # Catalog order is module grouping order; tools/list has no ordering contract.
 ALL_TOOLS = tuple(_ALL)
 

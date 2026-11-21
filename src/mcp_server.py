@@ -270,7 +270,13 @@ class SynologyMCPServer:
     # Session establishment changes no NAS data, and withholding it would make
     # every read fail on deployments without auto-login: a client could never
     # create the session it needs. Kept in every profile.
-    _SESSION_TOOLS = frozenset({"synology_login", "synology_logout"})
+    _SESSION_TOOLS = frozenset({LOGIN_TOOL.name, LOGOUT_TOOL.name})
+    # Annotations say these are destructive already; the set keeps the warning
+    # if a future edit softens the classification, since overwrite/password can
+    # still make one call destructive.
+    _CONFIRM_SUFFIX_TOOLS = frozenset(
+        {"create_file", "copy_file", "move_file", "synology_set_user"}
+    )
     # Class defaults so an instance built via __new__ (tests) still registers;
     # __init__ overrides both from config.
     tool_profile = "full"
@@ -296,7 +302,10 @@ class SynologyMCPServer:
             self._withheld_tools += 1
             return
         description = spec.description
-        if risk_for(spec.annotations, spec.name) is Risk.DESTRUCTIVE:
+        if (
+            risk_for(spec.annotations, spec.name) is Risk.DESTRUCTIVE
+            or spec.name in self._CONFIRM_SUFFIX_TOOLS
+        ):
             description += (
                 "\n\nDestructive calls (including overwrite=true) require the client's "
                 "MCP 2026-07-28 confirmation form. Unsupported clients are refused."
