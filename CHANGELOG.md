@@ -132,6 +132,14 @@
   (`input_schema`, `read_only_hint`).
 
 ### Fixed
+- **Group membership changes now apply** — `synology_add_user_to_group` and
+  `synology_remove_user_from_group` sent `join_groups`/`leave_groups`, which DSM
+  accepts with a task_id but never applies; the #90 read-back then reported
+  "queued, not applied". They now send `join_group` and `leave_group` (singular),
+  both on every call with the unused side as `[]`, matching DSM's own dialog and
+  the community `synology-api` client, whose wire keys are singular despite its
+  plural Python arguments. Reported on DSM 7.3.2 and 7.4.1: the plural form
+  returns a task_id but leaves membership unchanged. (#147)
 - **`delete` refuses a share root.** File Station paths are share-relative and directories are
   deleted recursively, but the guard listed filesystem paths (`/volume1`, `/etc`, ...) that, apart
   from `/homes`, cannot occur in a share-relative File Station path, so `delete("/photos")` would
