@@ -218,7 +218,6 @@ class SynologyUserManager:
         self,
         username: str,
         groups: List[str],
-        param_name: str,
         expect_member: bool,
     ) -> Dict[str, Any]:
         """Issue a SYNO.Core.User.Group join and verify it actually landed.
@@ -228,13 +227,20 @@ class SynologyUserManager:
         apply (issue #88). After a queued success, poll the group listings
         and annotate the response with the verification outcome so callers
         can tell "applied" from "queued".
+
+        The wire keys are `join_group` / `leave_group` (singular), both sent
+        on every call with the unused side as `[]`, matching DSM's own user
+        dialog. The plural names are accepted with a task_id but never apply
+        the change (issue #147, DSM 7.3.2 and 7.4.1).
         """
+        join_groups, leave_groups = (groups, []) if expect_member else ([], groups)
         result = self._api_call(
             "SYNO.Core.User.Group",
             "join",
             extra_params={
                 "name": username,
-                param_name: json.dumps(groups),
+                "join_group": json.dumps(join_groups),
+                "leave_group": json.dumps(leave_groups),
             },
             use_post=True,
         )
@@ -266,9 +272,7 @@ class SynologyUserManager:
             username: The user to modify.
             groups: List of group names to join.
         """
-        return self._apply_group_change(
-            username, groups, param_name="join_groups", expect_member=True
-        )
+        return self._apply_group_change(username, groups, expect_member=True)
 
     def remove_user_from_group(self, username: str, groups: List[str]) -> Dict[str, Any]:
         """Remove a user from one or more groups.
@@ -281,9 +285,7 @@ class SynologyUserManager:
             username: The user to modify.
             groups: List of group names to leave.
         """
-        return self._apply_group_change(
-            username, groups, param_name="leave_groups", expect_member=False
-        )
+        return self._apply_group_change(username, groups, expect_member=False)
 
     # ------------------------------------------------------------------
     # Shared Folder Permissions
