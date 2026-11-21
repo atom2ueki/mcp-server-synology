@@ -14,9 +14,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from config import config  # noqa: E402
 from mcp_server import SynologyMCPServer  # noqa: E402
-from tools import ADDITIVE, ALL_TOOLS, ToolSpec  # noqa: E402
+from tools import ADDITIVE, ALL_TOOLS, LOGIN_TOOL, LOGOUT_TOOL, ToolSpec  # noqa: E402
 
-_ANNOTATIONS = {spec.name: spec.annotations for spec in ALL_TOOLS}
+_ANNOTATIONS = {
+    spec.name: spec.annotations
+    for spec in (*ALL_TOOLS, LOGIN_TOOL, LOGOUT_TOOL)
+}
 
 
 def server_for(profile, monkeypatch):
