@@ -40,8 +40,10 @@ from paths import (
     ensure_within_roots,
     validate_delete_path,
 )
-from tool_policy import Risk, annotations_for, risk_for, unclassified
+from tool_policy import Risk, risk_for
 from tool_safety import fence_content
+from tools import ALL_TOOLS, LOGIN_TOOL, LOGOUT_TOOL
+from tools._common import ToolSpec
 from trash import (
     TrashPolicy,
     TrashUnavailableError,
@@ -204,25 +206,10 @@ class SynologyMCPServer:
         self._withheld_tools = 0
         self.server = self._create_server()
         self._register_all_tools()
-        self._warn_unclassified_tools()
         logger.info(
             "Tool profile %s: %d tools registered, %d withheld",
             self.tool_profile, len(self._tool_registry), self._withheld_tools,
         )
-
-    def _warn_unclassified_tools(self) -> None:
-        """Report tools that fall back to the pessimistic DESTRUCTIVE risk.
-
-        Not fatal: the fallback is safe (destructive annotations, audit
-        pre-flight). Fatal here would turn a missing table entry into an
-        outage; the test suite fails instead, before the change ships.
-        """
-        missing = unclassified(self._tool_registry)
-        if missing:
-            logger.warning(
-                "Tools with no explicit risk entry (treated as DESTRUCTIVE): %s",
-                ", ".join(sorted(missing)),
-            )
 
     def _create_server(self) -> Server:
         """Create the MCP server with mcp 2.0 constructor-style handlers.
@@ -283,351 +270,81 @@ class SynologyMCPServer:
     # Session establishment changes no NAS data, and withholding it would make
     # every read fail on deployments without auto-login: a client could never
     # create the session it needs. Kept in every profile.
-    _SESSION_TOOLS = frozenset({"synology_login", "synology_logout"})
+    _SESSION_TOOLS = frozenset({LOGIN_TOOL.name, LOGOUT_TOOL.name})
+    # Annotations say these are destructive already; the set keeps the warning
+    # if a future edit softens the classification, since overwrite/password can
+    # still make one call destructive.
+    _CONFIRM_SUFFIX_TOOLS = frozenset(
+        {"create_file", "copy_file", "move_file", "synology_set_user"}
+    )
     # Class defaults so an instance built via __new__ (tests) still registers;
     # __init__ overrides both from config.
     tool_profile = "full"
     _withheld_tools = 0
 
-    def _profile_allows(self, name: str) -> bool:
-        """Whether the active profile exposes `name` at all.
+    def _profile_allows(self, spec: ToolSpec) -> bool:
+        """Whether the active profile exposes this tool at all.
 
         Filtering happens at registration: a withheld tool is absent from
-        tools/list and cannot be called, which is stronger than a client-side
-        deny list. Classification runs regardless, so an unclassified tool
-        still fails at startup rather than hiding behind a profile.
+        tools/list and cannot be called, stronger than a client-side deny list.
         """
-        if name in self._SESSION_TOOLS:
+        if spec.name in self._SESSION_TOOLS:
             return True
         if self.tool_profile == "full":
             return True
-        hints = annotations_for(name)
-        if hints.read_only_hint:
+        if spec.annotations.read_only_hint:
             return True
-        return self.tool_profile == "no_destructive" and not hints.destructive_hint
+        return (
+            self.tool_profile == "no_destructive"
+            and spec.annotations.destructive_hint is False
+        )
 
-    def _register_tool(
-        self,
-        name: str,
-        description: str,
-        input_schema: dict,
-        handler: Callable,
-    ):
-        """Register a tool definition and its handler in the registry."""
-        risk = risk_for(name)
-        hints = annotations_for(name)  # refuses an unclassified tool, profile or not
-        if not self._profile_allows(name):
+    def _register_tool(self, spec: ToolSpec) -> None:
+        """Register one declarative tool, resolving its handler."""
+        if not self._profile_allows(spec):
             self._withheld_tools += 1
             return
-        if risk is Risk.DESTRUCTIVE or name in {"create_file", "copy_file", "move_file", "synology_set_user"}:
+        description = spec.description
+        if (
+            risk_for(spec.annotations, spec.name) is Risk.DESTRUCTIVE
+            or spec.name in self._CONFIRM_SUFFIX_TOOLS
+        ):
             description += (
                 "\n\nDestructive calls (including overwrite=true) require the client's "
                 "MCP 2026-07-28 confirmation form. Unsupported clients are refused."
             )
+        handler = spec.handler
+        if isinstance(handler, str):
+            handler = getattr(self, handler)
+            if spec.handler_kwargs:
+                handler = partial(handler, **spec.handler_kwargs)
+        elif spec.handler_kwargs:
+            raise ValueError(
+                f"{spec.name}: handler_kwargs only apply to a method-name handler"
+            )
         tool = types.Tool(
-            name=name,
+            name=spec.name,
             description=description,
-            inputSchema=input_schema,
-            # Hints, not enforcement: a client may ignore them. The server's
-            # own guards are `risk_for()` in _dispatch_tool and the
-            # classification table in tool_safety.py, which refuses an
-            # unclassified tool at registration time.
-            annotations=hints,
+            inputSchema=spec.schema,
+            # Hints, not enforcement: a client may ignore them. The server's own
+            # guards are risk_for() in _dispatch_tool and the audit pre-flight.
+            # A copy per registration so one assignment cannot reclassify a bucket.
+            annotations=spec.annotations.model_copy(),
         )
-        self._tool_registry[name] = (tool, handler)
+        self._tool_registry[spec.name] = (tool, handler)
 
-    def _register_all_tools(self):
-        """Register all tool definitions and their handlers.
+    def _register_all_tools(self) -> None:
+        """Register the declarative catalog, then the conditional session tools.
 
-        Each tool is a pair of (types.Tool, handler_fn). The registry
-        co-locates the definition and implementation so that adding a new
-        tool means adding one entry here — no separate if/elif chain needed.
+        Order is preserved from `tools.ALL_TOOLS` because it is what tools/list
+        reports. Login/logout exist only when auto-login cannot establish a
+        session; they are additive but exempt from profile filtering.
         """
-        # The five names below are deliberately terse and uppercase: they are
-        # local schema-shape constants, and each is repeated on nearly every one
-        # of the ~90 _register_tool lines that follow. Lowercasing them satisfies
-        # N806 at the cost of churning every registration in the file, so the rule
-        # is waived per-line instead -- a new lowercase local still gets flagged.
-        # Base target properties reused across many tools
-        T = {"type": "object", "properties": {}, "required": []}  # noqa: N806
-        TN = {  # noqa: N806
-            "type": "object",
-            "properties": {
-                "nas_name": {
-                    "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. \'nas1\', \'nas2\')",
-                },
-                "base_url": {
-                    "type": "string",
-                    "description": "Synology NAS base URL (alternative to nas_name)",
-                },
-            },
-            "required": [],
-        }
-        TN_P = lambda props: {  # noqa: E731, N806
-            "type": "object",
-            "properties": {
-                "nas_name": {
-                    "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. \'nas1\', \'nas2\')",
-                },
-                "base_url": {
-                    "type": "string",
-                    "description": "Synology NAS base URL (alternative to nas_name)",
-                },
-                **props,
-            },
-            "required": [],
-        }
-        TN_PR = lambda props, required: {  # noqa: E731, N806
-            "type": "object",
-            "properties": {
-                "nas_name": {
-                    "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
-                },
-                "base_url": {
-                    "type": "string",
-                    "description": "Synology NAS base URL (alternative to nas_name)",
-                },
-                **props,
-            },
-            "required": required,
-        }
-
-        # Status & NAS listing
-        self._register_tool("synology_status", "Check authentication status for Synology NAS instances", T, self._handle_status)
-        self._register_tool("synology_list_nas", "List all configured NAS units from secrets.json. Returns NAS names, URLs, and connection status.", T, self._handle_list_nas)
-        # File Station
-        self._register_tool("list_shares", "List all available shares on the Synology NAS", TN, self._handle_list_shares)
-        self._register_tool("list_directory", "List contents of a directory on the Synology NAS. Returns detailed information about files and folders including name, type, size, and timestamps.", TN_PR({"path": {"type": "string", "description": "Directory path to list (must start with /)"}}, ["path"]), self._handle_list_directory)
-        self._register_tool("get_file_info", "Get detailed information about a specific file or directory", TN_PR({"path": {"type": "string", "description": "File or directory path (must start with /)"}}, ["path"]), self._handle_get_file_info)
-        self._register_tool("search_files", "Recursively search a directory for files and folders whose name contains the given text (case-insensitive substring match). Wildcards are not special - searching for \'report\' and \'*report*\' return the same matches.", TN_PR({"path": {"type": "string", "description": "Directory path to search in (must start with /)"}, "pattern": {"type": "string", "description": "Text to look for in the name, e.g. \'invoice\' or \'.pdf\' (case-insensitive substring)"}}, ["path", "pattern"]), self._handle_search_files)
-        self._register_tool("get_file_content", "Read a file as strict UTF-8 text or lossless structured base64", TN_PR({"path": {"type": "string", "description": "File path (must start with /)"}, "encoding": {"type": "string", "enum": ["text", "base64"], "description": "Return strict UTF-8 text (default) or structured lossless base64"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608, "description": "Maximum raw bytes to read (default: 1048576; hard maximum: 8388608)"}}, ["path"]), self._handle_get_file_content)
-        self._register_tool("rename_file", "Rename a file or directory on the Synology NAS", TN_PR({"path": {"type": "string", "description": "Full path to the file/directory to rename (must start with /)"}, "new_name": {"type": "string", "description": "New name for the file/directory (just the name, not full path)"}}, ["path", "new_name"]), self._handle_rename_file)
-        self._register_tool("move_file", "Move a file or directory to a new location on the Synology NAS", TN_PR({"source_path": {"type": "string", "description": "Full path to the file/directory to move (must start with /)"}, "destination_path": {"type": "string", "description": "Where to move it (must start with /): an existing directory to move into, or a full path whose last segment is the new name"}, "overwrite": {"type": "boolean", "description": "Whether to overwrite existing files at destination (default: false)"}}, ["source_path", "destination_path"]), self._handle_move_file)
-        self._register_tool("copy_file", "Copy one regular file server-side into an existing NAS directory and verify target path and byte count; not a transactionally consistent backup of a live database", TN_PR({"source_path": {"type": "string", "description": "Full path to the regular file to copy (must start with /)"}, "destination_folder": {"type": "string", "description": "Existing destination directory (must start with /); the filename is preserved"}, "overwrite": {"type": "boolean", "description": "Whether to overwrite an existing same-named file (default: false)"}}, ["source_path", "destination_folder"]), self._handle_copy_file)
-        self._register_tool("create_file", "Create a UTF-8 text or lossless base64-encoded file on the Synology NAS", TN_PR({"path": {"type": "string", "description": "Full path where the file should be created (must start with /)"}, "content": {"type": "string", "description": "Text or strict base64 content (default: empty string)"}, "encoding": {"type": "string", "enum": ["text", "base64"], "description": "Interpret content as UTF-8 text (default) or strict base64; decoded content is limited to 8388608 bytes"}, "overwrite": {"type": "boolean", "description": "Whether to overwrite existing file (default: false)"}}, ["path"]), self._handle_create_file)
-        self._register_tool("create_directory", "Create a new directory on the Synology NAS", TN_PR({"folder_path": {"type": "string", "description": "Parent directory path where the new folder should be created (must start with /)"}, "name": {"type": "string", "description": "Name of the new directory to create"}, "force_parent": {"type": "boolean", "description": "Whether to create parent directories if they don\'t exist (default: false)"}}, ["folder_path", "name"]), self._handle_create_directory)
-        self._register_tool("delete", "Delete a file or directory on the Synology NAS (auto-detects type)", TN_PR({"path": {"type": "string", "description": "Full path to the file/directory to delete (must start with /)"}}, ["path"]), self._handle_delete)
-
-        # Download Station
-        self._register_tool("ds_get_info", "Get Download Station information and settings", TN, self._handle_ds_get_info)
-        self._register_tool("ds_list_tasks", "List all download tasks in Download Station", TN_P({"offset": {"type": "integer", "description": "Starting offset for pagination (default: 0)"}, "limit": {"type": "integer", "description": "Maximum number of tasks to return (default: -1 for all)"}}), self._handle_ds_list_tasks)
-        self._register_tool("ds_create_task", "Create a new download task from URL or magnet link", TN_PR({"uri": {"type": "string", "description": "Download URL or magnet link"}, "destination": {"type": "string", "description": "Destination folder path (optional)"}, "username": {"type": "string", "description": "Username for protected downloads (optional)"}, "password": {"type": "string", "description": "Password for protected downloads (optional)"}}, ["uri"]), self._handle_ds_create_task)
-        self._register_tool("ds_pause_tasks", "Pause one or more download tasks", TN_PR({"task_ids": {"type": "array", "items": {"type": "string"}, "description": "List of task IDs to pause"}}, ["task_ids"]), self._handle_ds_pause_tasks)
-        self._register_tool("ds_resume_tasks", "Resume one or more paused download tasks", TN_PR({"task_ids": {"type": "array", "items": {"type": "string"}, "description": "List of task IDs to resume"}}, ["task_ids"]), self._handle_ds_resume_tasks)
-        self._register_tool("ds_delete_tasks", "Delete one or more download tasks", TN_PR({"task_ids": {"type": "array", "items": {"type": "string"}, "description": "List of task IDs to delete"}, "force_complete": {"type": "boolean", "description": "Force delete completed tasks (default: false)"}}, ["task_ids"]), self._handle_ds_delete_tasks)
-        self._register_tool("ds_get_statistics", "Get Download Station download/upload statistics", TN, self._handle_ds_get_statistics)
-        self._register_tool("ds_list_downloaded_files", "List files in the Download Station destination folder", TN_P({"destination": {"type": "string", "description": "Destination folder to list (optional, defaults to download station\'s default)"}}), self._handle_ds_list_downloaded_files)
-
-        # Health Monitoring
-        self._register_tool("synology_system_info", "Get Synology NAS system information: model, serial, DSM version, uptime, temperature", TN, partial(self._handle_health_call, method_name="system_info"))
-        self._register_tool("synology_utilization", "Get real-time CPU, memory, swap, and disk I/O utilization", TN, partial(self._handle_health_call, method_name="utilization"))
-        self._register_tool("synology_disk_health", "List all physical disks with SMART health status, model, temperature, and capacity", TN, partial(self._handle_health_call, method_name="disk_list"))
-        self._register_tool("synology_disk_smart", "Get detailed S.M.A.R.T. attributes for a specific physical disk", TN_PR({"disk_id": {"type": "string", "description": "Disk identifier from synology_disk_health output — either the disk id (e.g. \'sata1\', \'sda\', \'nvme0n1\') or its device path (e.g. \'/dev/sata1\')"}}, ["disk_id"]), self._handle_disk_smart)
-        self._register_tool("synology_volume_status", "List all volumes/filesystems with status, total size, used space, and RAID info", TN, partial(self._handle_health_call, method_name="volume_list"))
-        self._register_tool("synology_storage_pool", "List RAID/storage pools with RAID level, status, and member disks", TN, partial(self._handle_health_call, method_name="storage_pool_list"))
-        self._register_tool("synology_lun_list", "List all iSCSI LUNs with name, UUID, size, type, status and backing volume. To see which target a LUN is attached to, use synology_target_list.", TN, partial(self._handle_iscsi_call, method_name="lun_list"))
-        self._register_tool("synology_lun_get", "Get details for a single iSCSI LUN by name or UUID", TN_PR({"name": {"type": "string", "description": "LUN name or UUID from synology_lun_list output"}}, ["name"]), self._handle_lun_get)
-        self._register_tool("synology_network", "Get network interface status and transfer rates", TN, partial(self._handle_health_call, method_name="network_info"))
-        self._register_tool("synology_ups", "Get UPS (uninterruptible power supply) status, battery level, and power info", TN, partial(self._handle_health_call, method_name="ups_info"))
-        self._register_tool("synology_services", "List installed packages/services and their running status", TN, partial(self._handle_health_call, method_name="package_list"))
-        self._register_tool("synology_system_log", "Get recent system log entries for diagnosing issues", TN_P({"offset": {"type": "integer", "description": "Starting offset (default: 0)"}, "limit": {"type": "integer", "description": "Max entries to return (default: 50)"}}), self._handle_system_log)
-        # Updates and security posture
-        self._register_tool("synology_update_status", "Read-only. Installed DSM version, the available DSM update (version, security release, whether it reboots), its download/install state, and installed packages with updates pending plus the package auto-update policy", TN, partial(self._handle_update_call, method_name="update_status"))
-        self._register_tool("synology_security_posture", "Read-only. QuickConnect, auto-block and its allow list, Telnet/SSH, DSM's HTTP-to-HTTPS redirect, firewall, 2FA enforcement, admin/guest account state, administrators group members (DSM user accounts only; non-user members such as service accounts are omitted), and Security Advisor's last result and open findings", TN, self._handle_security_posture)
-        self._register_tool("synology_terminal_set", "Turn Telnet and/or SSH on or off (Control Panel > Terminal & SNMP). Omitted settings and the SSH port are kept. Requires confirm=true. Returns before/after.", TN_PR({
-            "enable_telnet": {"type": "boolean", "description": "Telnet on (true) or off (false). Omit to keep."},
-            "enable_ssh": {"type": "boolean", "description": "SSH on (true) or off (false). Omit to keep."},
-            "confirm": {"type": "boolean", "description": "Must be true."},
-        }, ["confirm"]), self._handle_terminal_set)
-        self._register_tool("synology_autoblock_set", "Configure auto-block (Security > Protection). Omitted settings are kept. Only an actual enable transition is refused while the allow list is empty. Requires confirm=true. Returns before/after.", TN_PR({
-            "enable": {"type": "boolean", "description": "Auto-block on or off. Omit to keep."},
-            "attempts": {"type": "integer", "description": "Failed login attempts that trigger a block."},
-            "within_minutes": {"type": "integer", "description": "Window, in minutes, the attempts are counted over."},
-            "expire_days": {"type": "integer", "description": "Days until a block lifts; 0 means never."},
-            "confirm": {"type": "boolean", "description": "Must be true."},
-        }, ["confirm"]), self._handle_autoblock_set)
-        self._register_tool("synology_autoblock_allow_add", "Add entries to the auto-block allow list, which are never blocked: an IP, a subnet as ip/mask or ip/prefix (192.168.0.0/22), or a range a~b. Requires confirm=true. Returns before/after.", TN_PR({
-            "entries": {"type": "array", "items": {"type": "string"}, "description": "IPs, subnets or ranges to allow."},
-            "confirm": {"type": "boolean", "description": "Must be true."},
-        }, ["entries", "confirm"]), partial(self._handle_allow_list, method_name="add_allow_list"))
-        self._register_tool("synology_autoblock_allow_remove", "Remove entries from the auto-block allow list, named exactly as synology_security_posture lists them. Requires confirm=true. Returns before/after.", TN_PR({
-            "entries": {"type": "array", "items": {"type": "string"}, "description": "Entries to remove."},
-            "confirm": {"type": "boolean", "description": "Must be true."},
-        }, ["entries", "confirm"]), partial(self._handle_allow_list, method_name="remove_allow_list"))
-        self._register_tool("synology_https_redirect_set", "Turn DSM's automatic HTTP-to-HTTPS redirect on or off (Login Portal > DSM). DSM restarts its web server. Requires confirm=true. Returns before/after.", TN_PR({
-            "enable": {"type": "boolean", "description": "Redirect on (true) or off (false)."},
-            "confirm": {"type": "boolean", "description": "Must be true."},
-        }, ["enable", "confirm"]), self._handle_https_redirect_set)
-        self._register_tool("synology_dsm_update_download", "Download the available DSM update. Installs nothing. Requires confirm=true.", TN_PR({
-            "confirm": {"type": "boolean", "description": "Must be true. Downloads the DSM update onto the NAS."},
-        }, ["confirm"]), self._handle_dsm_update_download)
-        self._register_tool("synology_dsm_update_install", "Install a downloaded DSM update, after DSM's own pre-install checks. Without confirm=true it only runs the checks and returns blockers, warnings and any EULA. The NAS may reboot.", TN_P({
-            "confirm": {"type": "boolean", "description": "Must be true to install. Omit to run the pre-install checks only."},
-            "accept_warnings": {"type": "boolean", "description": "Proceed past DSM's soft warnings (its confirm dialog). Default false."},
-            "accept_eula": {"type": "boolean", "description": "Accept the update's terms when DSM requires it. Default false."},
-        }), self._handle_dsm_update_install)
-
-        # SAN Manager (iSCSI) - LUN and target provisioning
-        self._register_tool("synology_lun_create", "Create an iSCSI LUN on a volume. Returns its uuid and lun_id. On a btrfs volume DSM provisions thin by default.", TN_PR({
-            "name": {"type": "string", "description": "LUN name, e.g. 'macmini-dev'"},
-            "location": {"type": "string", "description": "Volume path to create it on, e.g. '/volume2'"},
-            "size": {"type": "integer", "description": "Size in BYTES (e.g. 536870912000 for 500 GB)"},
-            "type": {"type": "string", "description": "LUN type. 'thin' (default, DSM 'BLUN') or 'advanced'/'file'; a raw DSM type name such as BLUN, ADV, THIN or FILE is passed through unchanged. Note lowercase 'thin' means BLUN, while uppercase 'THIN' is the distinct legacy DSM type. Thick types were refused on the btrfs volume this was tested against; DSM decides, and its error is reported as given."},
-            "description": {"type": "string", "description": "Optional free-text description stored on the LUN"},
-        }, ["name", "location", "size"]), self._handle_lun_create)
-        self._register_tool("synology_lun_delete", "DESTRUCTIVE. Permanently delete an iSCSI LUN and everything stored on it. Requires confirm=true.", TN_PR({
-            "uuid": {"type": "string", "description": "LUN UUID from synology_lun_list"},
-            "confirm": {"type": "boolean", "description": "Must be true. Guards against deleting a LUN by accident; there is no undo."},
-        }, ["uuid", "confirm"]), self._handle_lun_delete)
-        self._register_tool("synology_target_list", "List iSCSI targets with IQN, auth type, enabled state and the LUNs mapped to each", TN, partial(self._handle_iscsi_call, method_name="target_list"))
-        self._register_tool("synology_target_get", "Get a single iSCSI target by its numeric target_id", TN_PR({"target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"}}, ["target_id"]), self._handle_target_get)
-        self._register_tool("synology_target_create", "Create an iSCSI target. Returns its target_id. Leave chap_user/chap_password unset for a target with no authentication.", TN_PR({
-            "name": {"type": "string", "description": "Target name, e.g. 'macmini-dev'"},
-            "iqn": {"type": "string", "description": "Full IQN. Defaults to iqn.2000-01.com.synology:<name>."},
-            "chap_user": {"type": "string", "description": "CHAP username. Must be given together with chap_password; supplying only one is refused rather than silently creating an unauthenticated target."},
-            "chap_password": {"type": "string", "description": "CHAP password (12-16 chars per DSM). Must be given together with chap_user."},
-            "max_sessions": {"type": "integer", "description": "Max concurrent sessions; 0 (default) means DSM's default, no explicit cap."},
-        }, ["name"]), self._handle_target_create)
-        self._register_tool("synology_target_delete", "DESTRUCTIVE. Delete an iSCSI target. Mapped LUNs survive but become unreachable over iSCSI. Requires confirm=true.", TN_PR({
-            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
-            "confirm": {"type": "boolean", "description": "Must be true. Guards against disconnecting a live initiator by accident."},
-        }, ["target_id", "confirm"]), self._handle_target_delete)
-        self._register_tool("synology_target_map_lun", "Map one or more LUNs to an iSCSI target, making them visible to initiators that connect to it", TN_PR({
-            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
-            "lun_uuids": {"type": "array", "items": {"type": "string"}, "description": "LUN UUIDs from synology_lun_list"},
-        }, ["target_id", "lun_uuids"]), self._handle_target_map_lun)
-        self._register_tool("synology_target_unmap_lun", "DESTRUCTIVE. Unmap one or more LUNs from an iSCSI target, disconnecting them from any initiator currently using them. The LUNs themselves are not deleted. Requires confirm=true.", TN_PR({
-            "target_id": {"type": "integer", "description": "Numeric target_id from synology_target_list"},
-            "lun_uuids": {"type": "array", "items": {"type": "string"}, "description": "LUN UUIDs from synology_lun_list"},
-            "confirm": {"type": "boolean", "description": "Must be true. Unmapping takes storage away from a live initiator."},
-        }, ["target_id", "lun_uuids", "confirm"]), self._handle_target_unmap_lun)
-
-        self._register_tool("synology_health_summary", "Get a combined health overview: system info, CPU/memory utilization, disk health, volume status, storage pools, network, and UPS — all in one call", TN, partial(self._handle_health_call, method_name="health_summary"))
-
-        # Container Manager
-        CI = {  # noqa: N806
-            "type": "object",
-            "properties": {
-                "nas_name": {"type": "string", "description": "NAS identifier from secrets.json (e.g. \'nas1\', \'nas2\')"},
-                "base_url": {"type": "string", "description": "Synology NAS base URL (alternative to nas_name)"},
-            },
-            "required": [],
-        }
-        self._register_tool("synology_container_list", "List Container Manager containers", CI | {"properties": {**CI["properties"], "offset": {"type": "integer", "description": "Pagination offset"}, "limit": {"type": "integer", "description": "Maximum containers to return"}, "container_type": {"type": "string", "description": "Container filter (default: all)"}}}, partial(self._handle_container_call, method_name="list"))
-        self._register_tool("synology_container_health_summary", "Summarize container status, health, restart counts, and images", CI, partial(self._handle_container_call, method_name="health_summary"))
-        self._register_tool("synology_container_disk_usage", "Show Docker disk usage without changing anything", CI, partial(self._handle_container_call, method_name="disk_usage"))
-        self._register_tool("synology_container_get", "Get detailed information about a specific container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="get"))
-        self._register_tool("synology_container_start", "Start a container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="start"))
-        self._register_tool("synology_container_stop", "Stop a running container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="stop"))
-        self._register_tool("synology_container_restart", "Restart a container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="restart"))
-        self._register_tool("synology_container_delete", "Delete a container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="delete"))
-        self._register_tool("synology_container_logs", "Get logs from a container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}, "since": {"type": "string", "description": "Return logs since this timestamp (optional)"}, "offset": {"type": "integer", "description": "Pagination offset (default: 0)", "minimum": 0}, "limit": {"type": "integer", "description": "Max lines to return (default: 1000)", "minimum": 1}}, "required": ["name"]}, partial(self._handle_container_call, method_name="logs"))
-        self._register_tool("synology_container_resource", "Get resource usage for a container", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Container name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="resource"))
-        self._register_tool("synology_container_project_list", "List Docker Compose projects", CI, partial(self._handle_container_call, method_name="project_list"))
-        self._register_tool("synology_container_project_get", "Get Docker Compose project details with Compose, environment, and secret fields omitted", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_get"))
-        self._register_tool("synology_container_project_create", "Create and save a Docker Compose project definition; run project_build to materialize it", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}, "content": {"type": "string", "description": "Docker Compose YAML content"}, "share_path": {"type": "string", "description": "Share path where the compose file is stored"}, "enable_service_portal": {"type": "boolean", "description": "Enable Synology service portal (default: false)"}, "service_portal_name": {"type": "string", "description": "Optional service portal name"}, "service_portal_port": {"type": "integer", "description": "Optional service portal port"}, "service_portal_protocol": {"type": "string", "description": "Service portal protocol (default: http)"}}, "required": ["name", "share_path", "content"]}, partial(self._handle_container_call, method_name="project_create"))
-        self._register_tool("synology_container_project_update", "Update a Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}, "content": {"type": "string", "description": "New Docker Compose YAML content"}}, "required": ["name", "content"]}, partial(self._handle_container_call, method_name="project_update"))
-        self._register_tool("synology_container_project_start", "Start Docker Compose project services", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_start"))
-        self._register_tool("synology_container_project_stop", "Stop Docker Compose project services", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_stop"))
-        self._register_tool("synology_container_project_restart", "Restart Docker Compose project services", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_restart"))
-        self._register_tool("synology_container_project_build", "Materialize or rebuild a saved Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_build"))
-        self._register_tool("synology_container_project_clean", "Clean Docker Compose project resources", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_clean"))
-        self._register_tool("synology_container_project_delete", "Delete a Docker Compose project", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Project name (e.g. \'watchtower\')"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="project_delete"))
-        self._register_tool("synology_container_image_list", "List Docker images", CI, partial(self._handle_container_call, method_name="image_list"))
-        self._register_tool("synology_container_image_get", "Get details of a specific Docker image", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="image_get"))
-        self._register_tool("synology_container_image_delete", "Delete a Docker image", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="image_delete"))
-        self._register_tool("synology_container_image_prune_preview", "Preview unused Docker images without deleting anything", CI, partial(self._handle_container_call, method_name="image_prune_preview"))
-        self._register_tool("synology_container_image_prune", "Remove Docker images unused by any container; preserves containers, networks, and build cache", CI, partial(self._handle_container_call, method_name="image_prune"))
-        self._register_tool("synology_container_image_pull", "Pull a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="image_pull"))
-        self._register_tool("synology_container_registry_list", "List configured Docker registries", CI, partial(self._handle_container_call, method_name="registry_list"))
-        self._register_tool("synology_container_registry_search", "Search for images in a Docker registry", CI | {"properties": {**CI["properties"], "query": {"type": "string", "description": "Search query for image name"}, "offset": {"type": "integer", "description": "Pagination offset (default: 0)"}, "limit": {"type": "integer", "description": "Max results to return (default: 50)"}}, "required": ["query"]}, partial(self._handle_container_call, method_name="registry_search"))
-        self._register_tool("synology_container_registry_tags", "List tags for a repository in a Docker registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="registry_tags"))
-        self._register_tool("synology_container_registry_download", "Download a Docker image from a registry", CI | {"properties": {**CI["properties"], "repository": {"type": "string", "description": "Image repository name (e.g. \'nginx\')"}, "tag": {"type": "string", "description": "Image tag (default: latest)"}}, "required": ["repository"]}, partial(self._handle_container_call, method_name="registry_download"))
-        self._register_tool("synology_container_network_list", "List Docker networks", CI, partial(self._handle_container_call, method_name="network_list"))
-        self._register_tool("synology_container_network_get", "Get details of a Docker network", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Network name"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="network_get"))
-        self._register_tool("synology_container_network_create", "Create a Docker network", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Network name"}, "driver": {"type": "string", "description": "Network driver (default: bridge)"}, "subnet": {"type": "string", "description": "Subnet CIDR (optional)"}, "gateway": {"type": "string", "description": "Gateway IP (optional)"}, "ip_range": {"type": "string", "description": "IP range (optional)"}, "enable_ipv6": {"type": "boolean", "description": "Enable IPv6 (default: false)"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="network_create"))
-        self._register_tool("synology_container_network_delete", "Delete a Docker network", CI | {"properties": {**CI["properties"], "name": {"type": "string", "description": "Network name"}}, "required": ["name"]}, partial(self._handle_container_call, method_name="network_delete"))
-
-        # NFS Management
-        self._register_tool("synology_nfs_status", "Get NFS service status and configuration (enabled/disabled, NFSv4 settings)", TN, partial(self._handle_nfs_call, method_name="nfs_status"))
-        self._register_tool("synology_nfs_enable", "Enable or disable the NFS file service on the Synology NAS", TN_P({"enable": {"type": "boolean", "description": "True to enable NFS, false to disable (default: true)"}, "nfs_v4": {"type": "boolean", "description": "Enable NFSv4 support (default: false)"}}), self._handle_nfs_enable)
-        self._register_tool("synology_nfs_list_shares", "List all shared folders with their NFS access permissions", TN, partial(self._handle_nfs_call, method_name="list_shares"))
-        self._register_tool("synology_nfs_set_permission", "Set NFS client access permissions on a shared folder (IP/subnet, read/write, squash options)", TN_PR({"share_name": {"type": "string", "description": "Name of the shared folder (e.g. \'media\', \'backups\')"}, "client_ip": {"type": "string", "description": "Client IP or subnet (e.g. \'192.168.1.0/24\', \'10.0.0.5\')"}, "privilege": {"type": "string", "enum": ["readonly", "readwrite"], "description": "Access level (default: readwrite)"}, "squash": {"type": "string", "enum": ["root_squash", "no_root_squash", "all_squash"], "description": "Squash option for root user mapping (default: root_squash)"}, "security": {"type": "string", "enum": ["sys", "krb5", "krb5i", "krb5p"], "description": "Security mode (default: sys/AUTH_SYS)"}}, ["share_name", "client_ip"]), self._handle_nfs_set_permission)
-        self._register_tool("synology_create_share", "Create a new shared folder on a Synology NAS volume", TN_PR({"share_name": {"type": "string", "description": "Name of the shared folder to create (e.g. \'rag-corpus\')"}, "vol_path": {"type": "string", "description": "Volume path where the share will be created (e.g. \'/volume1\', \'/volume2\')"}, "description": {"type": "string", "description": "Optional description for the shared folder"}, "enable_recycle_bin": {"type": "boolean", "description": "Enable recycle bin for deleted files (default: true)"}, "recycle_bin_admin_only": {"type": "boolean", "description": "Restrict recycle bin access to administrators only (default: true)"}}, ["share_name", "vol_path"]), self._handle_create_share)
-
-        # Login Portal reverse proxy
-        RP_FIELDS = {  # noqa: N806
-            "description": {"type": "string", "description": "Entry description shown in DSM. DSM has no name field, so this is the entry's human-readable handle and must be unique."},
-            "source_protocol": {"type": "string", "enum": ["HTTP", "HTTPS"], "description": "Protocol of the public listener (default: HTTPS)"},
-            "source_hostname": {"type": "string", "description": "Host name the listener answers to, e.g. 'app.example.com'. No scheme or path."},
-            "source_port": {"type": "integer", "description": "Port of the public listener (default: 443)"},
-            "destination_protocol": {"type": "string", "enum": ["HTTP", "HTTPS"], "description": "Protocol used to reach the destination (default: HTTP)"},
-            "destination_hostname": {"type": "string", "description": "Host name or IP requests are proxied to, e.g. 'localhost' or '192.168.1.10'. No scheme or path."},
-            "destination_port": {"type": "integer", "description": "Port requests are proxied to"},
-            "hsts": {"type": "boolean", "description": "Send Strict-Transport-Security. Requires an HTTPS source."},
-            "websocket": {"type": "boolean", "description": "Add DSM's WebSocket header pair (Upgrade/Connection)"},
-            "custom_headers": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "value": {"type": "string"}}, "required": ["name"]}, "description": "Extra request headers for the destination; values may use nginx variables such as $scheme. Use `websocket` for the Upgrade/Connection pair."},
-            "access_control_profile": {"type": "string", "description": "UUID of an access control profile from synology_access_control_profile_list. On update, an empty string removes the profile."},
-            "proxy_connect_timeout": {"type": "integer", "description": "Seconds to wait when connecting to the destination (default: 60)"},
-            "proxy_read_timeout": {"type": "integer", "description": "Seconds to wait for a response from the destination (default: 60)"},
-            "proxy_send_timeout": {"type": "integer", "description": "Seconds to wait while sending to the destination (default: 60)"},
-        }
-        self._register_tool("synology_reverse_proxy_list", "List Login Portal reverse proxy entries (Control Panel > Login Portal > Advanced > Reverse Proxy) with source, destination, HSTS, WebSocket, headers and access control profile", TN, partial(self._handle_reverse_proxy_call, method_name="list_entries"))
-        self._register_tool("synology_reverse_proxy_get", "Get one reverse proxy entry by UUID or by its description", TN_PR({"uuid_or_description": {"type": "string", "description": "Entry UUID or description from synology_reverse_proxy_list"}}, ["uuid_or_description"]), self._handle_reverse_proxy_get)
-        self._register_tool("synology_access_control_profile_list", "List Login Portal access control profiles that a reverse proxy entry can reference", TN, partial(self._handle_reverse_proxy_call, method_name="list_access_control_profiles"))
-        self._register_tool("synology_reverse_proxy_create", "Create a reverse proxy entry. Takes effect immediately. Refused if the description is already in use.", TN_PR(RP_FIELDS, ["description", "source_hostname", "destination_hostname", "destination_port"]), self._handle_reverse_proxy_create)
-        self._register_tool("synology_reverse_proxy_update", "Change fields of an existing reverse proxy entry; fields not given keep their value. Takes effect immediately, so a wrong destination makes the site unreachable.", TN_PR({"uuid": {"type": "string", "description": "Entry UUID from synology_reverse_proxy_list"}, **RP_FIELDS}, ["uuid"]), self._handle_reverse_proxy_update)
-        self._register_tool("synology_reverse_proxy_delete", "DESTRUCTIVE. Delete a reverse proxy entry; the site it served stops answering. Requires confirm=true.", TN_PR({
-            "uuid": {"type": "string", "description": "Entry UUID from synology_reverse_proxy_list"},
-            "confirm": {"type": "boolean", "description": "Must be true. Guards against taking a live site offline by accident."},
-        }, ["uuid", "confirm"]), self._handle_reverse_proxy_delete)
-
-        # User Management
-        self._register_tool("synology_list_users", "List all local users on the Synology NAS", TN, partial(self._handle_usermgr_call, method_name="list_users"))
-        self._register_tool("synology_get_user", "Get detailed information about a specific user", TN_PR({"name": {"type": "string", "description": "Username to look up"}}, ["name"]), self._handle_usermgr_get_user)
-        self._register_tool("synology_create_user", "Create a new local user on the Synology NAS", TN_PR({"name": {"type": "string", "description": "Username for the new account"}, "password": {"type": "string", "description": "Password for the new account"}, "description": {"type": "string", "description": "User description (optional)"}, "email": {"type": "string", "description": "User email address (optional)"}, "cannot_chg_passwd": {"type": "boolean", "description": "Prevent user from changing password (default: false)"}, "passwd_never_expire": {"type": "boolean", "description": "Password never expires (default: true)"}}, ["name", "password"]), self._handle_usermgr_create_user)
-        self._register_tool("synology_set_user", "Modify an existing user (rename, change password, enable/disable)", TN_PR({"name": {"type": "string", "description": "Target username to modify"}, "new_name": {"type": "string", "description": "Rename the user (optional)"}, "password": {"type": "string", "description": "New password (optional)"}, "description": {"type": "string", "description": "New description (optional)"}, "email": {"type": "string", "description": "New email (optional)"}, "expired": {"type": "string", "enum": ["normal", "now"], "description": "\'normal\' = active, \'now\' = disabled"}}, ["name"]), self._handle_usermgr_set_user)
-        self._register_tool("synology_delete_user", "Delete a local user from the Synology NAS", TN_PR({"name": {"type": "string", "description": "Username to delete"}}, ["name"]), self._handle_usermgr_delete_user)
-        self._register_tool("synology_list_groups", "List all local groups on the Synology NAS", TN, partial(self._handle_usermgr_call, method_name="list_groups"))
-        self._register_tool("synology_list_group_members", "List members of a specific group. Only DSM user accounts are enumerated — non-user members (e.g. service accounts like 'Virtualization' that appear in /etc/group) are omitted, so do not treat this as an authoritative privileged-group audit", TN_PR({"group": {"type": "string", "description": "Group name to list members of"}}, ["group"]), self._handle_usermgr_list_group_members)
-        self._register_tool("synology_add_user_to_group", "Add a user to one or more groups. DSM applies this as an async batch task; the tool polls the group listing and reports `verified` — check it, since `success` alone only means the task was queued", TN_PR({"username": {"type": "string", "description": "Username to add to groups"}, "groups": {"type": "array", "items": {"type": "string"}, "description": "List of group names to join"}}, ["username", "groups"]), self._handle_usermgr_add_to_group)
-        self._register_tool("synology_remove_user_from_group", "Remove a user from one or more groups. DSM applies this as an async batch task; the tool polls the group listing and reports `verified` — check it, since `success` alone only means the task was queued", TN_PR({"username": {"type": "string", "description": "Username to remove from groups"}, "groups": {"type": "array", "items": {"type": "string"}, "description": "List of group names to leave"}}, ["username", "groups"]), self._handle_usermgr_remove_from_group)
-        self._register_tool("synology_get_user_permissions", "Get shared folder permissions for a user", TN_PR({"name": {"type": "string", "description": "Username to check permissions for"}}, ["name"]), self._handle_usermgr_get_permissions)
-        self._register_tool("synology_set_user_permissions", "Set shared folder permissions for a user (read/write/deny per folder)", TN_PR({"name": {"type": "string", "description": "Username to set permissions for"}, "permissions": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string", "description": "Shared folder name"}, "is_writable": {"type": "boolean", "description": "Grant write access"}, "is_deny": {"type": "boolean", "description": "Deny access entirely"}}, "required": ["name"]}, "description": "List of folder permission objects"}}, ["name", "permissions"]), self._handle_usermgr_set_permissions)
-
-        # Conditional: login/logout only when auto-login is not available
+        for spec in ALL_TOOLS:
+            self._register_tool(spec)
         if not config.auto_login or not config.has_synology_credentials():
-            self._register_tool(
-                "synology_login",
-                "Authenticate with Synology NAS and establish session.\n\n2FA/OTP accounts: pass `otp_code` on the first login only; DSM will issue a `device_id` in the response, which you can persist into settings.json to skip OTP on future logins. If you already have a `device_id`, pass it instead of `otp_code` — DSM treats trusted devices as already authenticated.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "base_url": {"type": "string", "description": "Synology NAS base URL (e.g., https://192.168.1.100:5001)"},
-                        "username": {"type": "string", "description": "Username for authentication"},
-                        "password": {"type": "string", "description": "Password for authentication"},
-                        "otp_code": {"type": "string", "description": "One-time 6-digit code from the user\'s authenticator. Required only on the first 2FA login for a new device. Ignored when `device_id` is also given."},
-                        "device_id": {"type": "string", "description": "Long-lived trusted-device token previously issued by DSM (returned as `did` in a successful 2FA login). When supplied, DSM skips the OTP step. Preferred over `otp_code` for repeated logins."},
-                    },
-                    "required": ["base_url", "username", "password"],
-                },
-                self._handle_login,
-            )
-            self._register_tool(
-                "synology_logout",
-                "Logout from Synology NAS session",
-                {
-                    "type": "object",
-                    "properties": {
-                        "base_url": {"type": "string", "description": "Synology NAS base URL"},
-                    },
-                    "required": ["base_url"],
-                },
-                self._handle_logout,
-            )
+            for spec in (LOGIN_TOOL, LOGOUT_TOOL):
+                self._register_tool(spec)
 
     def _get_tool_definitions(self):
         """Get tool definitions from the registry."""
@@ -729,6 +446,22 @@ class SynologyMCPServer:
             raise self._write_error("path_outside_roots", exc) from exc
         except ValueError as exc:
             raise self._write_error("invalid_write_path", exc) from exc
+
+    async def _base_url_for(self, arguments: dict) -> str:
+        """Resolve the target NAS without blocking the event loop."""
+        return await asyncio.to_thread(self._get_base_url, arguments)
+
+    async def _filestation_for(
+        self, arguments: dict, base_url: str | None = None
+    ) -> tuple[str, SynologyFileStation]:
+        """Resolve a NAS and its File Station client in one step.
+
+        Write handlers pass `base_url` after admission so that a refused target
+        is reported before a missing session, preserving the guard order.
+        """
+        if base_url is None:
+            base_url = await self._base_url_for(arguments)
+        return base_url, self._get_filestation(base_url)
 
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
@@ -1145,7 +878,7 @@ class SynologyMCPServer:
         """Dispatch a tool call, raising on failure (caller handles isError)."""
         logger.debug(f"Executing tool: {name}")
         try:
-            _, handler = self._tool_registry[name]
+            tool, handler = self._tool_registry[name]
         except KeyError:
             self._record_audit(name, arguments, "unknown_tool", Risk.DESTRUCTIVE, 0.0)
             raise ValueError(f"Unknown tool: {name}")
@@ -1153,12 +886,13 @@ class SynologyMCPServer:
             refusal = self._reject_undeclared_arguments(name, arguments)
             if refusal:
                 self._record_audit(
-                    name, arguments, "rejected_unknown_argument", risk_for(name), 0.0,
+                    name, arguments, "rejected_unknown_argument",
+                    risk_for(tool.annotations, name), 0.0,
                     error=refusal.get("error", {}).get("message", ""),
                 )
                 raise ToolFailureError(refusal)
 
-        risk = risk_for(name, arguments)
+        risk = risk_for(tool.annotations, name, arguments)
         confirmation = "none"
         execution_arguments = arguments
         if risk is Risk.DESTRUCTIVE:
@@ -1645,8 +1379,7 @@ class SynologyMCPServer:
 
     async def _handle_list_shares(self, arguments: dict) -> list[types.TextContent]:
         """Handle listing shares."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments)
 
         shares = await asyncio.to_thread(filestation.list_shares)
 
@@ -1654,43 +1387,39 @@ class SynologyMCPServer:
 
     async def _handle_list_directory(self, arguments: dict) -> list[types.TextContent]:
         """Handle listing directory contents."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
 
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments)
         files = await asyncio.to_thread(filestation.list_directory, path)
 
         return [types.TextContent(type="text", text=json.dumps(files, indent=2))]
 
     async def _handle_get_file_info(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting file information."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
 
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments)
         info = await asyncio.to_thread(filestation.get_file_info, path)
 
         return [types.TextContent(type="text", text=json.dumps(info, indent=2))]
 
     async def _handle_search_files(self, arguments: dict) -> list[types.TextContent]:
         """Handle searching files."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
         pattern = arguments["pattern"]
 
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments)
         results = await asyncio.to_thread(filestation.search_files, path, pattern)
 
         return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
     async def _handle_get_file_content(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting file content."""
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
         path = arguments["path"]
         encoding = arguments.get("encoding", "text")
         max_bytes = arguments.get("max_bytes", SynologyFileStation.DEFAULT_MAX_BYTES)
 
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments)
         content = await asyncio.to_thread(
             filestation.get_file_content, path, encoding, max_bytes
         )
@@ -1704,9 +1433,9 @@ class SynologyMCPServer:
         """Handle renaming a file or directory."""
         new_name = arguments["new_name"]
 
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        base_url = await self._base_url_for(arguments)
         path = self._admit_write_args("rename_file", arguments, base_url)["path"]
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments, base_url)
         result = await asyncio.to_thread(filestation.rename_file, path, new_name)
 
         return [
@@ -1717,11 +1446,11 @@ class SynologyMCPServer:
         """Handle moving a file or directory."""
         overwrite = arguments.get("overwrite", False)  # Default to False if not provided
 
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        base_url = await self._base_url_for(arguments)
         admitted = self._admit_write_args("move_file", arguments, base_url)
         source_path = admitted["source_path"]
         destination_path = admitted["destination_path"]
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments, base_url)
         result = await asyncio.to_thread(
             filestation.move_file, source_path, destination_path, overwrite
         )
@@ -1733,11 +1462,11 @@ class SynologyMCPServer:
         source_path = arguments["source_path"]
         overwrite = arguments.get("overwrite", False)
 
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        base_url = await self._base_url_for(arguments)
         destination_folder = self._admit_write_args(
             "copy_file", arguments, base_url
         )["destination_folder"]
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments, base_url)
         result = await asyncio.to_thread(
             filestation.copy_file, source_path, destination_folder, overwrite
         )
@@ -1750,9 +1479,9 @@ class SynologyMCPServer:
         overwrite = arguments.get("overwrite", False)
         encoding = arguments.get("encoding", "text")
 
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        base_url = await self._base_url_for(arguments)
         path = self._admit_write_args("create_file", arguments, base_url)["path"]
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments, base_url)
         result = await asyncio.to_thread(
             filestation.create_file, path, content, overwrite, encoding
         )
@@ -1768,11 +1497,11 @@ class SynologyMCPServer:
         name = arguments["name"]
         force_parent = arguments.get("force_parent", False)
 
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        base_url = await self._base_url_for(arguments)
         folder_path = self._admit_write_args(
             "create_directory", arguments, base_url
         )["folder_path"]
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments, base_url)
         result = await asyncio.to_thread(
             filestation.create_directory, folder_path, name, force_parent
         )
@@ -1789,14 +1518,14 @@ class SynologyMCPServer:
             path = validate_delete_path(arguments["path"])
         except ValueError as exc:
             raise tool_failure("invalid_delete_path", str(exc)) from exc
-        base_url = await asyncio.to_thread(self._get_base_url, arguments)
+        base_url = await self._base_url_for(arguments)
         try:
             path = ensure_within_roots(
                 path, config.file_station_write_paths_for(base_url)
             )
         except PathOutsideRootsError as exc:
             raise self._write_error("path_outside_roots", exc) from exc
-        filestation = self._get_filestation(base_url)
+        _, filestation = await self._filestation_for(arguments, base_url)
         policy = TrashPolicy(config.trash_mode, config.trash_dir)
         if policy.mode not in {"auto", "always", "never"}:
             raise tool_failure(
@@ -2136,7 +1865,7 @@ class SynologyMCPServer:
                     return self._get_base_url(arguments, allow_login=False)
                 except Exception:
                     pass
-                base_url = await asyncio.to_thread(self._get_base_url, arguments)
+                base_url = await self._base_url_for(arguments)
                 resolved = True
                 return base_url
         finally:

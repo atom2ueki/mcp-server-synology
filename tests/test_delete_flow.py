@@ -23,7 +23,8 @@ from fakes import FakeFileStation  # noqa: E402
 from audit import AuditLog  # noqa: E402
 from config import config  # noqa: E402
 from confirm import ConfirmationTokens  # noqa: E402
-from mcp_server import SynologyMCPServer, ToolFailureError  # noqa: E402
+from mcp_server import SynologyMCPServer, ToolFailureError
+from tools import DESTRUCTIVE, ToolSpec  # noqa: E402
 
 
 def make_server(tmp_path, fs):
@@ -35,10 +36,13 @@ def make_server(tmp_path, fs):
     srv.audit = AuditLog(tmp_path / "audit.jsonl", run_id="test")
     srv.confirm = ConfirmationTokens(b"0" * 32, ttl_seconds=300)
     srv._register_tool(
-        "delete",
-        "Delete a file or directory",
-        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-        srv._handle_delete,
+        ToolSpec(
+            "delete",
+            "Delete a file or directory",
+            {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            srv._handle_delete,
+            DESTRUCTIVE,
+        )
     )
     srv._get_base_url = lambda arguments: "http://nas.example:5000"
     srv._get_filestation = lambda base_url: fs
