@@ -23,6 +23,11 @@ class TestCoverage:
     def test_catalog_has_tools(self):
         assert len(SPECS) > 90
 
+    def test_catalog_size_is_deliberate(self):
+        # The catalog is the product surface; a spec dropped while editing a
+        # module should fail here, not silently shrink tools/list.
+        assert len(SPECS) == 107
+
     def test_every_spec_carries_annotations(self):
         for spec in ALL_TOOLS:
             assert isinstance(spec.annotations, types.ToolAnnotations), spec.name
