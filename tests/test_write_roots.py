@@ -17,6 +17,7 @@ from config import config  # noqa: E402
 from mcp_server import SynologyMCPServer, ToolFailureError  # noqa: E402
 from paths import (  # noqa: E402
     PathOutsideRootsError,
+    admit_write,
     copy_target,
     create_directory_target,
     ensure_within_roots,
@@ -123,6 +124,33 @@ class TestComposedTargets:
         assert rename_target("/volume1/media/x.mkv", "y.mkv") == "/volume1/media/y.mkv"
         with pytest.raises(ValueError):
             rename_target("/volume1/media/x.mkv", "..")
+
+
+class TestAdmitWrite:
+    def test_returns_canonical_arguments_for_each_tool(self):
+        roots = [ROOT]
+        assert admit_write("create_file", {"path": "/media/a.txt"}, roots) == {
+            "path": "/media/a.txt"
+        }
+        assert admit_write(
+            "rename_file", {"path": "/media/a", "new_name": "b"}, roots
+        ) == {"path": "/media/b"}
+        assert admit_write(
+            "move_file",
+            {"source_path": "/media/a", "destination_path": "/media/dst"},
+            roots,
+        ) == {"source_path": "/media/a", "destination_path": "/media/dst"}
+        assert admit_write(
+            "copy_file", {"source_path": "/media/a", "destination_folder": "/media"},
+            roots,
+        ) == {"destination_folder": "/media"}
+        assert admit_write(
+            "create_directory", {"folder_path": "/media", "name": "x"}, roots
+        ) == {"folder_path": "/media", "name": "x"}
+
+    def test_unknown_tool_is_not_silently_admitted(self):
+        with pytest.raises(KeyError):
+            admit_write("delete", {"path": "/media/a"}, [ROOT])
 
 
 class TestHandlers:
