@@ -1,8 +1,8 @@
 """Opt-in tool profiles: which tools exist at all.
 
 Filtering happens at registration, so a withheld tool is absent from
-tools/list and cannot be called. Classification still runs for every tool, so
-an unclassified tool fails startup instead of hiding behind a profile.
+tools/list and cannot be called. Every `ToolSpec` carries its annotations, so
+there is no unclassified path that a profile could hide.
 """
 
 import sys
@@ -14,7 +14,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from config import config  # noqa: E402
 from mcp_server import SynologyMCPServer  # noqa: E402
-from tool_safety import TOOL_ANNOTATIONS  # noqa: E402
+from tools import ADDITIVE, ALL_TOOLS, ToolSpec  # noqa: E402
+
+_ANNOTATIONS = {spec.name: spec.annotations for spec in ALL_TOOLS}
 
 
 def server_for(profile, monkeypatch):
@@ -39,7 +41,7 @@ class TestProfiles:
         session_tools = {"synology_login", "synology_logout"}
         assert session_tools <= names
         for name in names - session_tools:
-            assert TOOL_ANNOTATIONS[name].read_only_hint is True, name
+            assert _ANNOTATIONS[name].read_only_hint is True, name
         assert "delete" not in names
         assert "create_directory" not in names
         assert "list_directory" in names
@@ -49,7 +51,7 @@ class TestProfiles:
         srv = server_for("no_destructive", monkeypatch)
         names = set(srv._tool_registry)
         for name in names:
-            assert TOOL_ANNOTATIONS[name].destructive_hint is not True, name
+            assert _ANNOTATIONS[name].destructive_hint is not True, name
         assert "delete" not in names
         assert "create_directory" in names
         assert "list_directory" in names
@@ -74,9 +76,17 @@ class TestProfiles:
         assert srv.tool_profile == "full"
         assert "delete" in srv._tool_registry
 
-    def test_classification_still_runs_for_withheld_tools(self, monkeypatch):
-        # An unclassified tool raises regardless of profile; otherwise a
-        # read-only deployment would never notice a missing classification.
+    def test_annotations_are_required_at_construction(self):
+        # The old name table failed at registration; now a spec cannot exist
+        # without a classification at all.
+        with pytest.raises(TypeError):
+            ToolSpec("brand_new_tool", "d", {"type": "object"}, lambda a: a)
+
+    def test_a_new_spec_is_still_filtered_by_profile(self, monkeypatch):
         srv = server_for("read_only", monkeypatch)
-        with pytest.raises(ValueError, match="no safety classification"):
-            srv._register_tool("brand_new_tool", "d", {"type": "object"}, lambda a: a)
+        before = srv._withheld_tools
+        srv._register_tool(
+            ToolSpec("brand_new_tool", "d", {"type": "object"}, lambda a: a, ADDITIVE)
+        )
+        assert "brand_new_tool" not in srv._tool_registry
+        assert srv._withheld_tools == before + 1

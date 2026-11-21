@@ -20,7 +20,8 @@ from mcp import types  # noqa: E402
 from audit import AuditLog  # noqa: E402
 from config import config  # noqa: E402
 from confirm import ConfirmationTokens  # noqa: E402
-from mcp_server import SynologyMCPServer, ToolFailureError  # noqa: E402
+from mcp_server import SynologyMCPServer, ToolFailureError
+from tools import DESTRUCTIVE, READ_ONLY, ToolSpec  # noqa: E402
 
 SECRET = b"0" * 32
 
@@ -61,16 +62,21 @@ def make_server(tmp_path):
         return [types.TextContent(type="text", text="executed")]
 
     srv._register_tool(
-        "delete",
-        "Delete a file",
-        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-        handler,
+        ToolSpec(
+            "delete",
+            "Delete a file",
+            {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            handler,
+            DESTRUCTIVE,
+        )
     )
 
     async def read_handler(arguments):
         return [types.TextContent(type="text", text="ok")]
 
-    srv._register_tool("synology_status", "Status", {"type": "object", "properties": {}}, read_handler)
+    srv._register_tool(
+        ToolSpec("synology_status", "Status", {"type": "object", "properties": {}}, read_handler, READ_ONLY)
+    )
     return srv, calls
 
 
@@ -247,7 +253,9 @@ def test_overwrite_requires_form_before_handler_runs(tmp_path, name):
     async def write(arguments):
         calls.append(arguments)
         return [types.TextContent(type="text", text="written")]
-    srv._register_tool(name, "Write", {"type": "object", "properties": {}}, write)
+    srv._register_tool(
+        ToolSpec(name, "Write", {"type": "object", "properties": {}}, write, DESTRUCTIVE)
+    )
     args = {"path": "/media/existing", "overwrite": True}
     first = asyncio_run(srv._dispatch_tool(name, args, FakeContext()))
     assert isinstance(first, types.InputRequiredResult)
@@ -314,7 +322,9 @@ def test_configuration_and_password_overwrites_require_confirmation(tmp_path, na
     async def handler(arguments):
         calls.append(arguments)
         return [types.TextContent(type="text", text="written")]
-    srv._register_tool(name, "Write", {"type": "object", "properties": {}}, handler)
+    srv._register_tool(
+        ToolSpec(name, "Write", {"type": "object", "properties": {}}, handler, DESTRUCTIVE)
+    )
     result = asyncio_run(srv._dispatch_tool(name, args, FakeContext()))
     assert isinstance(result, types.InputRequiredResult)
     assert calls == []
@@ -351,7 +361,9 @@ def test_structured_dsm_failure_is_audited_as_error(tmp_path):
     failure = {"success": False, "error": {"code": 105}}
     async def fail(arguments):
         return [types.TextContent(type="text", text=json.dumps(failure))]
-    srv._register_tool("synology_status", "Status", {"type": "object"}, fail)
+    srv._register_tool(
+        ToolSpec("synology_status", "Status", {"type": "object"}, fail, READ_ONLY)
+    )
     asyncio_run(srv._dispatch_tool("synology_status", {}))
     last = audit_lines(tmp_path)[-1]
     assert last["outcome"] == "error"

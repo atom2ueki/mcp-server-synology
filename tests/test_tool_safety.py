@@ -11,8 +11,8 @@ MCP layer:
     download names) is returned inside an untrusted-data fence, so a crafted
     file name reads as data rather than as instructions to the model.
 
-The three lists below are the classification under review. A tool that is not
-in exactly one of them fails the suite.
+The three sets below are the classification under review. Every spec must be
+in exactly one of them, and the catalog is the single place a tool declares it.
 """
 
 import asyncio
@@ -24,7 +24,10 @@ import pytest
 from mcp import Client
 
 from config import config
-from tool_safety import annotations_for
+from tools import ALL_TOOLS, LOGIN_TOOL, LOGOUT_TOOL, ToolSpec
+from tools._common import ADDITIVE as ADDITIVE_ANNOTATIONS
+from tools._common import DESTRUCTIVE as DESTRUCTIVE_ANNOTATIONS
+from tools._common import READ_ONLY as READ_ONLY_ANNOTATIONS
 
 # Changes nothing on the NAS.
 READ_ONLY = {
@@ -170,25 +173,36 @@ def _tools(server):
 
 
 class TestClassification:
-    def test_source_lists_do_not_overlap(self):
-        """Disjointness is asserted on tool_safety's own tuples, not this
-        file's copies -- a name in two source lists would otherwise be
-        resolved silently by the last-write-wins dict merge."""
-        import tool_safety
+    SPECS = (*ALL_TOOLS, LOGIN_TOOL, LOGOUT_TOOL)
 
-        ro, ad, de = (
-            set(tool_safety._READ_ONLY_TOOLS),
-            set(tool_safety._ADDITIVE_TOOLS),
-            set(tool_safety._DESTRUCTIVE_TOOLS),
-        )
-        assert not ro & ad and not ro & de and not ad & de
+    def test_expected_sets_do_not_overlap(self):
+        """A name in two sets would hide a misclassification."""
+        assert not READ_ONLY & ADDITIVE
+        assert not READ_ONLY & DESTRUCTIVE
+        assert not ADDITIVE & DESTRUCTIVE
+
+    def test_every_spec_is_in_exactly_one_expected_set(self):
+        names = {spec.name for spec in self.SPECS}
+        assert names == READ_ONLY | ADDITIVE | DESTRUCTIVE
+
+    def test_each_spec_uses_the_matching_annotation_constant(self):
+        for spec in self.SPECS:
+            expected = (
+                READ_ONLY_ANNOTATIONS
+                if spec.name in READ_ONLY
+                else ADDITIVE_ANNOTATIONS
+                if spec.name in ADDITIVE
+                else DESTRUCTIVE_ANNOTATIONS
+            )
+            assert spec.annotations is expected, spec.name
 
     def test_mutating_one_tools_annotations_reclassifies_no_other(self, monkeypatch):
-        """annotations_for hands out per-registration copies, so one bad
-        assignment cannot flip a whole bucket."""
-        first = annotations_for("list_directory")
+        """Registration hands out per-tool copies, so one bad assignment cannot
+        flip a whole bucket."""
+        server = _server(monkeypatch)
+        first = _tools(server)["list_directory"].annotations
         first.read_only_hint = False
-        second = annotations_for("get_file_info")
+        second = _tools(server)["get_file_info"].annotations
         assert second.read_only_hint is True
 
     def test_every_registered_tool_is_classified(self, monkeypatch):
@@ -199,13 +213,11 @@ class TestClassification:
     @pytest.mark.parametrize("name", sorted(READ_ONLY))
     def test_read_only(self, monkeypatch, name):
         annotations = _tools(_server(monkeypatch))[name].annotations
-        assert annotations is not None
         assert annotations.read_only_hint is True
 
     @pytest.mark.parametrize("name", sorted(ADDITIVE))
     def test_additive(self, monkeypatch, name):
         annotations = _tools(_server(monkeypatch))[name].annotations
-        assert annotations is not None
         assert annotations.read_only_hint is False
         # Must be explicit: MCP treats an absent destructiveHint as true.
         assert annotations.destructive_hint is False
@@ -213,16 +225,22 @@ class TestClassification:
     @pytest.mark.parametrize("name", sorted(DESTRUCTIVE))
     def test_destructive(self, monkeypatch, name):
         annotations = _tools(_server(monkeypatch))[name].annotations
-        assert annotations is not None
         assert annotations.read_only_hint is False
         assert annotations.destructive_hint is True
 
-    def test_unclassified_tool_is_refused_at_registration(self, monkeypatch):
-        """A new tool must be classified; it can't ship unannotated by accident."""
+    def test_spec_requires_annotations(self):
+        """A tool cannot be declared without a classification."""
+        with pytest.raises(TypeError):
+            ToolSpec("not_a_real_tool", "x", {"type": "object", "properties": {}}, lambda a: None)
+
+    def test_unknown_handler_is_caught_at_registration(self, monkeypatch):
         server = _server(monkeypatch)
-        with pytest.raises(ValueError, match="not_a_real_tool"):
+        with pytest.raises(AttributeError):
             server._register_tool(
-                "not_a_real_tool", "x", {"type": "object", "properties": {}}, lambda a: None
+                ToolSpec(
+                    "not_a_real_tool", "x", {"type": "object", "properties": {}},
+                    "_no_such_handler", READ_ONLY_ANNOTATIONS,
+                )
             )
 
 

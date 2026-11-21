@@ -363,7 +363,7 @@ Every tool call appends a JSON result record to `logs/audit.jsonl` — the tool,
 - **Secrets are masked by key name** (`password`, `passwd`, `token`, `api_key`, `session`, `sid`, `chap_password`, …); long values such as file bodies are truncated to 512 characters.
 - **Rotation** is size-based: `audit.jsonl` → `.1` … `.5` by default.
 
-Tools also carry **MCP annotations** (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) derived from one risk table in `src/tool_policy.py`. They let a client with approval UI prompt on the calls that matter. They are **hints, not enforcement** — a client may ignore them, and the server never relies on them for safety. An unclassified tool falls back to `destructive`, per the spec's pessimistic default.
+Tools also carry **MCP annotations** (`readOnlyHint`, `destructiveHint`), declared on each tool's `ToolSpec` in `src/tools/` next to its description, JSON schema and handler. A spec cannot be constructed without a classification, so no tool can ship unannotated. They let a client with approval UI prompt on the calls that matter, but they are **hints, not enforcement** — a client may ignore them, and the server never relies on them for safety (`tool_policy.risk_for` derives its own tier and the confirmation gate uses that).
 
 ### Destructive calls need confirmation
 

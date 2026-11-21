@@ -150,6 +150,15 @@
   unconditionally, so a call without it failed with a bare `KeyError: 'repository'`.
 
 ### Changed
+- **One declaration per tool** — `src/tools/` now holds a `ToolSpec` per tool with
+  its description, JSON schema, handler and MCP safety annotations. The
+  `tool_safety` name tables, `annotations_for()` and `unclassified()` are gone;
+  a tool cannot be declared without a classification, and an unknown handler
+  fails at registration. `tools/list` keeps its previous order, schemas,
+  descriptions and annotations (verified against the old registry).
+- File Station handlers share `_base_url_for`/`_filestation_for`; write
+  handlers still admit the target before resolving a session, so a refused
+  path is reported first.
 - **`delete` no longer executes on the first call by default.** It returns
   a standard confirmation form, or `confirmation_required` for unsupported clients. Set `MCP_CONFIRM=off` to restore
   the old single-call behaviour; the audit trail still records every call.
