@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-21
+
 ### Added
 - **Published Docker image** — a new `docker-publish.yml` workflow builds the existing `Dockerfile`
   for `linux/amd64` and `linux/arm64` and pushes it to
@@ -19,9 +21,10 @@
   every write still refuses share/volume/filesystem roots. Empty (default) keeps prior
   behaviour. (#140)
 - **`MCP_TOOL_PROFILE`** — `full` (default), `no_destructive` or `read_only` filters the
-  tool registry at registration, so a withheld tool is never listed and cannot be called.
-  Classification still runs for every tool, so an unclassified one still fails startup.
-  Same key as `server.tool_profile` in settings.json.
+  tool registry at registration, so a withheld tool is never listed and cannot be called. A
+  `ToolSpec` cannot be declared without annotations, so there is no unclassified path a
+  profile could hide; session tools stay available in every profile. Same key as
+  `server.tool_profile` in settings.json.
 - **Container details no longer leak environment values** — `synology_container_get`
   returns `env_keys` (variable names only) for `Config.Env` and `profile.env_variables`;
   credential-shaped keys are dropped at any depth. `get_project` benefits from the same
@@ -46,19 +49,14 @@
   `audit_unavailable` if it is not; **after** any call the append is best
   effort, because the action already happened and a lost line must not turn a
   success into an error for the caller.
-- **One classification table, two views** — `src/tool_safety.py` owns the MCP
-  annotations (`readOnlyHint` / `destructiveHint`) for every tool, refuses to
-  register a tool nobody classified, and fences NAS-sourced result text as
-  untrusted data; `src/tool_policy.py` derives the server's own risk tier
-  (`read` / `additive` / `destructive`, plus dynamic escalation when
-  `overwrite=true` or a password argument appears) from that same table — the
-  tier the audit trail records and the confirmation gate keys off. The
-  annotations are hints, not enforcement; an unclassified tool falls back to
-  `destructive`, matching the spec's pessimistic default. A `{name, value}`
-  header record (as in `custom_headers`) masks its value when the name is a
-  credential header, so a bearer token never reaches the trail. A DSM update
-  install without `confirm=true` is a read-only precheck and stays outside
-  the confirmation gate.
+- **Per-tool risk tier, derived from the tool's own annotations** — `src/tool_policy.py`
+  maps the declared MCP hints to the tier the audit trail records and the confirmation
+  gate uses (`read` / `additive` / `destructive`), plus dynamic escalation when
+  `overwrite=true` or a password argument appears. The declared hints are what a client
+  may act on; the server's own gate never relies on the client honouring them. A
+  `{name, value}` header record (as in `custom_headers`) masks its value when the name is
+  a credential header, so a bearer token never reaches the trail. A DSM update install
+  without `confirm=true` is a read-only precheck and stays outside the confirmation gate.
 - **`skills/synology-recovery/`** — the snapshot-restore runbook distilled from
   a real incident: inventory, snapshot-vs-live diff, missing-only restore with
   `cp --reflink=always` (2.3 TB back in minutes, no extra space), verification by
@@ -114,13 +112,14 @@
   error, never as a plain failure. Enabling auto-block is refused
   while the allow list is empty. The tools are classified in `src/tool_safety.py`. (#130)
 
-- **MCP safety annotations on every tool.** Each tool now carries `ToolAnnotations`: 54 are
-  read-only, 20 additive (create, start, pause, grant, download; `destructiveHint: false`), and 35
-  destructive (delete, overwrite, rename, stop, replace config, remove access, change security
-  settings). Clients use these hints to decide what to auto-approve and what to confirm; without
-  them MCP treats every tool as destructive, so a client could not tell `list_directory` from
-  `delete`. The classification lives in `src/tool_safety.py`, and registering a tool that is not
-  in it raises, so a new tool cannot ship unclassified.
+- **MCP safety annotations on every tool.** Each tool declares `ToolAnnotations` on its
+  `ToolSpec`: 54 are read-only, 18 additive (create, start, pause, grant, download;
+  `destructiveHint: false`), and 35 destructive (delete, overwrite, rename, stop, replace
+  config, remove access, change security settings), plus the conditional login/logout pair
+  (also additive). Clients use these hints to decide what to auto-approve and what to
+  confirm; without them MCP treats every tool as destructive, so a client could not tell
+  `list_directory` from `delete`. A spec cannot exist without annotations, and an omitted
+  `destructiveHint` stays destructive, matching the protocol default.
 - **Tool output is fenced as untrusted data.** Every successful result is wrapped in an
   `<untrusted-data id="...">` block with a one-line preamble telling the model the content came
   from the NAS and is data, not instructions. File names, file contents, container logs and
@@ -170,8 +169,9 @@
   its description, JSON schema, handler and MCP safety annotations. The
   `tool_safety` name tables, `annotations_for()` and `unclassified()` are gone;
   a tool cannot be declared without a classification, and an unknown handler
-  fails at registration. `tools/list` keeps its previous order, schemas,
-  descriptions and annotations (verified against the old registry).
+  fails at registration. `tools/list` returns the same 107 tools with the same
+  descriptions, schemas and annotations (verified against the old registry);
+  only `synology_health_summary` moves position, to sit with the health tools.
 - File Station handlers share `_base_url_for`/`_filestation_for`; write
   handlers still admit the target before resolving a session, so a refused
   path is reported first.
