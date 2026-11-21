@@ -113,6 +113,13 @@ class ToolFailureError(Exception):
         self.payload = payload
 
 
+def tool_failure(code: str, message: str) -> ToolFailureError:
+    """Build the one error body every tool refusal and failure uses."""
+    return ToolFailureError(
+        {"success": False, "error": {"code": code, "message": message}}
+    )
+
+
 def _answer_approved(answer: object) -> bool:
     """True only for an explicit `accept` carrying `approve: true`.
 
@@ -708,9 +715,7 @@ class SynologyMCPServer:
 
     @staticmethod
     def _write_error(code: str, exc: ValueError) -> "ToolFailureError":
-        return ToolFailureError(
-            {"success": False, "error": {"code": code, "message": str(exc)}}
-        )
+        return tool_failure(code, str(exc))
 
     def _admit_write_args(
         self, tool: str, arguments: dict, base_url: str
@@ -1198,17 +1203,12 @@ class SynologyMCPServer:
                     required=True,
                 )
             except AuditUnavailableError as exc:
-                raise ToolFailureError({
-                    "success": False,
-                    "error": {
-                        "code": "audit_unavailable",
-                        "message": (
-                            f"Refused '{name}': the audit trail cannot be written "
-                            f"({exc}). Fix MCP_AUDIT_LOG or set MCP_AUDIT=false "
-                            "to run without a trail."
-                        ),
-                    },
-                }) from exc
+                raise tool_failure(
+                    "audit_unavailable",
+                    f"Refused '{name}': the audit trail cannot be written "
+                    f"({exc}). Fix MCP_AUDIT_LOG or set MCP_AUDIT=false "
+                    "to run without a trail.",
+                ) from exc
 
         started = time.perf_counter()
         try:
@@ -1788,10 +1788,7 @@ class SynologyMCPServer:
         try:
             path = validate_delete_path(arguments["path"])
         except ValueError as exc:
-            raise ToolFailureError({
-                "success": False,
-                "error": {"code": "invalid_delete_path", "message": str(exc)},
-            }) from exc
+            raise tool_failure("invalid_delete_path", str(exc)) from exc
         base_url = await asyncio.to_thread(self._get_base_url, arguments)
         try:
             path = ensure_within_roots(
@@ -1802,10 +1799,9 @@ class SynologyMCPServer:
         filestation = self._get_filestation(base_url)
         policy = TrashPolicy(config.trash_mode, config.trash_dir)
         if policy.mode not in {"auto", "always", "never"}:
-            raise ToolFailureError({
-                "success": False,
-                "error": {"code": "invalid_trash_policy", "message": "MCP_TRASH must be auto, always, or never"},
-            })
+            raise tool_failure(
+                "invalid_trash_policy", "MCP_TRASH must be auto, always, or never"
+            )
         try:
             trash_root = trash_root_for(path, policy)
         except TrashUnavailableError:
@@ -1813,14 +1809,11 @@ class SynologyMCPServer:
         if trash_root and (path == trash_root or path.startswith(trash_root + "/")):
             # Falling through to the hard delete would erase every recovery
             # entry; a purge needs its own explicit operation.
-            raise ToolFailureError({
-                "success": False,
-                "error": {
-                    "code": "trash_root_delete",
-                    "message": f"Refused: {path} is inside the trash ({trash_root}). "
-                               "Trash purging is not exposed as a delete path.",
-                },
-            })
+            raise tool_failure(
+                "trash_root_delete",
+                f"Refused: {path} is inside the trash ({trash_root}). "
+                "Trash purging is not exposed as a delete path.",
+            )
 
         placement: dict = {"soft_delete": False}
         if policy.enabled:
@@ -2007,7 +2000,7 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed("Changing Telnet/SSH")
         changes = {k: arguments[k] for k in ("enable_telnet", "enable_ssh") if k in arguments}
         if not changes or not all(isinstance(v, bool) for v in changes.values()):
-            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "Give enable_telnet and/or enable_ssh as booleans."}})
+            raise tool_failure("invalid_argument", "Give enable_telnet and/or enable_ssh as booleans.")
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
         return self._emit_or_raise(await asyncio.to_thread(security.set_terminal, **changes))
@@ -2018,9 +2011,9 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed("Changing auto-block")
         changes = {k: arguments[k] for k in ("enable", "attempts", "within_minutes", "expire_days") if k in arguments}
         if not changes:
-            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "Nothing to change."}})
+            raise tool_failure("invalid_argument", "Nothing to change.")
         if "enable" in changes and not isinstance(changes["enable"], bool):
-            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "enable must be a boolean."}})
+            raise tool_failure("invalid_argument", "enable must be a boolean.")
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
         return self._emit_or_raise(await asyncio.to_thread(security.set_auto_block, **changes))
@@ -2031,7 +2024,7 @@ class SynologyMCPServer:
             raise self._refuse_unconfirmed("Changing the auto-block allow list")
         entries = arguments.get("entries")
         if not isinstance(entries, list) or not entries or not all(isinstance(e, str) and e.strip() for e in entries):
-            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "entries must be a non-empty list of strings."}})
+            raise tool_failure("invalid_argument", "entries must be a non-empty list of strings.")
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
         return self._emit_or_raise(await asyncio.to_thread(getattr(security, method_name), [e.strip() for e in entries]))
@@ -2041,7 +2034,7 @@ class SynologyMCPServer:
         if not self._is_confirmed(arguments):
             raise self._refuse_unconfirmed("Changing DSM's HTTPS redirect")
         if not isinstance(arguments.get("enable"), bool):
-            raise ToolFailureError({"success": False, "error": {"code": "invalid_argument", "message": "enable must be a boolean."}})
+            raise tool_failure("invalid_argument", "enable must be a boolean.")
         base_url = await self._resolve_base_url(arguments)
         security = self._get_security(base_url)
         return self._emit_or_raise(await asyncio.to_thread(security.set_https_redirect, arguments["enable"]))
@@ -2324,9 +2317,7 @@ class SynologyMCPServer:
         try:
             lun_uuids = _uuid_list(arguments["lun_uuids"], "lun_uuids")
         except ValueError as exc:
-            raise ToolFailureError(
-                {"success": False, "error": {"code": "invalid_argument", "message": str(exc)}}
-            )
+            raise tool_failure("invalid_argument", str(exc))
         if not lun_uuids:
             # all([]) is True, so this would otherwise touch the NAS not at all
             # and report success.

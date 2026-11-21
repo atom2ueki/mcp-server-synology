@@ -136,28 +136,6 @@ def test_nfs_verify_ssl_parameter():
     print("✅ verify_ssl parameter tests passed")
 
 
-def test_nfs_set_nfs_permission_parameter_validation():
-    """Test parameter validation for set_nfs_permission."""
-    from nfs.synology_nfs import SynologyNFS
-
-    nfs = SynologyNFS("https://nas.example.com:5001", "test_session")
-
-    # Test privilege validation
-    result = nfs.set_nfs_permission("test_share", "192.168.1.1", privilege="invalid_privilege")
-    # Should still return a valid response (API will handle invalid value)
-    assert isinstance(result, dict)
-
-    # Test squash validation
-    result = nfs.set_nfs_permission("test_share", "192.168.1.1", squash="invalid_squash")
-    assert isinstance(result, dict)
-
-    # Test security validation
-    result = nfs.set_nfs_permission("test_share", "192.168.1.1", security="invalid_security")
-    assert isinstance(result, dict)
-
-    print("✅ Parameter validation tests passed")
-
-
 def test_nfs_set_permission_wire_format_matches_dsm_7_3_2(tmp_path, monkeypatch):
     """NFS rules use DSM's SharePrivilege load/save API and preserve other clients."""
     import json

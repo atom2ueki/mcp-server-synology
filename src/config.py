@@ -23,39 +23,7 @@ XDG_CONFIG_HOME: Path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".c
 CONFIG_DIR = XDG_CONFIG_HOME / "synology-mcp"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
-# Example settings.json structure for documentation
-SETTINGS_JSON_EXAMPLE = """
-{
-  "synology": {
-    "nas1": {
-      "host": "192.168.1.100",
-      "port": 5000,
-      "username": "admin",
-      "password": "your_password",
-      "note": "Primary NAS at home"
-    },
-    "nas2": {
-      "host": "192.168.1.200",
-      "port": 5001,
-      "username": "admin",
-      "password": "your_password",
-      "note": "Backup NAS"
-    }
-  },
-  "xiaozhi": {
-    "enabled": false,
-    "token": "your_xiaozhi_token",
-    "endpoint": "wss://api.xiaozhi.me/mcp/"
-  },
-  "server": {
-    "auto_login": true,
-    "verify_ssl": false,
-    "session_timeout": 3600,
-    "debug": false,
-    "log_level": "INFO"
-  }
-}
-"""
+
 
 
 class SynologyConfig:
@@ -702,15 +670,6 @@ class SynologyConfig:
             netloc = f"{host}:{port}"
         return urlunsplit((scheme, netloc, parts.path, "", ""))
 
-    @staticmethod
-    def get_config_dir() -> Path:
-        """Return the XDG config directory path."""
-        return CONFIG_DIR
-
-    @staticmethod
-    def get_settings_file() -> Path:
-        """Return the settings file path."""
-        return SETTINGS_FILE
 
     def get_nas_names(self) -> List[str]:
         """Return the list of configured NAS names."""

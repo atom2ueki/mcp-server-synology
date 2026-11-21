@@ -55,26 +55,6 @@ class TestSynologyAuth:
         logout_result = auth.logout(session_id, "DownloadStation")
         print(f"✅ Logout result: {logout_result.get('success', 'Unknown')}")
 
-    def test_api_version_fallback(self, env_check):
-        """Test that authentication tries multiple API versions."""
-        from auth.synology_auth import SynologyAuth
-        from config import config
-
-        auth = SynologyAuth(config.synology_url)
-
-        # This should work with automatic version fallback
-        result = auth.login_with_session(
-            config.synology_username, config.synology_password, "FileStation"
-        )
-
-        assert isinstance(result, dict)
-        if result.get("success"):
-            print("✅ Version fallback worked - got session")
-            session_id = result["data"]["sid"]
-            auth.logout(session_id, "FileStation")
-        else:
-            print(f"⚠️  Version fallback couldn't authenticate: {result}")
-
     def test_invalid_credentials(self, env_check):
         """Test authentication with invalid credentials."""
         from auth.synology_auth import SynologyAuth

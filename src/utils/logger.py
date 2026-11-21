@@ -52,7 +52,3 @@ def setup_logger(
         logger.addHandler(file_handler)
 
     return logger
-
-
-# Default logger instance
-default_logger = setup_logger()

@@ -148,46 +148,6 @@ class SynologyFileStation:
 
         return response.json()
 
-    def _make_upload_request(
-        self, api: str, version: str, method: str, files: Dict[str, Any], **params
-    ) -> Dict[str, Any]:
-        """Make an upload request to Synology API.
-
-        NOTE: this path deliberately does NOT recover from DSM error 119, unlike
-        `_make_request`. Uploads are multipart and `files` holds file streams
-        that have already been consumed by the first attempt; a blind replay
-        would send truncated content. Retrying safely needs stream rewinding or
-        re-opening the file, which is a larger change than this method should
-        take on. A 119 here surfaces to the caller as-is.
-        """
-        request_params = {
-            "api": api,
-            "version": version,
-            "method": method,
-            "_sid": self.session_id,
-            **params,
-        }
-
-        # Multipart upload — let requests set Content-Type with the boundary;
-        # we only thread the X-SYNO-TOKEN header (no charset override here).
-        upload_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
-        response = requests.post(
-            self.api_url,
-            params=request_params,
-            files=files,
-            headers=upload_headers,
-            verify=self.verify_ssl,
-            timeout=15,
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        if not data.get("success"):
-            error_code = data.get("error", {}).get("code", "unknown")
-            raise Exception(f"Synology API error: {error_code}")
-
-        return data.get("data", {})
-
     @staticmethod
     def _extract_size(file_info: Dict[str, Any]) -> int:
         """Pull the byte size out of a FileStation file entry.

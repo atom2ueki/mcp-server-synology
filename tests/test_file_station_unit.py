@@ -400,3 +400,18 @@ class TestMoveFileRename:
         with pytest.raises(Exception, match="already exists"):
             fs.move_file("/share/src/clip.mp4", "/share/dst/case_01.mp4")
         assert calls == []  # nothing mutated before the pre-check
+
+
+def test_format_path_normalizes_the_callers_spelling():
+    client = make_client()
+    cases = [
+        ("home", "/home"),
+        ("/home", "/home"),
+        ("home/", "/home"),
+        ("/home/", "/home"),
+        ("/", "/"),
+        ("", "/"),
+        ("path/to/file", "/path/to/file"),
+    ]
+    for raw, expected in cases:
+        assert client._format_path(raw) == expected, raw

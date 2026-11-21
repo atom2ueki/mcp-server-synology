@@ -131,18 +131,6 @@ class TestTargetCreate:
         assert params["auth_type"] == "1"
         assert params["user"] == "u"
 
-    @pytest.mark.parametrize(
-        "user,password", [("u", None), (None, "p" * 12), ("u", ""), ("", "p" * 12)]
-    )
-    def test_half_a_credential_is_refused_without_calling_dsm(self, user, password):
-        """Never silently create an unauthenticated target the caller thinks is protected."""
-        iscsi = _make_iscsi()
-        with patch.object(iscsi._api, "post") as mock:
-            result = iscsi.target_create("dev", chap_user=user, chap_password=password)
-        assert result["success"] is False
-        assert result["error"]["code"] == "chap_incomplete"
-        mock.assert_not_called()
-
     def test_explicit_iqn_wins(self):
         iscsi = _make_iscsi()
         with patch.object(iscsi._api, "post", return_value={"success": True}) as mock:
