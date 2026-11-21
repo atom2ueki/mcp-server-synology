@@ -102,6 +102,8 @@ docker-compose up -d
 docker-compose up -d --build
 ```
 
+Instead of building locally, you can pull the published image and use it in `docker-compose.yml` exactly as described for the HTTP compose file in [Pre-built image](#pre-built-image) below — replace `build: .` with `image: ghcr.io/atom2ueki/mcp-server-synology:latest` (or a pinned `X.Y.Z`).
+
 ### 4️⃣ Alternative: Local Python
 
 ```bash
