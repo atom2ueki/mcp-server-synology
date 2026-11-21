@@ -45,6 +45,18 @@ class TestRiskView:
         for name in ("delete", "synology_terminal_set"):
             assert risk_for(SPECS[name].annotations, name) is Risk.DESTRUCTIVE
 
+    def test_incomplete_write_hints_are_destructive(self):
+        # MCP stores an omitted destructiveHint as None, whose default is
+        # destructive; only an explicit false may downgrade a write.
+        assert risk_for(
+            types.ToolAnnotations(read_only_hint=False), "some_new_write"
+        ) is Risk.DESTRUCTIVE
+
+    def test_read_only_wins_over_an_omitted_destructive_hint(self):
+        assert risk_for(
+            types.ToolAnnotations(read_only_hint=True), "some_new_read"
+        ) is Risk.READ
+
     def test_dsm_install_precheck_is_read_only(self):
         # The handler's no-confirm branch runs DSM's pre-install checks only.
         hints = SPECS["synology_dsm_update_install"].annotations

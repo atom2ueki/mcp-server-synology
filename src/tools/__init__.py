@@ -33,7 +33,9 @@ _ALL = (
     *_USERS,
 )
 
-_NAMES = [spec.name for spec in _ALL]
+# Session specs stay out of ALL_TOOLS but share the namespace; a duplicate
+# would silently shadow one registration.
+_NAMES = [spec.name for spec in (*_ALL, LOGIN_TOOL, LOGOUT_TOOL)]
 _DUPLICATES = {name for name in _NAMES if _NAMES.count(name) > 1}
 if _DUPLICATES:
     raise ValueError(f"duplicate tool specs: {', '.join(sorted(_DUPLICATES))}")

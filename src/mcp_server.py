@@ -294,7 +294,10 @@ class SynologyMCPServer:
             return True
         if spec.annotations.read_only_hint:
             return True
-        return self.tool_profile == "no_destructive" and not spec.annotations.destructive_hint
+        return (
+            self.tool_profile == "no_destructive"
+            and spec.annotations.destructive_hint is False
+        )
 
     def _register_tool(self, spec: ToolSpec) -> None:
         """Register one declarative tool, resolving its handler."""

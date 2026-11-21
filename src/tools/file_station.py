@@ -15,7 +15,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -35,7 +35,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -59,7 +59,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -83,7 +83,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -112,7 +112,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -146,7 +146,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -174,7 +174,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -210,7 +210,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -245,7 +245,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -284,7 +284,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -315,7 +315,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",

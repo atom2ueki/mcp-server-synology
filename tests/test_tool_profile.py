@@ -8,6 +8,7 @@ there is no unclassified path that a profile could hide.
 import sys
 from pathlib import Path
 
+import mcp.types as types
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -84,6 +85,19 @@ class TestProfiles:
         # without a classification at all.
         with pytest.raises(TypeError):
             ToolSpec("brand_new_tool", "d", {"type": "object"}, lambda a: a)
+
+    def test_incomplete_hints_are_withheld_by_no_destructive(self, monkeypatch):
+        # destructive_hint=None means the protocol default (destructive).
+        srv = server_for("no_destructive", monkeypatch)
+        before = srv._withheld_tools
+        srv._register_tool(
+            ToolSpec(
+                "incomplete_write", "d", {"type": "object"},
+                lambda a: a, types.ToolAnnotations(read_only_hint=False),
+            )
+        )
+        assert "incomplete_write" not in srv._tool_registry
+        assert srv._withheld_tools == before + 1
 
     def test_a_new_spec_is_still_filtered_by_profile(self, monkeypatch):
         srv = server_for("read_only", monkeypatch)

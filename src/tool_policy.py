@@ -47,6 +47,8 @@ def risk_for(
         return Risk.READ
     if annotations.read_only_hint:
         return Risk.READ
-    if not annotations.destructive_hint:
+    # MCP stores an omitted destructiveHint as None, whose protocol default is
+    # destructive. Only an explicit false may downgrade a write to additive.
+    if annotations.destructive_hint is False:
         return Risk.ADDITIVE
     return Risk.DESTRUCTIVE

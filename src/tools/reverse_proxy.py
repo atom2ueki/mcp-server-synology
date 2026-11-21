@@ -15,7 +15,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -36,7 +36,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -60,7 +60,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -81,7 +81,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -183,7 +183,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
@@ -202,7 +202,7 @@ TOOLS = (
                 "source_protocol": {
                     "type": "string",
                     "enum": ["HTTP", "HTTPS"],
-                    "description": "Protocol of the public listener (default: HTTPS)",
+                    "description": "Protocol of the public listener. Omitted keeps the stored value.",
                 },
                 "source_hostname": {
                     "type": "string",
@@ -211,12 +211,12 @@ TOOLS = (
                 },
                 "source_port": {
                     "type": "integer",
-                    "description": "Port of the public listener (default: 443)",
+                    "description": "Port of the public listener. Omitted keeps the stored value.",
                 },
                 "destination_protocol": {
                     "type": "string",
                     "enum": ["HTTP", "HTTPS"],
-                    "description": "Protocol used to reach the destination (default: HTTP)",
+                    "description": "Protocol used to reach the destination. Omitted keeps the stored value.",
                 },
                 "destination_hostname": {
                     "type": "string",
@@ -258,17 +258,17 @@ TOOLS = (
                 },
                 "proxy_connect_timeout": {
                     "type": "integer",
-                    "description": "Seconds to wait when connecting to "
-                    "the destination (default: 60)",
+                    "description": "Seconds to wait when connecting to the "
+                    "destination. Omitted keeps the stored value.",
                 },
                 "proxy_read_timeout": {
                     "type": "integer",
                     "description": "Seconds to wait for a response from the "
-                    "destination (default: 60)",
+                    "destination. Omitted keeps the stored value.",
                 },
                 "proxy_send_timeout": {
                     "type": "integer",
-                    "description": "Seconds to wait while sending to the destination (default: 60)",
+                    "description": "Seconds to wait while sending to the destination. Omitted keeps the stored value.",
                 },
             },
             "required": ["uuid"],
@@ -284,7 +284,7 @@ TOOLS = (
             "properties": {
                 "nas_name": {
                     "type": "string",
-                    "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                    "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                 },
                 "base_url": {
                     "type": "string",
