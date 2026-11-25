@@ -1079,3 +1079,33 @@ def test_container_health_summary_rejects_non_list_containers_field(containers):
         result = container.health_summary()
     assert result["success"] is False
     assert result["error"]["code"] == "invalid_inventory"
+
+
+def test_project_update_omits_container_environment_from_response():
+    """DSM echoes full container inspect output on update; env values must not reach the caller."""
+    container = _container()
+
+    with patch(
+        "utils.synology_api.requests.post",
+        side_effect=[
+            _successful_response({"abc-123": {"id": "abc-123", "name": "media"}}),
+            _successful_response(
+                {
+                    "id": "abc-123",
+                    "name": "media",
+                    "content": "services:\n  app:\n    environment:\n      TOKEN: secret",
+                    "containers": [
+                        {
+                            "Name": "/media-app",
+                            "Config": {"Image": "caddy:latest", "Env": ["TOKEN=secret", "DB_PASSWORD=secret"]},
+                        }
+                    ],
+                }
+            ),
+        ],
+    ):
+        result = container.update_project(name="media", content="services: {}\n")
+
+    assert result["success"] is True
+    assert "secret" not in json.dumps(result)
+    assert result["data"]["containers"][0]["Config"]["Image"] == "caddy:latest"

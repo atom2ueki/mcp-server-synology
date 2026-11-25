@@ -398,8 +398,10 @@ class SynologyContainer:
         }
 
         result = self._make_request(self.project_api, self.project_version, "create", **params)
-        if not result.get("success") or not content:
+        if not result.get("success"):
             return result
+        if not content:
+            return self._sanitize_details(result)
 
         return self.update_project(name, content)
 
@@ -427,7 +429,11 @@ class SynologyContainer:
         if service_portal_protocol is not None:
             params["service_portal_protocol"] = json.dumps(service_portal_protocol)
 
-        return self._make_request(self.project_api, self.project_version, "update", **params)
+        result = self._make_request(self.project_api, self.project_version, "update", **params)
+        if not result.get("success"):
+            return result
+        # DSM echoes full docker-inspect output (Config.Env included) for each container
+        return self._sanitize_details(result)
 
     def list_images(
         self, offset: int = 0, limit: int = -1, show_dsm: bool = False
